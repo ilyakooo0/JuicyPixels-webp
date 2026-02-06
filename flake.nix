@@ -71,6 +71,8 @@
                     disableExecutableProfiling
                   ]
                 );
+                # Fix QuickCheck version constraint issue
+                selective = pkgs.haskell.lib.doJailbreak hprev.selective;
               })
             ];
           }).pkgSet;
