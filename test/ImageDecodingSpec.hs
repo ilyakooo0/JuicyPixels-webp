@@ -28,13 +28,13 @@ spec = describe "Image Decoding" $ do
         Right _ -> expectationFailure "Should reject invalid signature"
 
   describe "VP8 Lossy Decoding" $ do
-    it "decodes minimal lossy image (stub)" $ do
+    it "decodes minimal lossy image" $ do
       let img = makeMinimalVP8Image 16 16
       case decodeWebP img of
         Right (ImageRGB8 image) -> do
-          -- VP8 decoder is a stub, returns 1x1 black image
-          imageWidth image `shouldBe` 1
-          imageHeight image `shouldBe` 1
+          -- VP8 decoder now returns actual dimensions (simplified implementation)
+          imageWidth image `shouldBe` 16
+          imageHeight image `shouldBe` 16
         Right _ -> expectationFailure "Expected RGB8 image"
         Left err -> expectationFailure $ "Decode failed: " ++ err
 
