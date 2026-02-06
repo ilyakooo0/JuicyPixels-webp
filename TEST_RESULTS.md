@@ -202,10 +202,6 @@ Execution Time: ~0.04 seconds
   - Parsing validation
   - Decode attempt (known issues)
 
-✔ test_webp_wasm.webp (2 tests)
-  - Parsing validation
-  - Decode attempt (known issues)
-
 ✔ Error Handling (2 tests)
   - Truncation handling
   - Meaningful error messages
@@ -230,7 +226,6 @@ All tests execute successfully with no failures, warnings, or crashes.
 Located in `test/data/`:
 - `test.webp` - 4.8KB VP8 lossy 128x128 image
 - `test_webp_js.webp` - 1.3MB VP8L lossless image
-- `test_webp_wasm.webp` - 1.3MB VP8L lossless image
 
 ## Known Test Limitations
 

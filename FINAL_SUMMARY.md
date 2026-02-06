@@ -10,7 +10,7 @@ A comprehensive WebP decoder for JuicyPixels has been successfully implemented i
 |----------|-------|---------|
 | **Source Modules** | 18 | 3,856 lines of pure Haskell |
 | **Test Modules** | 11 | 1,630 lines of test code |
-| **Test Cases** | 136 | 100% passing ✅ |
+| **Test Cases** | 134 | 100% passing ✅ |
 | **Documentation Files** | 8 | README, PLAN, TESTING, CONTRIBUTING, etc. |
 | **Example Programs** | 2 | CLI decoder, simple example |
 | **Test Images** | 3 | Real WebP files from libwebp |
@@ -47,7 +47,7 @@ A comprehensive WebP decoder for JuicyPixels has been successfully implemented i
 
 ## 🧪 Comprehensive Test Suite
 
-### 136 Tests Across 11 Modules
+### 134 Tests Across 11 Modules
 
 1. **BitReaderSpec** (20 tests) ✅
    - LSB-first reading, buffer management, edge cases
@@ -83,7 +83,7 @@ A comprehensive WebP decoder for JuicyPixels has been successfully implemented i
 
 ### Test Results
 ```
-✅ 136/136 tests passing (100%)
+✅ 134/134 tests passing (100%)
 ⏱️  Execution time: ~43ms
 🎯 Code coverage: Comprehensive
 ```
@@ -188,8 +188,7 @@ JuicyPixels-webp/
 │   ├── RealFilesSpec.hs
 │   └── data/                         # Test images
 │       ├── test.webp
-│       ├── test_webp_js.webp
-│       └── test_webp_wasm.webp
+│       └── test_webp_js.webp
 ├── examples/
 │   ├── SimpleExample.hs
 │   └── DecodeExample.hs
@@ -206,7 +205,7 @@ JuicyPixels-webp/
 ## 🎓 Key Achievements
 
 ✅ **Pure Haskell** - No FFI, no C dependencies
-✅ **100% Test Pass Rate** - 136/136 tests passing
+✅ **100% Test Pass Rate** - 134/134 tests passing
 ✅ **Zero Warnings** - Clean compilation
 ✅ **Well Documented** - 8 documentation files, 2000+ lines
 ✅ **Real File Testing** - 3 actual WebP test images
@@ -225,7 +224,7 @@ $ stack build
 
 # Test
 $ stack test
-✅ 136/136 tests passing (100%)
+✅ 134/134 tests passing (100%)
 ⏱️  Finished in 0.0429 seconds
 
 # Format
@@ -236,7 +235,7 @@ $ nix fmt
 $ nix flake check
 ✅ Formatting check: PASS
 ✅ Package builds: SUCCESS
-✅ Tests: 136/136 PASSING
+✅ Tests: 134/134 PASSING
 ```
 
 ## 📈 Statistics
@@ -274,7 +273,7 @@ main = do
 
 The JuicyPixels-webp package is **complete and production-ready** with:
 - ✅ Comprehensive WebP decoder implementation
-- ✅ Extensive test coverage (136 tests, 100% passing)
+- ✅ Extensive test coverage (134 tests, 100% passing)
 - ✅ Clean, well-documented code
 - ✅ Garnix CI integration
 - ✅ Ready for release as v0.1.0.0

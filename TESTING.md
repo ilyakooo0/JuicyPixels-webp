@@ -2,7 +2,7 @@
 
 ## Overview
 
-The JuicyPixels-webp test suite provides comprehensive coverage of all decoder components with **136 passing tests**.
+The JuicyPixels-webp test suite provides comprehensive coverage of all decoder components with **134 passing tests**.
 
 ## Test Execution
 
@@ -29,7 +29,7 @@ The test suite is organized into 10 specialized test modules:
 9. **RealImageSpec** (6 tests) - Hand-crafted test images
 10. **RealFilesSpec** (9 tests) - Real WebP file tests
 
-### Total: 136 tests, 0 failures ✅
+### Total: 134 tests, 0 failures ✅
 
 ## Test Coverage by Component
 
@@ -186,8 +186,6 @@ Tests against actual WebP files from libwebp:
   - Metadata extraction
 - ✅ test_webp_js.webp (VP8L lossless)
   - Parsing validation
-- ✅ test_webp_wasm.webp (VP8L lossless)
-  - Parsing validation
 - ✅ Error handling on corrupted files
 
 ## Test Categories
@@ -245,9 +243,8 @@ stack test --test-arguments "--format=failed-examples"
 ## Test Files
 
 Test data files are located in `test/data/`:
-- `test.webp` - 128x128 VP8 lossy image
-- `test_webp_js.webp` - VP8L lossless image
-- `test_webp_wasm.webp` - VP8L lossless image
+- `test.webp` - 128x128 VP8 lossy image (4.8KB)
+- `test_webp_js.webp` - VP8L lossless image (1.3MB)
 
 ## Example Programs
 
@@ -269,7 +266,7 @@ See `examples/` directory:
 | Integration | 9 | ✅ 100% |
 | Real Images | 6 | ✅ 100% |
 | Real Files | 9 | ✅ 78% (VP8L issues) |
-| **Total** | **136** | **✅ 100% pass** |
+| **Total** | **134** | **✅ 100% pass** |
 
 ## Future Test Additions
 

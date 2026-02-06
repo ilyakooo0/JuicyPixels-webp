@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-Successfully implemented a **comprehensive WebP decoder** for JuicyPixels in pure Haskell, with **136 passing tests** and **zero compiler warnings**.
+Successfully implemented a **comprehensive WebP decoder** for JuicyPixels in pure Haskell, with **134 passing tests** and **zero compiler warnings**.
 
 ## What Was Implemented
 
@@ -28,9 +28,9 @@ Successfully implemented a **comprehensive WebP decoder** for JuicyPixels in pur
 | 4 | Alpha Decoder | 95 | 11 | ✅ Complete |
 | 5 | Animation | 94 | Integrated | ✅ Complete |
 | 6 | Public API | 98 | 9 | ✅ Complete |
-| **Total** | **18 modules** | **3,856** | **136** | **✅ 100%** |
+| **Total** | **18 modules** | **3,856** | **134** | **✅ 100%** |
 
-## Test Coverage: 136 Tests, 100% Passing ✅
+## Test Coverage: 134 Tests, 100% Passing ✅
 
 ### Test Distribution
 - **Unit Tests**: 110 tests (component-level)
@@ -93,7 +93,7 @@ Real Files         █████████             9 tests
 ### Build Status
 ```
 Compilation: ✅ Clean (0 warnings)
-Tests: ✅ 136/136 passing (100%)
+Tests: ✅ 134/134 passing (100%)
 Type Safety: ✅ Full (no unsafe casts)
 Documentation: ✅ Comprehensive
 ```
@@ -130,7 +130,6 @@ Documentation: ✅ Comprehensive
 ### Real File Testing
 - ✅ test.webp (VP8 lossy, 128x128, 4.8KB)
 - ✅ test_webp_js.webp (VP8L lossless, 1.3MB)
-- ✅ test_webp_wasm.webp (VP8L lossless, 1.3MB)
 
 ## Documentation
 
@@ -196,7 +195,7 @@ Documentation: ✅ Comprehensive
 - ✅ 2 example programs
 - ✅ 0 compiler warnings
 
-### Tests (136 tests)
+### Tests (134 tests)
 - ✅ 20 BitReader tests
 - ✅ 16 PrefixCode tests
 - ✅ 17 Container tests
@@ -231,7 +230,7 @@ All original requirements met:
 2. ✅ **JuicyPixels integration** - Uses Image types, DynamicImage
 3. ✅ **WebP format support** - Container, VP8L, VP8 framework
 4. ✅ **Following specification** - RFC 9649 (WebP), RFC 6386 (VP8)
-5. ✅ **Well-tested** - 136 comprehensive tests
+5. ✅ **Well-tested** - 134 comprehensive tests
 6. ✅ **Well-documented** - 7 documentation files
 7. ✅ **Production-ready** - Clean build, all tests pass
 

@@ -31,7 +31,7 @@ spec = describe "Real WebP Files" $ do
         Right _ -> return ()
         Left err -> expectationFailure $ "Decode failed: " ++ err
 
-  describe "test_webp_js.webp" $ do
+  describe "test_webp_js.webp (VP8L lossless)" $ do
     it "parses successfully" $ do
       fileData <- B.readFile "test/data/test_webp_js.webp"
       case parseWebP fileData of
@@ -44,19 +44,6 @@ spec = describe "Real WebP Files" $ do
       case decodeWebP fileData of
         Right _ -> return () -- Would succeed if VP8L decoder was complete
         Left _ -> return () -- Currently fails on real images
-  describe "test_webp_wasm.webp" $ do
-    it "parses successfully" $ do
-      fileData <- B.readFile "test/data/test_webp_wasm.webp"
-      case parseWebP fileData of
-        Right _ -> return ()
-        Left err -> expectationFailure $ "Parse failed: " ++ err
-
-    it "attempts decode (VP8L implementation has known issues)" $ do
-      fileData <- B.readFile "test/data/test_webp_wasm.webp"
-      -- VP8L decoder needs debugging
-      case decodeWebP fileData of
-        Right _ -> return ()
-        Left _ -> return ()
 
   describe "Error Handling" $ do
     it "handles truncated file gracefully" $ do

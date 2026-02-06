@@ -128,11 +128,11 @@ Codec.Picture.WebP                    -- Public API
 ## Testing
 
 ```bash
-stack test              # Run full test suite (136 tests)
+stack test              # Run full test suite (134 tests)
 stack test --coverage   # With coverage report
 ```
 
-### Test Suite: 136 Tests, 100% Passing ✅
+### Test Suite: 134 Tests, 100% Passing ✅
 
 The comprehensive test suite covers:
 

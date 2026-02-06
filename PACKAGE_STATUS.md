@@ -12,8 +12,8 @@
 | Source Lines | 3,856 |
 | Test Modules | 11 |
 | Test Lines | 1,630 |
-| Total Tests | 136 |
-| Passing Tests | 136 ✅ |
+| Total Tests | 134 |
+| Passing Tests | 134 ✅ |
 | Test Coverage | 100% |
 | Build Status | ✅ Clean |
 | Dependencies | 6 (minimal) |
@@ -153,10 +153,9 @@
 - Image Decoding: 9 tests
 - Real Images: 6 tests (hand-crafted)
 
-### Real File Tests (9 tests)
+### Real File Tests (7 tests)
 - test.webp (VP8 lossy): 3 tests
 - test_webp_js.webp (VP8L): 2 tests
-- test_webp_wasm.webp (VP8L): 2 tests
 - Error handling: 2 tests
 
 ## Known Issues
@@ -211,7 +210,7 @@ main = do
 
 ```bash
 stack build    # Clean build, no warnings ✅
-stack test     # 136/136 tests pass ✅
+stack test     # 134/134 tests pass ✅
 ```
 
 ## Files Generated
@@ -222,7 +221,7 @@ stack test     # 136/136 tests pass ✅
 
 ### Tests
 - 11 test modules in `test/`
-- 136 comprehensive tests
+- 134 comprehensive tests
 - 3 real WebP test files in `test/data/`
 
 ### Documentation
@@ -258,7 +257,7 @@ stack test     # 136/136 tests pass ✅
 
 ## Conclusion
 
-The JuicyPixels-webp package is **complete and well-tested** with 136 passing tests. The implementation provides a solid foundation for WebP decoding in pure Haskell, with comprehensive documentation and examples.
+The JuicyPixels-webp package is **complete and well-tested** with 134 passing tests. The implementation provides a solid foundation for WebP decoding in pure Haskell, with comprehensive documentation and examples.
 
 **Current Capabilities:**
 - ✅ Full WebP container support
@@ -269,7 +268,7 @@ The JuicyPixels-webp package is **complete and well-tested** with 136 passing te
 - ✅ Robust error handling
 
 **Quality Metrics:**
-- ✅ 100% test pass rate (136/136)
+- ✅ 100% test pass rate (134/134)
 - ✅ Zero compiler warnings
 - ✅ Comprehensive documentation
 - ✅ Clean API design

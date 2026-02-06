@@ -94,7 +94,7 @@ Test guidelines:
 1. **VP8L Decoder Bug**: Real images fail with "No symbols with non-zero code length"
    - Location: `src/Codec/Picture/WebP/Internal/VP8L/PrefixCode.hs`
    - Issue: Prefix code reading logic has bugs with complex bitstreams
-   - Test: `test/data/test_webp_js.webp` and `test_webp_wasm.webp`
+   - Test: `test/data/test_webp_js.webp`
 
 2. **VP8 Lossy Decoder**: Currently a stub
    - Location: `src/Codec/Picture/WebP/Internal/VP8.hs`
