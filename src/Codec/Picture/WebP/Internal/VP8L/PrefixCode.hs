@@ -222,7 +222,7 @@ decodeSymbol (PrefixCodeTable table primaryBits) reader =
       symbol = fromIntegral (entry `shiftR` 16)
       len = fromIntegral (entry .&. 0xFFFF)
    in if entry == invalidEntry
-        then error $ "Invalid prefix code: no symbol for bits pattern " ++ show peek ++ " (entry is invalidEntry). This likely means bitstream is corrupt or we're out of sync."
+        then error $ "VP8L bitstream error: Invalid prefix code for bit pattern " ++ show peek ++ ". This typically indicates either: (1) corrupted file data, (2) unsupported encoder variant, or (3) decoder bug in code length reading/table building."
         else if len <= primaryBits
           then
             -- Direct symbol in primary table
@@ -237,7 +237,7 @@ decodeSymbol (PrefixCodeTable table primaryBits) reader =
                 offset = fromIntegral symbol
                 idx = offset + fromIntegral peek2
              in if idx >= VU.length table
-                  then error $ "Index out of bounds in decodeSymbol: idx=" ++ show idx ++ ", offset=" ++ show offset ++ ", peek2=" ++ show peek2 ++ ", secondaryBits=" ++ show secondaryBits ++ ", tableSize=" ++ show (VU.length table)
+                  then error $ "VP8L bitstream error: Secondary table index out of bounds: idx=" ++ show idx ++ ", tableSize=" ++ show (VU.length table)
                   else
                     let entry2 = table VU.! idx
                         symbol2 = fromIntegral (entry2 `shiftR` 16)
