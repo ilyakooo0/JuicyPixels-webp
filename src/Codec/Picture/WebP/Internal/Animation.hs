@@ -2,6 +2,7 @@
 
 module Codec.Picture.WebP.Internal.Animation
   ( decodeAnimation,
+    decodeAnimationWithCompositing,
     WebPAnimFrame (..),
   )
 where
@@ -11,7 +12,13 @@ import Codec.Picture.WebP.Internal.Alpha
 import Codec.Picture.WebP.Internal.Container
 import Codec.Picture.WebP.Internal.VP8
 import Codec.Picture.WebP.Internal.VP8L
+import Control.Monad (when, mapM_)
+import Control.Monad.ST
+import Data.Bits
 import qualified Data.ByteString as B
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Storable.Mutable as VSM
+import Data.Word
 
 -- | Animation frame with metadata
 data WebPAnimFrame = WebPAnimFrame
@@ -93,3 +100,170 @@ findVP8LInChunks :: [WebPChunk] -> Either String B.ByteString
 findVP8LInChunks [] = Left "No VP8L chunk"
 findVP8LInChunks (ChunkVP8L dat : _) = Right dat
 findVP8LInChunks (_ : rest) = findVP8LInChunks rest
+
+-- | Decode animation with proper canvas compositing
+-- Returns composited frames as RGBA8 images
+decodeAnimationWithCompositing :: Int -> Int -> WebPFile -> Either String [Image PixelRGBA8]
+decodeAnimationWithCompositing canvasWidth canvasHeight (WebPExtended _header chunks) = do
+  animHeader <- findAnimHeader chunks
+  anmfChunks <- findAnimFrames chunks
+
+  let bgColor = animBackgroundColor animHeader
+  return $ composeFrames canvasWidth canvasHeight bgColor anmfChunks
+decodeAnimationWithCompositing _ _ _ = Left "Not an animated WebP file"
+
+-- | Compose animation frames onto a canvas
+composeFrames :: Int -> Int -> Word32 -> [(AnimFrame, [WebPChunk])] -> [Image PixelRGBA8]
+composeFrames canvasWidth canvasHeight bgColor frames = runST $ do
+  -- Create initial canvas with background color
+  canvas <- VSM.replicate (canvasWidth * canvasHeight * 4) 0
+  fillCanvas canvas canvasWidth canvasHeight bgColor
+
+  let processFrame prevDispose (frame, subChunks) = do
+        -- Apply disposal method from previous frame
+        when prevDispose $
+          fillCanvas canvas canvasWidth canvasHeight bgColor
+
+        -- Decode current frame
+        case decodeAnimFrame (frame, subChunks) of
+          Left _ -> return Nothing -- Skip frames that fail to decode
+          Right webpFrame -> do
+            let frameImg = webpFrameImage webpFrame
+                x = anmfX frame
+                y = anmfY frame
+                blend = anmfBlend frame
+
+            -- Composite frame onto canvas
+            compositeFrame canvas canvasWidth canvasHeight frameImg x y blend
+
+            -- Freeze canvas to create output image
+            frozenCanvas <- VS.freeze canvas
+            let outputImg = Image canvasWidth canvasHeight frozenCanvas :: Image PixelRGBA8
+
+            return $ Just (outputImg, anmfDispose frame)
+
+  -- Process all frames
+  let go _ [] = return []
+      go prevDispose (frame : rest) = do
+        result <- processFrame prevDispose frame
+        case result of
+          Nothing -> go prevDispose rest -- Skip failed frames
+          Just (img, dispose) -> do
+            restImgs <- go dispose rest
+            return (img : restImgs)
+
+  go False frames
+
+-- | Fill canvas with background color
+fillCanvas :: VSM.MVector s Word8 -> Int -> Int -> Word32 -> ST s ()
+fillCanvas canvas width height bgColor = do
+  let b = fromIntegral (bgColor .&. 0xFF)
+      g = fromIntegral ((bgColor `shiftR` 8) .&. 0xFF)
+      r = fromIntegral ((bgColor `shiftR` 16) .&. 0xFF)
+      a = fromIntegral ((bgColor `shiftR` 24) .&. 0xFF)
+
+  let fillPixel i = do
+        VSM.write canvas (i * 4) r
+        VSM.write canvas (i * 4 + 1) g
+        VSM.write canvas (i * 4 + 2) b
+        VSM.write canvas (i * 4 + 3) a
+
+  mapM_ fillPixel [0 .. width * height - 1]
+
+-- | Composite a frame onto the canvas
+compositeFrame :: VSM.MVector s Word8 -> Int -> Int -> DynamicImage -> Int -> Int -> Bool -> ST s ()
+compositeFrame canvas canvasWidth _canvasHeight frameImg frameX frameY useBlend = do
+  case frameImg of
+    ImageRGBA8 img -> compositeRGBA8 canvas canvasWidth img frameX frameY useBlend
+    ImageRGB8 img -> compositeRGB8 canvas canvasWidth img frameX frameY useBlend
+    _ -> return () -- Unsupported format, skip
+
+-- | Composite RGBA8 image onto canvas
+compositeRGBA8 :: VSM.MVector s Word8 -> Int -> Image PixelRGBA8 -> Int -> Int -> Bool -> ST s ()
+compositeRGBA8 canvas canvasWidth (Image frameWidth frameHeight frameData) frameX frameY useBlend = do
+  let composePixel fy fx = do
+        let canvasY = frameY + fy
+            canvasX = frameX + fx
+            canvasIdx = (canvasY * canvasWidth + canvasX) * 4
+            frameIdx = (fy * frameWidth + fx) * 4
+
+        -- Read source pixel
+        srcR <- pure $ frameData VS.! frameIdx
+        srcG <- pure $ frameData VS.! (frameIdx + 1)
+        srcB <- pure $ frameData VS.! (frameIdx + 2)
+        srcA <- pure $ frameData VS.! (frameIdx + 3)
+
+        if useBlend && srcA < 255
+          then do
+            -- Alpha blend
+            dstR <- VSM.read canvas canvasIdx
+            dstG <- VSM.read canvas (canvasIdx + 1)
+            dstB <- VSM.read canvas (canvasIdx + 2)
+            dstA <- VSM.read canvas (canvasIdx + 3)
+
+            let (blendR, blendG, blendB, blendA) = alphaBlend srcR srcG srcB srcA dstR dstG dstB dstA
+
+            VSM.write canvas canvasIdx blendR
+            VSM.write canvas (canvasIdx + 1) blendG
+            VSM.write canvas (canvasIdx + 2) blendB
+            VSM.write canvas (canvasIdx + 3) blendA
+          else do
+            -- Direct copy (no blend)
+            VSM.write canvas canvasIdx srcR
+            VSM.write canvas (canvasIdx + 1) srcG
+            VSM.write canvas (canvasIdx + 2) srcB
+            VSM.write canvas (canvasIdx + 3) srcA
+
+  mapM_ (\fy -> mapM_ (composePixel fy) [0 .. frameWidth - 1]) [0 .. frameHeight - 1]
+
+-- | Composite RGB8 image onto canvas (assume alpha=255)
+compositeRGB8 :: VSM.MVector s Word8 -> Int -> Image PixelRGB8 -> Int -> Int -> Bool -> ST s ()
+compositeRGB8 canvas canvasWidth (Image frameWidth frameHeight frameData) frameX frameY _useBlend = do
+  let composePixel fy fx = do
+        let canvasY = frameY + fy
+            canvasX = frameX + fx
+            canvasIdx = (canvasY * canvasWidth + canvasX) * 4
+            frameIdx = (fy * frameWidth + fx) * 3
+
+        -- Read source pixel (RGB, assume A=255)
+        srcR <- pure $ frameData VS.! frameIdx
+        srcG <- pure $ frameData VS.! (frameIdx + 1)
+        srcB <- pure $ frameData VS.! (frameIdx + 2)
+
+        -- Direct copy (opaque pixels)
+        VSM.write canvas canvasIdx srcR
+        VSM.write canvas (canvasIdx + 1) srcG
+        VSM.write canvas (canvasIdx + 2) srcB
+        VSM.write canvas (canvasIdx + 3) 255
+
+  mapM_ (\fy -> mapM_ (composePixel fy) [0 .. frameWidth - 1]) [0 .. frameHeight - 1]
+
+-- | Alpha blending per WebP spec
+alphaBlend :: Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> (Word8, Word8, Word8, Word8)
+alphaBlend srcR srcG srcB srcA dstR dstG dstB dstA =
+  let srcA' = fromIntegral srcA :: Int
+      dstA' = fromIntegral dstA :: Int
+      srcR' = fromIntegral srcR :: Int
+      srcG' = fromIntegral srcG :: Int
+      srcB' = fromIntegral srcB :: Int
+      dstR' = fromIntegral dstR :: Int
+      dstG' = fromIntegral dstG :: Int
+      dstB' = fromIntegral dstB :: Int
+
+      -- blend.A = src.A + dst.A * (1 - src.A / 255)
+      blendA = srcA' + (dstA' * (255 - srcA')) `div` 255
+
+      -- if blend.A = 0 then blend.RGB = 0
+      -- else blend.RGB = (src.RGB * src.A + dst.RGB * dst.A * (1 - src.A / 255)) / blend.A
+      (blendR, blendG, blendB) =
+        if blendA == 0
+          then (0, 0, 0)
+          else
+            let numeratorR = srcR' * srcA' + dstR' * dstA' * (255 - srcA') `div` 255
+                numeratorG = srcG' * srcA' + dstG' * dstA' * (255 - srcA') `div` 255
+                numeratorB = srcB' * srcA' + dstB' * dstA' * (255 - srcA') `div` 255
+             in ( fromIntegral (numeratorR `div` blendA),
+                  fromIntegral (numeratorG `div` blendA),
+                  fromIntegral (numeratorB `div` blendA)
+                )
+   in (blendR, blendG, blendB, fromIntegral blendA)

@@ -5,13 +5,14 @@ module Codec.Picture.WebP
     decodeWebPWithMetadata,
     decodeWebPFirstFrame,
     decodeWebPAnimation,
+    decodeWebPAnimationComposited,
     WebPAnimFrame (..),
   )
 where
 
 import Codec.Picture.Metadata
 import Codec.Picture.Types
-import Codec.Picture.WebP.Internal.Animation (WebPAnimFrame (..), decodeAnimation)
+import Codec.Picture.WebP.Internal.Animation (WebPAnimFrame (..), decodeAnimation, decodeAnimationWithCompositing)
 import Codec.Picture.WebP.Internal.Container
 import Codec.Picture.WebP.Internal.VP8
 import Codec.Picture.WebP.Internal.VP8L
@@ -98,3 +99,15 @@ extractChunkMetadata [] = mempty
 extractChunkMetadata (ChunkEXIF _dat : rest) =
   extractChunkMetadata rest
 extractChunkMetadata (_ : rest) = extractChunkMetadata rest
+
+-- | Decode animation frames with proper canvas compositing
+-- Returns fully composited RGBA8 frames ready for display
+decodeWebPAnimationComposited :: B.ByteString -> Either String [Image PixelRGBA8]
+decodeWebPAnimationComposited bs = do
+  webpFile <- parseWebP bs
+  case webpFile of
+    WebPExtended header _ -> do
+      let width = vp8xCanvasWidth header
+          height = vp8xCanvasHeight header
+      decodeAnimationWithCompositing width height webpFile
+    _ -> Left "Not an animated WebP file (no VP8X header)"

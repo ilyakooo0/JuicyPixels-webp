@@ -196,11 +196,17 @@ readCodeLengthLengths numCodeLengths reader = runST $ do
 -- | Read symbol code lengths using the code length code
 readSymbolCodeLengths :: Int -> PrefixCode -> BitReader -> Either String (VU.Vector Int, BitReader)
 readSymbolCodeLengths alphabetSize codeLengthCode reader = runST $ do
-  -- TODO: Spec says to read max_symbol here, but temporarily disabled for debugging
-  -- let (useMaxSymbol, reader1) = readBit reader
-  -- let (maxSymbol, reader2) = ...
-  let maxSymbol = alphabetSize  -- Read all symbols for now
-      reader2 = reader
+  -- Read max_symbol
+  let (useMaxSymbol, reader1) = readBit reader
+      (maxSymbol, reader2) =
+        if not useMaxSymbol
+          then (alphabetSize, reader1)
+          else
+            let (lengthNbits1, reader1a) = readBits 3 reader1
+                lengthNbits = 2 + 2 * fromIntegral lengthNbits1
+                (maxSym1, reader1b) = readBits lengthNbits reader1a
+                maxSym = 2 + fromIntegral maxSym1
+             in (min maxSym alphabetSize, reader1b)  -- Clamp to alphabet_size
 
   lengths <- VUM.replicate alphabetSize 0
   prevCodeLen <- VUM.new 1
