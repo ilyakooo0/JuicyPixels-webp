@@ -1,0 +1,9 @@
+result
+tmp
+result-man
+.stack-work
+**.DS_Store
+.stack-to-nix.cache
+.cache
+**.qcow2
+.stack-work

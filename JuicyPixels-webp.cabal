@@ -1,0 +1,31 @@
+cabal-version: 2.2
+
+-- This file has been generated from package.yaml by hpack version 0.38.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           JuicyPixels-webp
+version:        0.1.0.0
+synopsis:       WebP image support for JuicyPixels
+description:    Encode and decode WebP images using the JuicyPixels image types, implemented in pure Haskell.
+homepage:       https://github.com/ilyakooo0/JuicyPixels-webp#readme
+bug-reports:    https://github.com/ilyakooo0/JuicyPixels-webp/issues
+license:        BSD-3-Clause
+build-type:     Simple
+
+source-repository head
+  type: git
+  location: https://github.com/ilyakooo0/JuicyPixels-webp
+
+library
+  other-modules:
+      Paths_JuicyPixels_webp
+  autogen-modules:
+      Paths_JuicyPixels_webp
+  hs-source-dirs:
+      src
+  build-depends:
+      JuicyPixels
+    , base >=4.7 && <5
+    , bytestring
+  default-language: Haskell2010

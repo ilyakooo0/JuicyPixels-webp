@@ -1,0 +1,14 @@
+name: JuicyPixels-webp
+version: 0.1.0.0
+synopsis: WebP image support for JuicyPixels
+description: Encode and decode WebP images using the JuicyPixels image types, implemented in pure Haskell.
+license: BSD-3-Clause
+github: ilyakooo0/JuicyPixels-webp
+
+dependencies:
+  - base >= 4.7 && < 5
+  - JuicyPixels
+  - bytestring
+
+library:
+  source-dirs: src

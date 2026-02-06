@@ -1,0 +1,13 @@
+resolver: lts-24.29
+
+packages:
+  - .
+
+nix:
+  enable: true
+  pure: false
+  shell-file: shell.nix
+
+ghc-options:
+  $locals: >
+    -O0

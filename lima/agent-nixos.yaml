@@ -1,0 +1,56 @@
+cpus: 8
+memory: "16GiB"
+
+images:
+  - location: ""
+    arch: aarch64
+  - location: ""
+    arch: x86_64
+
+ssh:
+  forwardAgent: true
+
+mounts:
+  # Dotfiles
+  - location: ~/.config/jj
+    mountPoint: /home/{{.User}}/.config/jj
+    writable: false
+  - location: ~/.config/helix
+    mountPoint: /home/{{.User}}/.config/helix
+    writable: false
+  - location: ~/.config/git
+    mountPoint: /home/{{.User}}/.config/git
+    writable: false
+  - location: ~/.gnupg
+    mountPoint: /home/{{.User}}/.gnupg
+    writable: false
+  - location: ~/.claude
+    mountPoint: /home/{{.User}}/.claude
+    writable: true
+
+  # Nix config (for netrc)
+  - location: /etc/nix
+    mountPoint: /lima/etc/nix
+    writable: false
+
+  # Home directory (for .claude.json)
+  - location: "~"
+    mountPoint: /etc/home/{{.User}}
+    writable: false
+
+  # Project
+  - location: "{{.Param.project}}"
+    mountPoint: /project
+    writable: true
+
+provision:
+  # Claude Code config (~/.claude.json)
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      cp /etc/home/{{.User}}/.claude.json /home/{{.User}}/.claude.json
+
+containerd:
+  system: false
+  user: false
