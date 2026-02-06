@@ -193,11 +193,12 @@ addBits builder n val =
 
 addSimplePrefixCode :: BitBuilder -> Word16 -> BitBuilder
 addSimplePrefixCode builder symbol =
-  -- Simple code: 1 bit (is_simple=1), 1 bit (num_symbols-1=0), 8 bits (symbol)
+  -- Simple code: 1 bit (is_simple=1), 1 bit (num_symbols-1=0), 1 bit (is_first_8bits=1), 8 bits (symbol)
   let builder1 = addBit builder True -- is_simple
       builder2 = addBit builder1 False -- 1 symbol (num-1 = 0)
-      builder3 = addBits builder2 8 (fromIntegral symbol)
-   in builder3
+      builder3 = addBit builder2 True -- is_first_8bits = 1 (read 8 bits for symbol)
+      builder4 = addBits builder3 8 (fromIntegral symbol)
+   in builder4
 
 buildBytes :: BitBuilder -> B.ByteString
 buildBytes (BitBuilder bits) =

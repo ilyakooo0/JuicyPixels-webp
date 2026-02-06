@@ -39,7 +39,7 @@ buildPrefixCode codeLengths
       let numSymbols = VU.length codeLengths
           nonZeroCount = VU.foldl' (\acc len -> if len > 0 then acc + 1 else acc) 0 codeLengths
        in case nonZeroCount of
-            0 -> Left "No symbols with non-zero code length"
+            0 -> Left $ "No symbols with non-zero code length (alphabet size: " ++ show numSymbols ++ ")"
             1 ->
               let symbol = VU.head $ VU.filter (\i -> codeLengths VU.! i > 0) (VU.enumFromN 0 numSymbols)
                in Right $ PrefixCodeSingle (fromIntegral symbol)
@@ -75,6 +75,10 @@ buildPrefixCodeTable codeLengths = runST $ do
 
   table <- VUM.replicate (primarySize + 2048) invalidEntry
 
+  -- Counter for next available secondary table offset
+  nextSecondaryOffset <- VUM.new 1
+  VUM.write nextSecondaryOffset 0 primarySize
+
   VU.forM_ (VU.indexed codeLengths) $ \(symbol, len) ->
     when (len > 0) $ do
       codeVal <- VUM.read nextCode len
@@ -97,7 +101,8 @@ buildPrefixCodeTable codeLengths = runST $ do
           secondaryOffset <-
             if existing == invalidEntry
               then do
-                let offset = primarySize + ((reversedShort - primarySize) * 64)
+                offset <- VUM.read nextSecondaryOffset 0
+                VUM.write nextSecondaryOffset 0 (offset + 64)
                 VUM.write table reversedShort (packEntry 0 (offset `shiftR` 16))
                 return offset
               else do
@@ -148,11 +153,13 @@ readCodeLengths alphabetSize reader = do
     then do
       let (numSymbols1, reader2) = readBits 1 reader1
           numSymbols = fromIntegral numSymbols1 + 1
-          (symbol1, reader3) = readBits 8 reader2
+          (isFirst8Bits, reader2a) = readBit reader2
+          symbolBits = if isFirst8Bits then 8 else 1
+          (symbol1, reader3) = readBits symbolBits reader2a
 
       if numSymbols == 1
         then do
-          let lengths = VU.replicate alphabetSize 0 VU.// [(fromIntegral symbol1, 0)]
+          let lengths = VU.replicate alphabetSize 0 VU.// [(fromIntegral symbol1, 1)]
           return (lengths, reader3)
         else do
           let (symbol2, reader4) = readBits 8 reader3
@@ -189,12 +196,18 @@ readCodeLengthLengths numCodeLengths reader = runST $ do
 -- | Read symbol code lengths using the code length code
 readSymbolCodeLengths :: Int -> PrefixCode -> BitReader -> Either String (VU.Vector Int, BitReader)
 readSymbolCodeLengths alphabetSize codeLengthCode reader = runST $ do
+  -- TODO: Spec says to read max_symbol here, but temporarily disabled for debugging
+  -- let (useMaxSymbol, reader1) = readBit reader
+  -- let (maxSymbol, reader2) = ...
+  let maxSymbol = alphabetSize  -- Read all symbols for now
+      reader2 = reader
+
   lengths <- VUM.replicate alphabetSize 0
   prevCodeLen <- VUM.new 1
   VUM.write prevCodeLen 0 8
 
   let loop !i !r
-        | i >= alphabetSize = do
+        | i >= maxSymbol = do
             frozen <- VU.unsafeFreeze lengths
             return $ Right (frozen, r)
         | otherwise = do
@@ -211,7 +224,7 @@ readSymbolCodeLengths alphabetSize codeLengthCode reader = runST $ do
                 prev <- VUM.read prevCodeLen 0
                 let writeRepeats !j !r2
                       | j >= i + repeatCount = loop (i + repeatCount) r2
-                      | j >= alphabetSize = loop alphabetSize r2
+                      | j >= maxSymbol = loop maxSymbol r2
                       | otherwise = do
                           VUM.write lengths j prev
                           writeRepeats (j + 1) r2
@@ -226,7 +239,7 @@ readSymbolCodeLengths alphabetSize codeLengthCode reader = runST $ do
                 loop (i + repeatCount) r''
               _ -> return $ Left $ "Invalid code length symbol: " ++ show sym
 
-  loop 0 reader
+  loop 0 reader2
 
 -- Helper functions
 
