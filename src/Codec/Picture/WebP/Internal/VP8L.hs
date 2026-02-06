@@ -112,11 +112,29 @@ readTransform width height reader = do
     _ -> Left $ "Unknown transform type: " ++ show transformType
 
 -- | Decode a subresolution image (no transforms, single prefix code group)
+-- Per RFC 9649: subresolution images have NO transforms and NO meta prefix codes
 decodeSubresolutionImage :: Int -> Int -> BitReader -> Either String (VS.Vector Word32, BitReader)
 decodeSubresolutionImage width height reader = do
-  decodeVP8LImageData width height reader []
+  -- Subresolution images: read color cache, then single prefix code group, then LZ77
+  let (usesColorCache, reader1) = readBit reader
 
--- | Decode spatially-coded image
+  (maybeCache, reader2) <-
+    if usesColorCache
+      then do
+        let (cacheBits, r) = readBits 4 reader1
+        when (cacheBits < 1 || cacheBits > 11) $
+          Left $
+            "Invalid color cache bits: " ++ show cacheBits
+        return (Just $ createColorCache (fromIntegral cacheBits), r)
+      else return (Nothing, reader1)
+
+  -- Subresolution images always use a single prefix code group (no meta prefix codes bit)
+  (group, reader3) <- readPrefixCodeGroup reader2 maybeCache
+
+  -- Decode LZ77 data
+  decodeLZ77 width height maybeCache group Nothing reader3
+
+-- | Decode spatially-coded image (main image or entropy image)
 decodeVP8LImageData :: Int -> Int -> BitReader -> [VP8LTransform] -> Either String (VS.Vector Word32, BitReader)
 decodeVP8LImageData width height reader _transforms = do
   let (usesColorCache, reader1) = readBit reader
@@ -202,9 +220,9 @@ readPrefixCodeWithAlphabet :: Int -> BitReader -> Either String (PrefixCode, Bit
 readPrefixCodeWithAlphabet alphabetSize reader = do
   (codeLengths, reader1) <- readCodeLengths alphabetSize reader
 
-  code <- buildPrefixCode codeLengths
-
-  return (code, reader1)
+  case buildPrefixCode codeLengths of
+    Left err -> Left $ "Failed to build prefix code for alphabet size " ++ show alphabetSize ++ ": " ++ err
+    Right code -> return (code, reader1)
 
 -- | Apply subtraction coding to palette data
 applySubtractionCoding :: VS.Vector Word32 -> Int -> VS.Vector Word32
