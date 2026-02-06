@@ -46,6 +46,7 @@ buildPrefixCode codeLengths
             _ -> buildPrefixCodeTable codeLengths
 
 -- | Build a two-level lookup table for prefix code decoding
+-- This implementation closely follows libwebp's BuildHuffmanTable algorithm
 buildPrefixCodeTable :: VU.Vector Int -> Either String PrefixCode
 buildPrefixCodeTable codeLengths = runST $ do
   let numSymbols = VU.length codeLengths
@@ -56,69 +57,160 @@ buildPrefixCodeTable codeLengths = runST $ do
 
   let primaryBits = 8
       primarySize = 1 `shiftL` primaryBits
+      -- Need to allocate blCount/offset for at least primaryBits+1 to avoid out of bounds when iterating up to primaryBits
+      histogramSize = max (maxCodeLength + 1) (primaryBits + 1)
 
-  blCount <- VUM.replicate (maxCodeLength + 1) (0 :: Int)
-  VU.forM_ (VU.indexed codeLengths) $ \(sym, len) ->
+  -- Step 1: Build histogram of code lengths
+  blCount <- VUM.replicate histogramSize (0 :: Int)
+  VU.forM_ (VU.indexed codeLengths) $ \(_sym, len) ->
     when (len > 0) $ do
       count <- VUM.read blCount len
       VUM.write blCount len (count + 1)
 
-  nextCode <- VUM.replicate (maxCodeLength + 1) (0 :: Int)
-  code <- VUM.new 1
-  VUM.write code 0 0
-  forM_ [1 .. maxCodeLength] $ \bits -> do
-    codeVal <- VUM.read code 0
-    count <- VUM.read blCount bits
-    let newCode = (codeVal + count) `shiftL` 1
-    VUM.write code 0 newCode
-    VUM.write nextCode bits codeVal
+  -- Step 2: Create sorted symbol array (sorted by code length, then by symbol value)
+  sorted <- VUM.new numSymbols
+  offset <- VUM.replicate histogramSize (0 :: Int)
 
-  table <- VUM.replicate (primarySize + 2048) invalidEntry
+  -- Calculate offsets for each code length
+  currentOffset <- VUM.new 1
+  VUM.write currentOffset 0 0
+  forM_ [1 .. maxCodeLength] $ \len -> do
+    off <- VUM.read currentOffset 0
+    VUM.write offset len off
+    count <- VUM.read blCount len
+    VUM.write currentOffset 0 (off + count)
 
-  -- Counter for next available secondary table offset
-  nextSecondaryOffset <- VUM.new 1
-  VUM.write nextSecondaryOffset 0 primarySize
-
-  VU.forM_ (VU.indexed codeLengths) $ \(symbol, len) ->
+  -- Fill sorted array
+  VU.forM_ (VU.indexed codeLengths) $ \(sym, len) ->
     when (len > 0) $ do
-      codeVal <- VUM.read nextCode len
-      VUM.write nextCode len (codeVal + 1)
+      off <- VUM.read offset len
+      VUM.write sorted off (fromIntegral sym :: Word16)
+      VUM.write offset len (off + 1)
 
-      let sym16 = fromIntegral symbol :: Word16
-          entry = packEntry sym16 len
+  -- No need to reset offset - we'll read directly from sorted array using symbolIdx counter
 
-      if len <= primaryBits
-        then do
-          let replicateCount = 1 `shiftL` (primaryBits - len)
-              reversedCode = reverseBits codeVal len
-          forM_ [0 .. replicateCount - 1] $ \i -> do
-            let idx = reversedCode .|. (i `shiftL` len)
-            VUM.write table idx entry
-        else do
-          let shortCode = codeVal .&. ((1 `shiftL` primaryBits) - 1)
-              reversedShort = reverseBits shortCode primaryBits
-          existing <- VUM.read table reversedShort
-          secondaryOffset <-
-            if existing == invalidEntry
-              then do
-                offset <- VUM.read nextSecondaryOffset 0
-                VUM.write nextSecondaryOffset 0 (offset + 64)
-                VUM.write table reversedShort (packEntry 0 (offset `shiftR` 16))
-                return offset
-              else do
-                let offset = (fromIntegral existing .&. 0xFFFF) `shiftL` 16
-                return offset
+  -- Step 3: Allocate table (start with primary + generous secondary space)
+  let maxTableSize = primarySize + 32768  -- Generous allocation
+  table <- VUM.replicate maxTableSize invalidEntry
 
-          let longPart = codeVal `shiftR` primaryBits
-              longBits = len - primaryBits
-              reversedLong = reverseBits longPart longBits
-              replicateCount = 1 `shiftL` (15 - len)
-          forM_ [0 .. replicateCount - 1] $ \i -> do
-            let idx = secondaryOffset + reversedLong + (i `shiftL` longBits)
-            VUM.write table idx entry
+  nextTablePos <- VUM.new 1
+  VUM.write nextTablePos 0 primarySize
 
+  -- Step 4: Fill primary table (codes with length <= primaryBits)
+  key <- VUM.new 1
+  VUM.write key 0 0
+
+  symbolIdx <- VUM.new 1
+  VUM.write symbolIdx 0 0
+
+  -- Validate tree completeness (check that we don't over-subscribe the code space)
+  numOpen <- VUM.new 1
+  VUM.write numOpen 0 1
+
+  blCountFrozen <- VU.unsafeFreeze blCount
+  forM_ [1 .. maxCodeLength] $ \len -> do
+    open <- VUM.read numOpen 0
+    let count = blCountFrozen VU.! len
+        newOpen = (open `shiftL` 1) - count
+    VUM.write numOpen 0 newOpen
+    when (newOpen < 0) $
+      error $ "Invalid Huffman tree: over-subscribed code space at length " ++ show len ++ ", open=" ++ show open ++ ", count=" ++ show count ++ ", alphabet=" ++ show numSymbols ++ ", blCount=" ++ show (VU.toList $ VU.take (maxCodeLength + 1) blCountFrozen)
+
+  -- Tree can be incomplete (newOpen > 0) - this is valid in VP8L
+
+  forM_ [1 .. primaryBits] $ \len -> do
+    count <- VUM.read blCount len
+    forM_ [1 .. count] $ \_ -> do
+      symIdx <- VUM.read symbolIdx 0
+      sym <- VUM.read sorted symIdx
+      VUM.write symbolIdx 0 (symIdx + 1)
+
+      k <- VUM.read key 0
+      let entry = packEntry sym len
+          revKey = reverseBits k len
+
+      -- Replicate entry for all bit patterns with this prefix
+      forM_ [0 .. ((1 `shiftL` (primaryBits - len)) - 1)] $ \i -> do
+        let idx = revKey .|. (i `shiftL` len)
+        VUM.write table idx entry
+
+      VUM.write key 0 (k + 1)
+
+  -- Step 5: Fill secondary tables (codes with length > primaryBits)
+  when (maxCodeLength > primaryBits) $ do
+    VUM.write key 0 0
+
+    forM_ [(primaryBits + 1) .. maxCodeLength] $ \len -> do
+      count <- VUM.read blCount len
+      forM_ [1 .. count] $ \_ -> do
+        symIdx <- VUM.read symbolIdx 0
+        sym <- VUM.read sorted symIdx
+        VUM.write symbolIdx 0 (symIdx + 1)
+
+        k <- VUM.read key 0
+        let shortCode = k .&. ((1 `shiftL` primaryBits) - 1)
+            revShort = reverseBits shortCode primaryBits
+
+        -- Check if we need a new secondary table
+        existing <- VUM.read table revShort
+        (secondaryTableBits, secondaryOffset) <-
+          if existing == invalidEntry
+            then do
+              -- Calculate size needed for this secondary table
+              tableBits <- calculateSecondaryTableBits blCount len primaryBits maxCodeLength
+              let tableSize = 1 `shiftL` tableBits
+
+              offset <- VUM.read nextTablePos 0
+              VUM.write nextTablePos 0 (offset + tableSize)
+
+              -- Store pointer in primary table: offset in symbol field, total bits (primary + secondary) in len field
+              let totalBits = tableBits + primaryBits
+              VUM.write table revShort (packEntry (fromIntegral offset) totalBits)
+              return (totalBits, offset)
+            else do
+              let totalBits = fromIntegral (existing .&. 0xFFFF)
+                  offset = fromIntegral (existing `shiftR` 16)
+              return (totalBits, offset)
+
+        -- Fill secondary table entry
+        let longPart = k `shiftR` primaryBits
+            longBits = len - primaryBits
+            revLong = reverseBits longPart longBits
+            actualSecondaryBits = secondaryTableBits - primaryBits
+            entry = packEntry sym longBits
+
+        -- Replicate entry for all bit patterns with this prefix
+        forM_ [0 .. ((1 `shiftL` (actualSecondaryBits - longBits)) - 1)] $ \i -> do
+          let idx = secondaryOffset + revLong + (i `shiftL` longBits)
+          VUM.write table idx entry
+
+        VUM.write key 0 (k + 1)
+
+  -- Determine actual table size used
+  actualSize <- VUM.read nextTablePos 0
+
+  -- Freeze and truncate to actual size
   frozenTable <- VU.unsafeFreeze table
-  return $ Right $ PrefixCodeTable frozenTable primaryBits
+  let finalTable = VU.take actualSize frozenTable
+
+  return $ Right $ PrefixCodeTable finalTable primaryBits
+
+-- | Calculate the number of bits needed for a secondary table
+-- This follows libwebp's NextTableBitSize algorithm
+calculateSecondaryTableBits :: VUM.MVector s Int -> Int -> Int -> Int -> ST s Int
+calculateSecondaryTableBits blCount currentLen primaryBits maxCodeLength = do
+  blCountFrozen <- VU.unsafeFreeze blCount
+  let loop !len !left
+        | len > maxCodeLength || left <= 0 = len - 1 - primaryBits
+        | otherwise =
+            let count = blCountFrozen VU.! len
+                newLeft = left - count
+             in if newLeft <= 0
+                  then len - primaryBits
+                  else loop (len + 1) (newLeft * 2)
+
+      initialLeft = 1 `shiftL` (currentLen - primaryBits)
+  return $ loop currentLen initialLeft
 
 -- | Decode a single symbol from the bitstream using a prefix code
 decodeSymbol :: PrefixCode -> BitReader -> (Word16, BitReader)
@@ -128,20 +220,29 @@ decodeSymbol (PrefixCodeTable table primaryBits) reader =
       entry = table VU.! fromIntegral peek
       symbol = fromIntegral (entry `shiftR` 16)
       len = fromIntegral (entry .&. 0xFFFF)
-   in if len <= primaryBits
-        then
-          let (_, reader') = readBits len reader
-           in (symbol, reader')
-        else
-          let (_, reader1) = readBits primaryBits reader
-              (peek2, _) = readBits 7 reader1
-              offset = len `shiftL` 16
-              idx = offset + fromIntegral peek2
-              entry2 = table VU.! idx
-              symbol2 = fromIntegral (entry2 `shiftR` 16)
-              len2 = fromIntegral (entry2 .&. 0xFFFF)
-              (_, reader2) = readBits len2 reader1
-           in (symbol2, reader2)
+   in if entry == invalidEntry
+        then error $ "Invalid prefix code: no symbol for bits pattern " ++ show peek ++ " (entry is invalidEntry). This likely means bitstream is corrupt or we're out of sync."
+        else if len <= primaryBits
+          then
+            -- Direct symbol in primary table
+            let (_, reader') = readBits len reader
+             in (symbol, reader')
+          else
+            -- Secondary table: len field contains tableBits (total bits including primary)
+            -- symbol field contains offset to secondary table
+            let (_, reader1) = readBits primaryBits reader
+                secondaryBits = len - primaryBits
+                (peek2, _) = readBits secondaryBits reader1
+                offset = fromIntegral symbol
+                idx = offset + fromIntegral peek2
+             in if idx >= VU.length table
+                  then error $ "Index out of bounds in decodeSymbol: idx=" ++ show idx ++ ", offset=" ++ show offset ++ ", peek2=" ++ show peek2 ++ ", secondaryBits=" ++ show secondaryBits ++ ", tableSize=" ++ show (VU.length table)
+                  else
+                    let entry2 = table VU.! idx
+                        symbol2 = fromIntegral (entry2 `shiftR` 16)
+                        len2 = fromIntegral (entry2 .&. 0xFFFF)
+                        (_, reader2) = readBits len2 reader1
+                     in (symbol2, reader2)
 
 -- | Read code lengths for a prefix code from the bitstream
 -- Handles simple codes (1-2 symbols) and normal codes with repeat codes
