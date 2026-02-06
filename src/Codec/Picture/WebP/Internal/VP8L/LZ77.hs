@@ -191,7 +191,10 @@ lengthPrefixTable = VU.generate 280 $ \sym ->
             then (code + 1, 0)
             else
               let extraBits = (code - 2) `shiftR` 1
-                  base = 2 + ((code + 2) .&. complement 1) `shiftL` extraBits
+                  -- Prevent overflow during shift
+                  base = if extraBits > 20
+                           then error $ "Length extraBits overflow: " ++ show extraBits ++ " for code " ++ show code
+                           else 2 + ((code + 2) .&. complement 1) `shiftL` extraBits
                in (base + 1, extraBits)
 
 -- | Distance prefix table: extra bits for each distance code
@@ -228,7 +231,7 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
             result <- VS.unsafeFreeze output
             return $ Right (result, r)
         | otherwise = do
-            let (x, y) = pos `divMod` width
+            let (y, x) = pos `divMod` width  -- Fixed: y is row (quotient), x is column (remainder)
                 groupIdx = getEntropyGroup x y maybeEntropyImage width
 
             let (greenSym, r1) = decodeSymbol (pcgGreen codeGroup) r
@@ -241,6 +244,8 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
 
                     color = packColor (fromIntegral alphaSym) (fromIntegral redSym) (fromIntegral greenSym) (fromIntegral blueSym)
 
+                when (pos >= totalPixels) $
+                  error $ "Buffer overflow: pos=" ++ show pos ++ ", totalPixels=" ++ show totalPixels
                 VSM.write output pos color
 
                 let cache' = case maybeCache of
@@ -252,9 +257,18 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
                 if greenSym < 280
                   then do
                     let lengthCode = fromIntegral greenSym
-                        (baseLen, extraBits) = lengthPrefixTable VU.! lengthCode
-                        (extra, r2) = readBits extraBits r1
+                    when (lengthCode < 256 || lengthCode >= 280) $
+                      error $ "Invalid length code: " ++ show lengthCode
+
+                    let (baseLen, extraBits) = lengthPrefixTable VU.! lengthCode
+                    when (extraBits > 20) $
+                      error $ "Length extra bits too large: " ++ show extraBits
+
+                    let (extra, r2) = readBits extraBits r1
                         len = baseLen + fromIntegral extra
+
+                    when (len > 100000) $
+                      error $ "Length too large: " ++ show len
 
                     let (distSym, r3) = decodeSymbol (pcgDistance codeGroup) r2
 
@@ -263,10 +277,27 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
                         then return $ kDistanceMap VU.! fromIntegral distSym
                         else do
                           let distCode = fromIntegral distSym - 120
-                              extraBits2 = distancePrefixTable VU.! distCode
-                              (extra2, _) = readBits extraBits2 r3
-                              base = if distCode < 4 then distCode + 1 else 5 + ((distCode - 2) .&. complement 1) `shiftL` extraBits2
-                          return $ base + fromIntegral extra2 + 1
+                          when (distCode < 0 || distCode >= 40) $
+                            error $ "Invalid distance code: " ++ show distCode ++ " (distSym=" ++ show distSym ++ ")"
+
+                          let extraBits2 = distancePrefixTable VU.! distCode
+                          when (extraBits2 > 20) $
+                            error $ "Extra bits too large: " ++ show extraBits2
+
+                          let (extra2, _) = readBits extraBits2 r3
+                              -- Use Integer arithmetic to avoid overflow
+                              baseInteger :: Integer
+                              baseInteger = if distCode < 4
+                                              then fromIntegral distCode + 1
+                                              else
+                                                let shifted = (fromIntegral ((distCode - 2) .&. complement 1)) `shiftL` extraBits2
+                                                 in 5 + shifted
+                              distInteger = baseInteger + fromIntegral extra2 + 1
+                              dist' = fromIntegral distInteger :: Int
+                          return dist'
+
+                    when (dist > pos) $
+                      error $ "Distance " ++ show dist ++ " exceeds position " ++ show pos
 
                     copyLoop pos dist len output cache maybeCache r3
                   else do
@@ -285,7 +316,10 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
             let srcPos = pos - dist
             when (srcPos < 0) $
               error $
-                "Invalid distance: " ++ show dist ++ " at pos " ++ show pos
+                "Invalid back-reference: distance=" ++ show dist ++ " at pos=" ++ show pos
+
+            when (pos >= totalPixels) $
+              error $ "Buffer overflow in copy: pos=" ++ show pos ++ ", totalPixels=" ++ show totalPixels ++ ", len=" ++ show len
 
             color <- VSM.read out srcPos
             VSM.write out pos color
