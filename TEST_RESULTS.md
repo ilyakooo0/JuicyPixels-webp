@@ -7,8 +7,8 @@
 ## Summary
 
 ```
-Total Tests: 136
-Passed: 136
+Total Tests: 134
+Passed: 134
 Failed: 0
 Success Rate: 100%
 Execution Time: ~0.04 seconds
