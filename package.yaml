@@ -15,3 +15,15 @@ dependencies:
 
 library:
   source-dirs: src
+
+tests:
+  JuicyPixels-webp-test:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N
+    dependencies:
+      - JuicyPixels-webp
+      - hspec

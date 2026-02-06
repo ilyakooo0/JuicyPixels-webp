@@ -7,6 +7,10 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    flake-compat = {
+      url = "github:edolstra/flake-compat";
+      flake = false;
+    };
   };
 
   outputs =
@@ -73,6 +77,19 @@
                 );
                 # Fix QuickCheck version constraint issue
                 selective = pkgs.haskell.lib.doJailbreak hprev.selective;
+                xmlgen = pkgs.haskell.lib.dontCheck hprev.xmlgen;
+                tasty-discover = pkgs.haskell.lib.doJailbreak hprev.tasty-discover;
+                validation-selective = pkgs.haskell.lib.doJailbreak hprev.validation-selective;
+                doctest-discover = pkgs.haskell.lib.dontCheck hprev.doctest-discover;
+                fourmolu = pkgs.haskell.lib.dontCheck hprev.fourmolu;
+                haskell-language-server = pkgs.haskell.lib.doJailbreak (pkgs.haskell.lib.dontCheck hprev.haskell-language-server);
+                path = pkgs.haskell.lib.dontCheck hprev.path;
+                HTF = pkgs.haskell.lib.dontCheck hprev.HTF;
+                hw-prim = pkgs.haskell.lib.dontCheck hprev.hw-prim;
+                cabal-install-parsers = pkgs.haskell.lib.dontCheck hprev.cabal-install-parsers;
+                cabal-add = pkgs.haskell.lib.dontCheck hprev.cabal-add;
+                hie-bios = pkgs.haskell.lib.dontCheck hprev.hie-bios;
+                ghcide = pkgs.haskell.lib.doJailbreak hprev.ghcide;
               })
             ];
           }).pkgSet;

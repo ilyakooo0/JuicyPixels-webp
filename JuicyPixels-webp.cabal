@@ -20,8 +20,23 @@ source-repository head
 library
   exposed-modules:
       Codec.Picture.WebP
+      Codec.Picture.WebP.Internal.Alpha
+      Codec.Picture.WebP.Internal.Animation
       Codec.Picture.WebP.Internal.BitReader
       Codec.Picture.WebP.Internal.Container
+      Codec.Picture.WebP.Internal.VP8
+      Codec.Picture.WebP.Internal.VP8.BoolDecoder
+      Codec.Picture.WebP.Internal.VP8.Coefficients
+      Codec.Picture.WebP.Internal.VP8.Dequant
+      Codec.Picture.WebP.Internal.VP8.Header
+      Codec.Picture.WebP.Internal.VP8.IDCT
+      Codec.Picture.WebP.Internal.VP8.LoopFilter
+      Codec.Picture.WebP.Internal.VP8.Predict
+      Codec.Picture.WebP.Internal.VP8.Tables
+      Codec.Picture.WebP.Internal.VP8L
+      Codec.Picture.WebP.Internal.VP8L.LZ77
+      Codec.Picture.WebP.Internal.VP8L.PrefixCode
+      Codec.Picture.WebP.Internal.VP8L.Transform
   other-modules:
       Paths_JuicyPixels_webp
   autogen-modules:
@@ -33,6 +48,27 @@ library
     , base >=4.7 && <5
     , binary
     , bytestring
+    , primitive
+    , vector
+  default-language: Haskell2010
+
+test-suite JuicyPixels-webp-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_JuicyPixels_webp
+  autogen-modules:
+      Paths_JuicyPixels_webp
+  hs-source-dirs:
+      test
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      JuicyPixels
+    , JuicyPixels-webp
+    , base >=4.7 && <5
+    , binary
+    , bytestring
+    , hspec
     , primitive
     , vector
   default-language: Haskell2010
