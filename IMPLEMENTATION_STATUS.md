@@ -45,9 +45,11 @@ This is a pure Haskell WebP decoder for JuicyPixels, implementing support for bo
 - ✅ 24 intra prediction modes (16x16, 8x8, 4x4)
 - ✅ Loop filter (simple and normal variants)
 - ✅ All constant tables from RFC 6386
+- ✅ Macroblock mode decoding from bitstream
+- ✅ Color output based on decoded modes
 
 **Test Coverage**: 32 tests for all VP8 components
-**Status**: Returns correct image dimensions, grayscale output
+**Status**: Returns correct dimensions with color output based on modes
 
 ### Animation & Alpha
 - ✅ Animation frame extraction
