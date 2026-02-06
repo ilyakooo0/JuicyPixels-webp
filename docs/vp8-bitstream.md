@@ -4,6 +4,23 @@ Reference: RFC 6386, November 2011. "VP8 Data Format and Decoding Guide."
 
 WebP lossy images use VP8 **intra-frame (key frame) encoding only**. This document covers everything needed to decode a VP8 key frame as used within a WebP container.
 
+## Section Index
+
+1. [Frame Header (Uncompressed)](#frame-header-uncompressed)
+2. [Boolean Arithmetic Decoder](#boolean-arithmetic-decoder-range-coder)
+3. [Compressed Frame Header](#compressed-frame-header)
+4. [Macroblock Structure](#macroblock-structure)
+5. [Macroblock Prediction Modes](#macroblock-prediction-modes)
+6. [Intra Prediction Formulas](#intra-prediction-formulas)
+7. [Dequantization](#dequantization)
+8. [Coefficient Decoding (Token Tree)](#coefficient-decoding-token-tree)
+9. [Inverse Transforms](#inverse-transforms)
+10. [Macroblock Reconstruction](#macroblock-reconstruction)
+11. [MB-Level Decode Loop](#mb-level-decode-loop)
+12. [Loop Filter](#loop-filter)
+13. [Y'CbCr to RGB Conversion](#ycbcr-to-rgb-conversion)
+14. [Complete Decoding Pipeline Summary](#complete-decoding-pipeline-summary)
+
 ## Frame Header (Uncompressed)
 
 ### Bytes 0-2: Frame Tag
@@ -63,7 +80,7 @@ int vscale = hs >> 14;
 
 ## Boolean Arithmetic Decoder (Range Coder)
 
-VP8 uses a boolean arithmetic coder (range coder) for all compressed data. This is fundamentally different from the Huffman/prefix coding used in VP8L lossless.
+VP8 uses a boolean arithmetic coder (range coder) for all compressed data.
 
 ### State
 
@@ -166,6 +183,16 @@ int clamping    = bool_read_literal(d, 1);   // 0 = clamping required
 ```
 
 ### Segmentation
+
+Segment IDs (0-3) are decoded using `bool_read_tree` with this tree and the `segment_prob[3]` array:
+
+```c
+const int8 mb_segment_tree[] = {
+     2,  4,      // root: "0x"=left, "1x"=right
+    -0, -1,      // "00"=segment 0, "01"=segment 1
+    -2, -3       // "10"=segment 2, "11"=segment 3
+};
+```
 
 ```c
 int segmentation_enabled = bool_read_literal(d, 1);
@@ -355,8 +382,24 @@ const int8 kf_ymode_tree[] = {
 When Y mode is B_PRED, each of the 16 Y subblocks gets an independent mode. The mode is decoded using a tree with **context-dependent probabilities** based on the modes of the **above** and **left** neighboring subblocks.
 
 ```c
-int above_mode = ...; // mode of subblock directly above (or DC_PRED if top edge)
-int left_mode  = ...; // mode of subblock directly left (or DC_PRED if left edge)
+const int8 kf_bmode_tree[] = {
+    -B_DC_PRED, 2,                // "0"=B_DC (0)
+     -B_TM_PRED, 4,               // "10"=B_TM (1)
+      -B_VE_PRED, 6,              // "110"=B_VE (2)
+       8, 12,
+        -B_HE_PRED, 10,           // "11100"=B_HE (3)
+         -B_RD_PRED, -B_VR_PRED,  // "111010"=B_RD (5), "111011"=B_VR (6) [sic: 4,5 swapped]
+        -B_LD_PRED, 14,           // "11110"=B_LD (4) [sic: out of order]
+         -B_VL_PRED, 16,          // "111110"=B_VL (7)
+          -B_HD_PRED, -B_HU_PRED  // "1111110"=B_HD (8), "1111111"=B_HU (9)
+};
+```
+
+Note: The tree ordering differs from the enum ordering (B_RD=5 and B_LD=4 are swapped in the tree). The tree shape is: DC at root, then TM, VE, then a subtree splitting HE/RD/VR from LD/VL/HD/HU.
+
+```c
+int above_mode = ...; // mode of subblock directly above (or B_DC_PRED if top edge)
+int left_mode  = ...; // mode of subblock directly left (or B_DC_PRED if left edge)
 int b_mode = bool_read_tree(d, kf_bmode_tree, kf_bmode_probs[above_mode][left_mode]);
 ```
 
@@ -375,16 +418,153 @@ The 10 B-modes:
 | 8 | B_HD_PRED | Horizontal-down (~63 degrees) |
 | 9 | B_HU_PRED | Horizontal-up (~63 degrees) |
 
+#### `kf_bmode_probs[10][10][9]`
+
+Context-dependent probabilities indexed by `[above_mode][left_mode]`. Each inner array has 9 probabilities for the 9 internal nodes of `kf_bmode_tree`. Source: RFC 6386 §11.5.
+
+```c
+const uint8 kf_bmode_probs[10][10][9] = {
+  { /* above = B_DC_PRED (0) */
+    { 231, 120,  48,  89, 115, 113, 120, 152, 112},
+    { 152, 179,  64, 126, 170, 118,  46,  70,  95},
+    { 175,  69, 143,  80,  85,  82,  72, 155, 103},
+    {  56,  58,  10, 171, 218, 189,  17,  13, 152},
+    { 144,  71,  10,  38, 171, 213, 144,  34,  26},
+    { 114,  26,  17, 163,  44, 195,  21,  10, 173},
+    { 121,  24,  80, 195,  26,  62,  44,  64,  85},
+    { 170,  46,  55,  19, 136, 160,  33, 206,  71},
+    {  63,  20,   8, 114, 114, 208,  12,   9, 226},
+    {  81,  40,  11,  96, 182,  84,  29,  16,  36}
+  },
+  { /* above = B_TM_PRED (1) */
+    { 134, 183,  89, 137,  98, 101, 106, 165, 148},
+    {  72, 187, 100, 130, 157, 111,  32,  75,  80},
+    {  66, 102, 167,  99,  74,  62,  40, 234, 128},
+    {  41,  53,   9, 178, 241, 141,  26,   8, 107},
+    { 104,  79,  12,  27, 217, 255,  87,  17,   7},
+    {  74,  43,  26, 146,  73, 166,  49,  23, 157},
+    {  65,  38, 105, 160,  51,  52,  31, 115, 128},
+    {  87,  68,  71,  44, 114,  51,  15, 186,  23},
+    {  47,  41,  14, 110, 182, 183,  21,  17, 194},
+    {  66,  45,  25, 102, 197, 189,  23,  18,  22}
+  },
+  { /* above = B_VE_PRED (2) */
+    {  88,  88, 147, 150,  42,  46,  45, 196, 205},
+    {  43,  97, 183, 117,  85,  38,  35, 179,  61},
+    {  39,  53, 200,  87,  26,  21,  43, 232, 171},
+    {  56,  34,  51, 104, 114, 102,  29,  93,  77},
+    { 107,  54,  32,  26,  51,   1,  81,  43,  31},
+    {  39,  28,  85, 171,  58, 165,  90,  98,  64},
+    {  34,  22, 116, 206,  23,  34,  43, 166,  73},
+    {  68,  25, 106,  22,  64, 171,  36, 225, 114},
+    {  34,  19,  21, 102, 132, 188,  16,  76, 124},
+    {  62,  18,  78,  95,  85,  57,  50,  48,  51}
+  },
+  { /* above = B_HE_PRED (3) */
+    { 193, 101,  35, 159, 215, 111,  89,  46, 111},
+    {  60, 148,  31, 172, 219, 228,  21,  18, 111},
+    { 112, 113,  77,  85, 179, 255,  38, 120, 114},
+    {  40,  42,   1, 196, 245, 209,  10,  25, 109},
+    { 100,  80,   8,  43, 154,   1,  51,  26,  71},
+    {  88,  43,  29, 140, 166, 213,  37,  43, 154},
+    {  61,  63,  30, 155,  67,  45,  68,   1, 209},
+    { 142,  78,  78,  16, 255, 128,  34, 197, 171},
+    {  41,  40,   5, 102, 211, 183,   4,   1, 221},
+    {  51,  50,  17, 168, 209, 192,  23,  25,  82}
+  },
+  { /* above = B_LD_PRED (4) */
+    { 125,  98,  42,  88, 104,  85, 117, 175,  82},
+    {  95,  84,  53,  89, 128, 100, 113, 101,  45},
+    {  75,  79, 123,  47,  51, 128,  81, 171,   1},
+    {  57,  17,   5,  71, 102,  57,  53,  41,  49},
+    { 115,  21,   2,  10, 102, 255, 166,  23,   6},
+    {  38,  33,  13, 121,  57,  73,  26,   1,  85},
+    {  41,  10,  67, 138,  77, 110,  90,  47, 114},
+    { 101,  29,  16,  10,  85, 128, 101, 196,  26},
+    {  57,  18,  10, 102, 102, 213,  34,  20,  43},
+    { 117,  20,  15,  36, 163, 128,  68,   1,  26}
+  },
+  { /* above = B_RD_PRED (5) */
+    { 138,  31,  36, 171,  27, 166,  38,  44, 229},
+    {  67,  87,  58, 169,  82, 115,  26,  59, 179},
+    {  63,  59,  90, 180,  59, 166,  93,  73, 154},
+    {  40,  40,  21, 116, 143, 209,  34,  39, 175},
+    {  57,  46,  22,  24, 128,   1,  54,  17,  37},
+    {  47,  15,  16, 183,  34, 223,  49,  45, 183},
+    {  46,  17,  33, 183,   6,  98,  15,  32, 183},
+    {  65,  32,  73, 115,  28, 128,  23, 128, 205},
+    {  40,   3,   9, 115,  51, 192,  18,   6, 223},
+    {  87,  37,   9, 115,  59,  77,  64,  21,  47}
+  },
+  { /* above = B_VR_PRED (6) */
+    { 104,  55,  44, 218,   9,  54,  53, 130, 226},
+    {  64,  90,  70, 205,  40,  41,  23,  26,  57},
+    {  54,  57, 112, 184,   5,  41,  38, 166, 213},
+    {  30,  34,  26, 133, 152, 116,  10,  32, 134},
+    {  75,  32,  12,  51, 192, 255, 160,  43,  51},
+    {  39,  19,  53, 221,  26, 114,  32,  73, 255},
+    {  31,   9,  65, 234,   2,  15,   1, 118,  73},
+    {  88,  31,  35,  67, 102,  85,  55, 186,  85},
+    {  56,  21,  23, 111,  59, 205,  45,  37, 192},
+    {  55,  38,  70, 124,  73, 102,   1,  34,  98}
+  },
+  { /* above = B_VL_PRED (7) */
+    { 102,  61,  71,  37,  34,  53,  31, 243, 192},
+    {  69,  60,  71,  38,  73, 119,  28, 222,  37},
+    {  68,  45, 128,  34,   1,  47,  11, 245, 171},
+    {  62,  17,  19,  70, 146,  85,  55,  62,  70},
+    {  75,  15,   9,   9,  64, 255, 184, 119,  16},
+    {  37,  43,  37, 154, 100, 163,  85, 160,   1},
+    {  63,   9,  92, 136,  28,  64,  32, 201,  85},
+    {  86,   6,  28,   5,  64, 255,  25, 248,   1},
+    {  56,   8,  17, 132, 137, 255,  55, 116, 128},
+    {  58,  15,  20,  82, 135,  57,  26, 121,  40}
+  },
+  { /* above = B_HD_PRED (8) */
+    { 164,  50,  31, 137, 154, 133,  25,  35, 218},
+    {  51, 103,  44, 131, 131, 123,  31,   6, 158},
+    {  86,  40,  64, 135, 148, 224,  45, 183, 128},
+    {  22,  26,  17, 131, 240, 154,  14,   1, 209},
+    {  83,  12,  13,  54, 192, 255,  68,  47,  28},
+    {  45,  16,  21,  91,  64, 222,   7,   1, 197},
+    {  56,  21,  39, 155,  60, 138,  23, 102, 213},
+    {  85,  26,  85,  85, 128, 128,  32, 146, 171},
+    {  18,  11,   7,  63, 144, 171,   4,   4, 246},
+    {  35,  27,  10, 146, 174, 171,  12,  26, 128}
+  },
+  { /* above = B_HU_PRED (9) */
+    { 190,  80,  35,  99, 180,  80, 126,  54,  45},
+    {  85, 126,  47,  87, 176,  51,  41,  20,  32},
+    { 101,  75, 128, 139, 118, 146, 116, 128,  85},
+    {  56,  41,  15, 176, 236,  85,  37,   9,  62},
+    { 146,  36,  19,  30, 171, 255,  97,  27,  20},
+    {  71,  30,  17, 119, 118, 255,  17,  18, 138},
+    { 101,  38,  60, 138,  55,  70,  43,  26, 142},
+    { 138,  45,  61,  62, 219,   1,  81, 188,  64},
+    {  32,  41,  20, 117, 151, 142,  20,  21, 163},
+    { 112,  19,  12,  61, 195, 128,  48,   4,  24}
+  }
+};
+```
+
 ### Chroma Mode (8x8, shared by U and V)
 
-Key frame UV mode tree with fixed probabilities `{142, 114, 183}`:
+Key frame UV mode tree with fixed probabilities `kf_uv_mode_probs = {142, 114, 183}`:
 
-| Value | Mode |
-|-------|------|
-| 0 | DC_PRED |
-| 1 | V_PRED |
-| 2 | H_PRED |
-| 3 | TM_PRED |
+```c
+const int8 kf_uv_mode_tree[] = {
+    -DC_PRED, 2,          // "0"=DC (0)
+     -V_PRED, 4,          // "10"=V (1)
+      -H_PRED, -TM_PRED   // "110"=H (2), "111"=TM (3)
+};
+```
+
+| Value | Mode | Code |
+|-------|------|------|
+| 0 | DC_PRED | 0 |
+| 1 | V_PRED | 10 |
+| 2 | H_PRED | 110 |
+| 3 | TM_PRED | 111 |
 
 ## Intra Prediction Formulas
 
@@ -713,6 +893,39 @@ static const int coeff_bands[16] = {
 };
 ```
 
+### Initial Context for First Coefficient
+
+For the first coefficient of each block, the context (0, 1, or 2) depends on whether the corresponding **above** and **left** neighbor blocks had nonzero coefficients. Maintain two arrays of flags: `above_nz[9]` (per macroblock column, reset at each row) and `left_nz[9]` (per macroblock, reset at each row start).
+
+The mapping from subblock index (0-24) to context slot uses these index tables:
+
+```c
+// Subblock index → left context slot (0-8)
+static const int left_context_index[25] = {
+    0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
+    4, 4, 5, 5, 6, 6, 7, 7, 8
+};
+// Subblock index → above context slot (0-8)
+static const int above_context_index[25] = {
+    0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
+    4, 5, 4, 5, 6, 7, 6, 7, 8
+};
+```
+
+Slots 0-3 = Y (4 columns/rows), 4-5 = U (2 columns/rows), 6-7 = V (2 columns/rows), 8 = Y2.
+
+```c
+// Before decoding subblock i:
+int initial_ctx = left_nz[left_context_index[i]]
+                + above_nz[above_context_index[i]];
+// initial_ctx is 0, 1, or 2
+
+// After decoding subblock i:
+int has_nonzero = (at least one non-zero coefficient decoded);
+left_nz[left_context_index[i]]  = has_nonzero;
+above_nz[above_context_index[i]] = has_nonzero;
+```
+
 ### Decoding a Block's Coefficients
 
 ```c
@@ -756,6 +969,360 @@ for (int i = start_coeff; i < 16; i++) {
     coeffs[zigzag[i]] = value;
     ctx = (value == 1) ? 1 : 2;
 }
+```
+
+### `coeff_update_probs[4][8][3][11]`
+
+Probabilities used during header parsing to decide whether each coefficient probability is updated. Source: RFC 6386 §13.4.
+
+```c
+const uint8 coeff_update_probs[4][8][3][11] = {
+  {
+    {
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 176, 246, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 223, 241, 252, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 249, 253, 253, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 244, 252, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 234, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 253, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 246, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 239, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 254, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 248, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 251, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 251, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 254, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 254, 253, 255, 254, 255, 255, 255, 255, 255, 255},
+      { 250, 255, 254, 255, 254, 255, 255, 255, 255, 255, 255},
+      { 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    }
+  },
+  {
+    {
+      { 217, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 225, 252, 241, 253, 255, 255, 254, 255, 255, 255, 255},
+      { 234, 250, 241, 250, 253, 255, 253, 254, 255, 255, 255}
+    },
+    {
+      { 255, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 223, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 238, 253, 254, 254, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 248, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 249, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 253, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 247, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 252, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 253, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 254, 253, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 250, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    }
+  },
+  {
+    {
+      { 186, 251, 250, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 234, 251, 244, 254, 255, 255, 255, 255, 255, 255, 255},
+      { 251, 251, 243, 253, 254, 255, 254, 255, 255, 255, 255}
+    },
+    {
+      { 255, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 236, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 251, 253, 253, 254, 254, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 254, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 254, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    }
+  },
+  {
+    {
+      { 248, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 250, 254, 252, 254, 255, 255, 255, 255, 255, 255, 255},
+      { 248, 254, 249, 253, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 253, 253, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 246, 253, 253, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 252, 254, 251, 254, 254, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 254, 252, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 248, 254, 253, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 253, 255, 254, 254, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 251, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 245, 251, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 253, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 251, 253, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 252, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 252, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 249, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 255, 253, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 250, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    },
+    {
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255},
+      { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}
+    }
+  }
+};
+```
+
+### `default_coeff_probs[4][8][3][11]`
+
+Default token probabilities, loaded at key frame initialization. Updated via the compressed header using `coeff_update_probs` above. Source: RFC 6386 §13.5.
+
+```c
+const uint8 default_coeff_probs[4][8][3][11] = {
+  { /* block type 0: Y after Y2 (Y with prediction applied via WHT) */
+    {
+      { 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128},
+      { 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128},
+      { 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128}
+    },
+    {
+      { 253, 136, 254, 255, 228, 219, 128, 128, 128, 128, 128},
+      { 189, 129, 242, 255, 227, 213, 255, 219, 128, 128, 128},
+      { 106, 126, 227, 252, 214, 209, 255, 255, 128, 128, 128}
+    },
+    {
+      {   1,  98, 248, 255, 236, 226, 255, 255, 128, 128, 128},
+      { 181, 133, 238, 254, 221, 234, 255, 154, 128, 128, 128},
+      {  78, 134, 202, 247, 198, 180, 255, 219, 128, 128, 128}
+    },
+    {
+      {   1, 185, 249, 255, 243, 255, 128, 128, 128, 128, 128},
+      { 184, 150, 247, 255, 236, 224, 128, 128, 128, 128, 128},
+      {  77, 110, 216, 255, 236, 230, 128, 128, 128, 128, 128}
+    },
+    {
+      {   1, 101, 251, 255, 241, 255, 128, 128, 128, 128, 128},
+      { 170, 139, 241, 252, 236, 209, 255, 255, 128, 128, 128},
+      {  37, 116, 196, 243, 228, 255, 255, 255, 128, 128, 128}
+    },
+    {
+      {   1, 204, 254, 255, 245, 255, 128, 128, 128, 128, 128},
+      { 207, 160, 250, 255, 238, 128, 128, 128, 128, 128, 128},
+      { 102, 103, 231, 255, 211, 171, 128, 128, 128, 128, 128}
+    },
+    {
+      {   1, 152, 252, 255, 240, 255, 128, 128, 128, 128, 128},
+      { 177, 135, 243, 255, 234, 225, 128, 128, 128, 128, 128},
+      {  80, 129, 211, 255, 194, 224, 128, 128, 128, 128, 128}
+    },
+    {
+      {   1,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128},
+      { 246,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128},
+      { 255, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128}
+    }
+  },
+  { /* block type 1: Y2 (DC values of Y via WHT) */
+    {
+      { 198,  35, 237, 223, 193, 187, 162, 160, 145, 155,  62},
+      { 131,  45, 198, 221, 172, 176, 220, 157, 252, 221,   1},
+      {  68,  47, 146, 208, 149, 167, 221, 162, 255, 223, 128}
+    },
+    {
+      {   1, 149, 241, 255, 221, 224, 255, 255, 128, 128, 128},
+      { 184, 141, 234, 253, 222, 220, 255, 199, 128, 128, 128},
+      {  81,  99, 181, 242, 176, 190, 249, 202, 255, 255, 128}
+    },
+    {
+      {   1, 129, 232, 253, 214, 197, 242, 196, 255, 255, 128},
+      {  99, 121, 210, 250, 201, 198, 255, 202, 128, 128, 128},
+      {  23,  91, 163, 242, 170, 187, 247, 210, 255, 255, 128}
+    },
+    {
+      {   1, 200, 246, 255, 234, 255, 128, 128, 128, 128, 128},
+      { 109, 178, 241, 255, 231, 245, 255, 255, 128, 128, 128},
+      {  44, 130, 201, 253, 205, 192, 255, 255, 128, 128, 128}
+    },
+    {
+      {   1, 132, 239, 251, 219, 209, 255, 165, 128, 128, 128},
+      {  94, 136, 225, 251, 218, 190, 255, 255, 128, 128, 128},
+      {  22, 100, 174, 245, 186, 161, 255, 199, 128, 128, 128}
+    },
+    {
+      {   1, 182, 249, 255, 232, 235, 128, 128, 128, 128, 128},
+      { 124, 143, 241, 255, 227, 234, 128, 128, 128, 128, 128},
+      {  35,  77, 181, 251, 193, 211, 255, 205, 128, 128, 128}
+    },
+    {
+      {   1, 157, 247, 255, 236, 231, 255, 255, 128, 128, 128},
+      { 121, 141, 235, 255, 225, 227, 255, 255, 128, 128, 128},
+      {  45,  99, 188, 251, 195, 217, 255, 224, 128, 128, 128}
+    },
+    {
+      {   1,   1, 251, 255, 213, 255, 128, 128, 128, 128, 128},
+      { 203,   1, 248, 255, 255, 128, 128, 128, 128, 128, 128},
+      { 137,   1, 177, 255, 224, 255, 128, 128, 128, 128, 128}
+    }
+  },
+  { /* block type 2: UV (chroma) */
+    {
+      { 253,   9, 248, 251, 207, 208, 255, 192, 128, 128, 128},
+      { 175,  13, 224, 243, 193, 185, 249, 198, 255, 255, 128},
+      {  73,  17, 171, 221, 161, 179, 236, 167, 255, 234, 128}
+    },
+    {
+      {   1,  95, 247, 253, 212, 183, 255, 255, 128, 128, 128},
+      { 239,  90, 244, 250, 211, 209, 255, 255, 128, 128, 128},
+      { 155,  77, 195, 248, 188, 195, 255, 255, 128, 128, 128}
+    },
+    {
+      {   1,  24, 239, 251, 218, 219, 255, 205, 128, 128, 128},
+      { 201,  51, 219, 255, 196, 186, 128, 128, 128, 128, 128},
+      {  69,  46, 190, 239, 201, 218, 255, 228, 128, 128, 128}
+    },
+    {
+      {   1, 191, 251, 255, 255, 128, 128, 128, 128, 128, 128},
+      { 223, 165, 249, 255, 213, 255, 128, 128, 128, 128, 128},
+      { 141, 124, 248, 255, 255, 128, 128, 128, 128, 128, 128}
+    },
+    {
+      {   1,  16, 248, 255, 255, 128, 128, 128, 128, 128, 128},
+      { 190,  36, 230, 255, 236, 255, 128, 128, 128, 128, 128},
+      { 149,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128}
+    },
+    {
+      {   1, 226, 255, 128, 128, 128, 128, 128, 128, 128, 128},
+      { 247, 192, 255, 128, 128, 128, 128, 128, 128, 128, 128},
+      { 240, 128, 255, 128, 128, 128, 128, 128, 128, 128, 128}
+    },
+    {
+      {   1, 134, 252, 255, 255, 128, 128, 128, 128, 128, 128},
+      { 213,  62, 250, 255, 255, 128, 128, 128, 128, 128, 128},
+      {  55,  93, 255, 128, 128, 128, 128, 128, 128, 128, 128}
+    },
+    {
+      { 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128},
+      { 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128},
+      { 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128}
+    }
+  },
+  { /* block type 3: Y when B_PRED (no Y2, each subblock has its own DC) */
+    {
+      { 202,  24, 213, 235, 186, 191, 220, 160, 240, 175, 255},
+      { 126,  38, 182, 232, 169, 184, 228, 174, 255, 187, 128},
+      {  61,  46, 138, 219, 151, 178, 240, 170, 255, 216, 128}
+    },
+    {
+      {   1, 112, 230, 250, 199, 191, 247, 159, 255, 255, 128},
+      { 166, 109, 228, 252, 211, 215, 255, 174, 128, 128, 128},
+      {  39,  77, 162, 232, 172, 180, 245, 178, 255, 255, 128}
+    },
+    {
+      {   1,  52, 220, 246, 198, 199, 249, 220, 255, 255, 128},
+      { 124,  74, 191, 243, 183, 193, 250, 221, 255, 255, 128},
+      {  24,  71, 130, 219, 154, 170, 243, 182, 255, 255, 128}
+    },
+    {
+      {   1, 182, 225, 249, 219, 240, 255, 224, 128, 128, 128},
+      { 149, 150, 226, 252, 216, 205, 255, 171, 128, 128, 128},
+      {  28, 108, 170, 242, 183, 194, 254, 223, 255, 255, 128}
+    },
+    {
+      {   1,  81, 230, 252, 204, 203, 255, 192, 128, 128, 128},
+      { 123, 102, 209, 247, 188, 196, 255, 233, 128, 128, 128},
+      {  20,  95, 153, 243, 164, 173, 255, 203, 128, 128, 128}
+    },
+    {
+      {   1, 222, 248, 255, 216, 213, 128, 128, 128, 128, 128},
+      { 168, 175, 246, 252, 235, 205, 255, 255, 128, 128, 128},
+      {  47, 116, 215, 255, 211, 212, 255, 255, 128, 128, 128}
+    },
+    {
+      {   1, 121, 236, 253, 212, 214, 255, 255, 128, 128, 128},
+      { 141,  84, 213, 252, 201, 202, 255, 219, 128, 128, 128},
+      {  42,  80, 160, 240, 162, 185, 255, 205, 128, 128, 128}
+    },
+    {
+      {   1,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128},
+      { 244,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128},
+      { 238,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128}
+    }
+  }
+};
 ```
 
 ## Inverse Transforms
@@ -886,6 +1453,110 @@ For B_PRED macroblocks:
 1. No Y2 block. Each Y subblock has its own DC.
 2. For each Y subblock: decode all 16 coefficients (including DC), dequantize with ydc/yac, apply inverse DCT
 3. U and V same as above
+
+## MB-Level Decode Loop
+
+This ties together all previous sections into the complete per-macroblock decode pipeline. The first partition BoolDecoder (`d1`) handles modes; DCT partition BoolDecoders (`d_dct[p]`) handle coefficients. Macroblocks are assigned to DCT partitions round-robin by row: `p = mb_row % num_dct_partitions`.
+
+```c
+// Initialize context arrays (all zeros at frame start)
+uint8 above_nz[mb_cols][9];  // reset each frame
+memset(above_nz, 0, sizeof(above_nz));
+
+for (int mb_row = 0; mb_row < mb_rows; mb_row++) {
+    uint8 left_nz[9] = {0};  // reset each row
+    BoolDecoder *d_coeff = &d_dct[mb_row % num_dct_partitions];
+
+    for (int mb_col = 0; mb_col < mb_cols; mb_col++) {
+        // --- First partition (d1): modes ---
+
+        // 1. Segment ID
+        int segment = 0;
+        if (segmentation_enabled && update_map)
+            segment = bool_read_tree(d1, mb_segment_tree, segment_prob);
+
+        // 2. Skip coefficient flag
+        int skip = 0;
+        if (mb_no_skip_coeff)
+            skip = bool_read(d1, prob_skip_false);
+
+        // 3. Y intra mode (16x16)
+        int ymode = bool_read_tree(d1, kf_ymode_tree, kf_ymode_probs);
+
+        // 4. If B_PRED: 16 sub-block modes with context
+        int bmode[16];
+        if (ymode == B_PRED) {
+            for (int b = 0; b < 16; b++) {
+                int above = above_bmode(b, mb_row, mb_col);
+                int left  = left_bmode(b, mb_row, mb_col);
+                bmode[b] = bool_read_tree(d1, kf_bmode_tree,
+                                          kf_bmode_probs[above][left]);
+            }
+        }
+
+        // 5. Chroma mode
+        int uvmode = bool_read_tree(d1, kf_uv_mode_tree, kf_uv_mode_probs);
+
+        // --- DCT partition (d_coeff): coefficients ---
+
+        int16 coeffs[25][16] = {0};
+        int has_nz[25] = {0};
+
+        if (!skip) {
+            // 6. Decode coefficients for each subblock
+            //    Block type: 0=Y after Y2, 1=Y2, 2=UV, 3=Y when B_PRED
+            if (ymode != B_PRED) {
+                // Y2 block (index 24, type 1, start at coeff 0)
+                has_nz[24] = decode_block(d_coeff, coeffs[24], /*type*/1,
+                    /*start*/0, left_nz[8], above_nz[mb_col][8]);
+                left_nz[8] = above_nz[mb_col][8] = has_nz[24];
+            }
+            for (int b = 0; b < 16; b++) {  // Y subblocks
+                int type  = (ymode == B_PRED) ? 3 : 0;
+                int start = (ymode == B_PRED) ? 0 : 1;  // skip DC if Y2
+                int li = left_context_index[b];
+                int ai = above_context_index[b];
+                has_nz[b] = decode_block(d_coeff, coeffs[b], type,
+                    start, left_nz[li], above_nz[mb_col][ai]);
+                left_nz[li] = above_nz[mb_col][ai] = has_nz[b];
+            }
+            for (int b = 16; b < 24; b++) {  // U (16-19), V (20-23)
+                int li = left_context_index[b];
+                int ai = above_context_index[b];
+                has_nz[b] = decode_block(d_coeff, coeffs[b], /*type*/2,
+                    /*start*/0, left_nz[li], above_nz[mb_col][ai]);
+                left_nz[li] = above_nz[mb_col][ai] = has_nz[b];
+            }
+        } else {
+            // skip_coeff: reset context to 0
+            for (int i = 0; i < 9; i++) {
+                left_nz[i] = 0;
+                above_nz[mb_col][i] = 0;
+            }
+        }
+
+        // 7. Dequantize + inverse transforms
+        if (ymode != B_PRED) {
+            dequant(coeffs[24], y2dc, y2ac);
+            int16 dc_vals[16];
+            iwht4x4(coeffs[24], dc_vals);
+            for (int b = 0; b < 16; b++)
+                coeffs[b][0] = dc_vals[b];  // place WHT output as DC
+        }
+        for (int b = 0; b < 16; b++) {
+            dequant(coeffs[b], ydc, yac);
+            idct4x4_add(coeffs[b], &y_pred[b], &y_recon[b]);
+        }
+        for (int b = 16; b < 24; b++) {
+            dequant(coeffs[b], uvdc, uvac);
+            idct4x4_add(coeffs[b], &uv_pred[b], &uv_recon[b]);
+        }
+    }
+}
+
+// 8. Apply loop filter to entire reconstructed frame
+// 9. Convert Y'CbCr to RGB
+```
 
 ## Loop Filter
 
@@ -1065,39 +1736,6 @@ int B = clip255((298*c + 516*d + 128) >> 8);
 
 Since chroma is 4:2:0 (half resolution), U and V values must be upsampled (typically bilinear) to full resolution before conversion.
 
-## Canonical Prefix Code (Huffman) Construction
-
-This algorithm is needed for the WebP lossless (VP8L) decoder (not VP8 lossy which uses boolean arithmetic coding).
-
-Given an array of code lengths (0 = symbol not used), build the canonical code:
-
-```c
-// 1. Count the number of codes for each code length
-int bl_count[MAX_CODE_LENGTH + 1] = {0};
-for (int i = 0; i < num_symbols; i++)
-    bl_count[code_lengths[i]]++;
-
-// 2. Compute the starting code value for each code length
-int next_code[MAX_CODE_LENGTH + 1];
-int code = 0;
-bl_count[0] = 0;  // codes of length 0 have no value
-for (int bits = 1; bits <= MAX_CODE_LENGTH; bits++) {
-    code = (code + bl_count[bits - 1]) << 1;
-    next_code[bits] = code;
-}
-
-// 3. Assign codes to symbols
-for (int i = 0; i < num_symbols; i++) {
-    int len = code_lengths[i];
-    if (len > 0) {
-        symbol_code[i] = next_code[len];
-        next_code[len]++;
-    }
-}
-```
-
-For decoding, build a lookup table or binary tree from these codes. Bits are read MSB-first for Huffman decoding in VP8L (unlike the boolean decoder in VP8 lossy).
-
 ## Complete Decoding Pipeline Summary
 
 ```
@@ -1107,29 +1745,27 @@ For decoding, build a lookup table or binary tree from these codes. Bits are rea
 4.  Initialize BoolDecoder on first partition
 5.  Parse compressed frame header:
     a. Color space, clamping
-    b. Segmentation parameters
+    b. Segmentation parameters (mb_segment_tree, segment_prob)
     c. Loop filter parameters
-    d. Token partition count
+    d. Token partition count (log2_nbr_of_dct_partitions)
     e. Quantization indices
     f. Refresh entropy probs flag (key frame)
-    g. Coefficient probability updates
+    g. Coefficient probability updates (coeff_update_probs → coeff_probs)
     h. Skip coefficient flag
-6.  For each macroblock in raster order (first partition):
-    a. Read segment ID (if segmentation enabled)
+6.  Initialize coeff_probs from default_coeff_probs, apply header updates
+7.  For each macroblock in raster order (first partition + DCT partition):
+    a. Read segment ID using mb_segment_tree (if segmentation enabled)
     b. Read skip_coeff flag
-    c. Read Y intra mode (DC/V/H/TM/B_PRED)
-    d. If B_PRED: read 16 B-modes with context-dependent probs
-    e. Read chroma mode (DC/V/H/TM)
-    f. Compute prediction buffers
-7.  Initialize BoolDecoders for DCT partitions
-8.  For each macroblock (DCT partition):
-    a. If not skip_coeff:
-       - If not B_PRED: decode Y2 block, WHT
-       - Decode Y subblocks (16), U subblocks (4), V subblocks (4)
-       - Dequantize each
-       - Inverse DCT each
-    b. Add residual to prediction → reconstructed pixels
-9.  Apply loop filter to entire frame
-10. Convert Y'CbCr to RGB
-11. Scale if scale factors are nonzero
+    c. Read Y intra mode using kf_ymode_tree
+    d. If B_PRED: read 16 B-modes using kf_bmode_tree + kf_bmode_probs
+    e. Read chroma mode using kf_uv_mode_tree
+    f. Compute prediction buffers (16x16/8x8/4x4)
+    g. Decode coefficients using coeff_tree + coeff_probs
+       (with initial context from above_nz/left_nz arrays)
+    h. Dequantize → inverse WHT (Y2) → inverse DCT (all subblocks)
+    i. Add residual to prediction → reconstructed pixels
+    (See "MB-Level Decode Loop" section for complete pseudocode)
+8.  Apply loop filter to entire frame
+9.  Convert Y'CbCr to RGB
+10. Scale if scale factors are nonzero
 ```

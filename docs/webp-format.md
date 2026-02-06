@@ -4,6 +4,19 @@ Reference: RFC 9649, November 2024 (Informational). Authors: J. Zern, P. Massimi
 
 WebP is a RIFF-based image format supporting lossy (VP8) and lossless compression, alpha transparency, animation, color profiles, and metadata. It covers use cases similar to JPEG, PNG, and GIF, optimized for fast network transfer.
 
+## Container Format Index
+
+1. [Terminology & Data Types](#terminology--data-types)
+2. [RIFF Chunk Structure](#riff-chunk-structure)
+3. [WebP File Header](#webp-file-header)
+4. [Three File Format Variants](#three-file-format-variants)
+5. [VP8X Chunk (Extended Header)](#vp8x-chunk-extended-header)
+6. [Animation Chunks](#animation-chunks)
+7. [ALPH Chunk (Alpha)](#alph-chunk-alpha)
+8. [ICCP Chunk (Color Profile)](#iccp-chunk-color-profile)
+9. [Metadata Chunks](#metadata-chunks)
+10. [Example File Layouts](#example-file-layouts)
+
 ## Terminology & Data Types
 
 All multi-byte integers are **little-endian**.
@@ -280,7 +293,7 @@ Special cases for borders:
 
 ### Alpha with lossless compression
 
-When compression method is `1`, the alpha data is a lossless-compressed image-stream of implicit dimensions (width x height) with NO headers. After decoding to ARGB, extract the alpha from the **green channel** of each pixel.
+When compression method is `1`, the alpha data is a VP8L lossless-compressed image-stream of implicit dimensions (width x height). The stream contains **no headers**: no RIFF container, no `'VP8L'` FourCC, no stream-size `uint32`, no signature byte (`0x2F`), and no image-size/alpha/version fields. The bitstream starts directly at the transform loop (the first bit is the transform-present flag). Dimensions come from the containing VP8 frame or VP8X canvas size. After decoding the image-stream to ARGB, extract the alpha from the **green channel** of each pixel.
 
 ## ICCP Chunk (Color Profile)
 
@@ -354,6 +367,17 @@ RIFF/WEBP
 # WebP Lossless Bitstream Specification
 
 WebP lossless is a format for lossless compression of ARGB images. It stores pixel values exactly, including color values for pixels whose alpha is 0. Achieves ~25% denser compression than PNG with faster decoding.
+
+## VP8L Section Index
+
+1. [Bit Reading Convention](#bit-reading-convention)
+2. [ARGB Pixel Representation](#argb-pixel-representation)
+3. [RIFF Header (Lossless)](#riff-header-lossless)
+4. [Transforms](#transforms)
+5. [Image Data](#image-data)
+6. [Entropy Code](#entropy-code)
+7. [VP8L Decode Pipeline](#vp8l-decode-pipeline)
+8. [Overall Structure (ABNF)](#overall-structure-abnf)
 
 ## Bit Reading Convention
 
@@ -600,11 +624,13 @@ Image data is an array of pixel values in **scan-line order** (left to right, to
 
 ### Roles of Image Data
 
-1. **ARGB image**: The actual pixels.
-2. **Entropy image**: Stores meta prefix codes (which entropy coding to use per block).
-3. **Predictor image**: Prediction modes per block.
-4. **Color transform image**: `ColorTransformElement` values per block.
-5. **Color indexing image**: Palette (up to 256 ARGB values).
+1. **ARGB image**: The actual pixels. Decoded as `spatially-coded-image` (with meta prefix codes).
+2. **Entropy image**: Stores meta prefix codes. Dimensions: `DIV_ROUND_UP(width, 1 << prefix_bits)` × `DIV_ROUND_UP(height, 1 << prefix_bits)`.
+3. **Predictor image**: Prediction modes per block. Dimensions: `DIV_ROUND_UP(width, 1 << size_bits)` × `DIV_ROUND_UP(height, 1 << size_bits)`.
+4. **Color transform image**: `ColorTransformElement` values per block. Same dimensions as predictor image.
+5. **Color indexing image**: Palette. Dimensions: `color_table_size` × 1.
+
+Roles 2-5 are **subresolution images**: decoded as `entropy-coded-image` (color-cache-info + prefix-codes + lz77-data). They have **no transforms** (not even the 0-bit terminator) and **no meta prefix codes** (always a single prefix code group).
 
 ### Encoding Methods
 
@@ -692,7 +718,7 @@ int color_cache_size = 1 << color_cache_code_bits;
 
 `color_cache_code_bits` values outside the range [1..11] indicate a corrupted bitstream; compliant decoders MUST indicate a corrupted bitstream for such values.
 
-Lookup: `index = (0x1e35a7bd * color) >> (32 - color_cache_code_bits)`. No conflict resolution; entries are simply overwritten. All entries are initialized to zero at the start of encoding/decoding. The cache is maintained by inserting every pixel (whether from a literal, backward reference, or cache hit) in the order they appear in the stream.
+Lookup: `index = (0x1e35a7bd * color) >> (32 - color_cache_code_bits)`. No conflict resolution; entries are simply overwritten. All entries are initialized to zero at the start of decoding. The cache is maintained by inserting **every** produced pixel — from literals, each pixel of a backward reference copy, and color cache lookups — in the order they appear in scan-line output. (The RFC says "every pixel, be it produced by backward referencing or as literals"; color cache lookups are implied by "every pixel" and required for encoder/decoder state consistency.)
 
 ## Entropy Code
 
@@ -717,7 +743,7 @@ A single leaf node is considered a complete binary tree and can be encoded using
 
 ### Simple Code Length Code
 
-Used when only 1 or 2 symbols exist (in range [0..255]):
+Used when only 1 or 2 symbols exist. The range of `symbol0` depends on `is_first_8bits`: [0..1] when 0, [0..255] when 1. `symbol1` (if present) is always [0..255]:
 
 ```c
 int num_symbols = ReadBits(1) + 1;
@@ -763,6 +789,37 @@ else {
 
 If `max_symbol` is larger than the alphabet size for the symbol type, the bitstream is invalid.
 
+### Building Canonical Prefix Codes from Code Lengths
+
+Given the array of code lengths (0 = symbol not used), build the canonical prefix code:
+
+```c
+// 1. Count the number of codes for each code length
+int bl_count[MAX_CODE_LENGTH + 1] = {0};
+for (int i = 0; i < num_symbols; i++)
+    bl_count[code_lengths[i]]++;
+
+// 2. Compute the starting code value for each code length
+int next_code[MAX_CODE_LENGTH + 1];
+int code = 0;
+bl_count[0] = 0;
+for (int bits = 1; bits <= MAX_CODE_LENGTH; bits++) {
+    code = (code + bl_count[bits - 1]) << 1;
+    next_code[bits] = code;
+}
+
+// 3. Assign codes to symbols in ascending symbol order
+for (int i = 0; i < num_symbols; i++) {
+    int len = code_lengths[i];
+    if (len > 0) {
+        symbol_code[i] = next_code[len];
+        next_code[len]++;
+    }
+}
+```
+
+MAX_CODE_LENGTH is 15 for VP8L (code lengths fit in 4 bits after the two-level scheme). Bits are always read from the byte stream **LSB-first** (same as all other VP8L reads), but Huffman codes are interpreted with the **first-read bit as the MSB** of the code (i.e., the root decision). This is the opposite of `ReadBits(n)`, which assembles the first-read bit as the LSB of the returned integer. For decoding, build a lookup table or binary tree from these codes.
+
 ### Meta Prefix Codes
 
 Allow different image blocks to use different prefix code groups. Meta prefix codes may be used **only** when the image is in the role of an ARGB image (not for subresolution images).
@@ -778,20 +835,85 @@ int prefix_image_width  = DIV_ROUND_UP(image_width,  1 << prefix_bits);
 int prefix_image_height = DIV_ROUND_UP(image_height, 1 << prefix_bits);
 ```
 
-The red and green components of each pixel in the entropy image form a 16-bit meta prefix code:
+The red and green components of each pixel in the entropy image form a 16-bit meta prefix code. To find the prefix code group for pixel (x, y):
+
 ```c
-int meta_prefix_code = (entropy_image[position] >> 8) & 0xffff;
+int block_x = x >> prefix_bits;
+int block_y = y >> prefix_bits;
+uint32 entry = entropy_image[block_y * prefix_image_width + block_x];
+int meta_prefix_code = (entry >> 8) & 0xffff;
+// Use prefix_code_groups[meta_prefix_code] (a group of 5 prefix codes)
 ```
 
-Total prefix code groups = `max(entropy image) + 1`. Total prefix codes = `5 * num_prefix_groups`.
+Total prefix code groups = `max(meta_prefix_code over all entropy image pixels) + 1`. Total prefix codes = `5 * num_prefix_groups`.
 
 ### Decoding Entropy-Coded Image Data
 
 For each pixel, read symbol S using prefix code #1:
 
-1. **S < 256**: S is the green component. Then read red (#2), blue (#3), alpha (#4).
-2. **256 <= S < 280**: LZ77 backward reference. `S - 256` is the length prefix code. Read extra bits for length L, then read distance prefix code (#5) and extra bits for distance D. Copy L pixels from position `current - D`.
-3. **S >= 280**: Color cache index `S - 280`. Look up the ARGB color.
+1. **S < 256**: S is the green component. Then read red (#2), blue (#3), alpha (#4). Insert the pixel into the color cache.
+2. **256 <= S < 280**: LZ77 backward reference. `S - 256` is the length prefix code. Read extra bits for length L, then read distance prefix code (#5) and extra bits for distance D. Copy L pixels **one at a time** from position `current - D` (streaming copy — source and destination may overlap, enabling RLE-like patterns when D < L). Insert each copied pixel into the color cache individually, in order.
+3. **S >= 280**: Color cache index `S - 280`. Look up the ARGB color. Insert the looked-up pixel into the color cache (at its hash position, which may differ from the lookup position).
+
+## VP8L Decode Pipeline
+
+Complete top-level decode flow for a VP8L lossless image:
+
+```c
+// 1. Read VP8L header
+assert(ReadByte() == 0x2F);  // signature
+int width  = ReadBits(14) + 1;
+int height = ReadBits(14) + 1;
+int alpha_is_used = ReadBits(1);  // hint only
+int version = ReadBits(3);        // must be 0
+
+// 2. Read transforms (collect in order)
+Transform transforms[4];
+int num_transforms = 0;
+while (ReadBits(1)) {
+    int type = ReadBits(2);
+    transforms[num_transforms].type = type;
+    switch (type) {
+    case 0: // PREDICTOR
+        transforms[num_transforms].size_bits = ReadBits(3) + 2;
+        // Decode predictor subresolution image (entropy-coded-image)
+        // Dimensions: DIV_ROUND_UP(width, 1<<size_bits) x DIV_ROUND_UP(height, 1<<size_bits)
+        break;
+    case 1: // COLOR
+        transforms[num_transforms].size_bits = ReadBits(3) + 2;
+        // Decode color transform subresolution image (entropy-coded-image)
+        break;
+    case 2: // SUBTRACT_GREEN
+        // No data to read
+        break;
+    case 3: // COLOR_INDEXING
+        int table_size = ReadBits(8) + 1;
+        // Decode color table as 1-pixel-high image (entropy-coded-image)
+        // Apply subtraction-coded decoding to color table
+        // If table_size <= 16, update width for pixel bundling
+        break;
+    }
+    num_transforms++;
+}
+
+// 3. Decode main ARGB image (spatially-coded-image)
+//    - Read color-cache-info (1-bit flag, optional 4-bit size)
+//    - Read meta-prefix (1-bit flag, optional entropy image)
+//    - Read prefix code groups (5 prefix codes per group)
+//    - Decode LZ77-coded pixels (literals + backward refs + cache codes)
+uint32 argb[width * height] = decode_spatially_coded_image(width, height);
+
+// 4. Apply inverse transforms in REVERSE order
+for (int i = num_transforms - 1; i >= 0; i--) {
+    switch (transforms[i].type) {
+    case 3: inverse_color_indexing(argb, ...);  break;
+    case 2: inverse_subtract_green(argb, ...);  break;
+    case 1: inverse_color_transform(argb, ...); break;
+    case 0: inverse_predictor(argb, ...);       break;
+    }
+}
+// argb[] now contains the final ARGB pixel data
+```
 
 ## Overall Structure (ABNF)
 
@@ -829,23 +951,6 @@ lz77-coded-image  = *((argb-pixel / lz77-copy / color-cache-code)
                       lz77-coded-image)
 ```
 
-## Security Considerations
-
-Implementations face risks including:
-- Integer overflows, out-of-bounds reads/writes (heap and stack).
-- Uninitialized data usage, null pointer dereferences.
-- Resource exhaustion (disk, memory, CPU time).
-
-The format does not employ "active content" but allows metadata (XMP, Exif) and custom chunks that may have their own security considerations.
-
-## IANA Registration
-
-- **Media type**: `image/webp`
-- **File extension**: `.webp`
-- **Magic number**: First 4 bytes `0x52 0x49 0x46 0x46` (`'RIFF'`), followed by 4 bytes for chunk size, then `0x57 0x45 0x42 0x50 0x56 0x50 0x38` (`'WEBPVP8'`).
-- **Apple UTI**: `org.webmproject.webp` (conforms to `public.image`)
-- **Encoding**: Binary. Use Base64 on transports that cannot handle binary directly.
-
 ## Companion Documents
 
-- **[VP8 Lossy Bitstream](vp8-bitstream.md)**: Complete VP8 key frame decoding reference (RFC 6386), including boolean arithmetic decoder, frame header parsing, intra prediction modes (all 10 B-modes with pixel formulas), dequantization tables, inverse DCT/WHT, coefficient token decoding, loop filter, and Y'CbCr to RGB conversion. Also includes the canonical Huffman code construction algorithm needed for VP8L.
+- **[VP8 Lossy Bitstream](vp8-bitstream.md)**: Complete VP8 key frame decoding reference (RFC 6386), including boolean arithmetic decoder, frame header parsing, intra prediction modes (all 10 B-modes with pixel formulas), dequantization tables, inverse DCT/WHT, coefficient token decoding, loop filter, and Y'CbCr to RGB conversion.
