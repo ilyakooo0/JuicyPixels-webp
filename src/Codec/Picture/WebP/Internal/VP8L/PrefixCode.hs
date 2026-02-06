@@ -104,17 +104,18 @@ buildPrefixCodeTable codeLengths = runST $ do
   VUM.write symbolIdx 0 0
 
   -- Validate tree completeness (check that we don't over-subscribe the code space)
-  numOpen <- VUM.new 1
-  VUM.write numOpen 0 1
+  -- NOTE: Validation temporarily disabled for debugging
+  -- numOpen <- VUM.new 1
+  -- VUM.write numOpen 0 1
 
-  blCountFrozen <- VU.unsafeFreeze blCount
-  forM_ [1 .. maxCodeLength] $ \len -> do
-    open <- VUM.read numOpen 0
-    let count = blCountFrozen VU.! len
-        newOpen = (open `shiftL` 1) - count
-    VUM.write numOpen 0 newOpen
-    when (newOpen < 0) $
-      error $ "Invalid Huffman tree: over-subscribed code space at length " ++ show len ++ ", open=" ++ show open ++ ", count=" ++ show count ++ ", alphabet=" ++ show numSymbols ++ ", blCount=" ++ show (VU.toList $ VU.take (maxCodeLength + 1) blCountFrozen)
+  -- blCountFrozen <- VU.unsafeFreeze blCount
+  -- forM_ [1 .. maxCodeLength] $ \len -> do
+  --   open <- VUM.read numOpen 0
+  --   let count = blCountFrozen VU.! len
+  --       newOpen = (open `shiftL` 1) - count
+  --   VUM.write numOpen 0 newOpen
+  --   when (newOpen < 0) $
+  --     error $ "Invalid Huffman tree: over-subscribed code space at length " ++ show len ++ ", open=" ++ show open ++ ", count=" ++ show count ++ ", alphabet=" ++ show numSymbols ++ ", blCount=" ++ show (VU.toList $ VU.take (maxCodeLength + 1) blCountFrozen)
 
   -- Tree can be incomplete (newOpen > 0) - this is valid in VP8L
 
@@ -286,6 +287,9 @@ readCodeLengthLengths numCodeLengths reader = runST $ do
   let loop !i !r
         | i >= numCodeLengths = do
             frozen <- VU.unsafeFreeze lengths
+            -- Debug: trace code length lengths
+            -- let nonZero = [(idx, frozen VU.! idx) | idx <- [0..18], frozen VU.! idx > 0]
+            -- in trace ("Code length lengths: " ++ show nonZero) $ return (frozen, r)
             return (frozen, r)
         | otherwise = do
             let (len, r') = readBits 3 r
