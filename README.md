@@ -128,16 +128,36 @@ Codec.Picture.WebP                    -- Public API
 ## Testing
 
 ```bash
-stack test
+stack test              # Run full test suite (136 tests)
+stack test --coverage   # With coverage report
 ```
 
-Test suite includes:
-- BitReader bit manipulation tests
-- Container parsing tests
-- Prefix code construction tests
-- Public API error handling tests
+### Test Suite: 136 Tests, 100% Passing ✅
 
-All 11 tests pass successfully.
+The comprehensive test suite covers:
+
+| Component | Tests | Coverage |
+|-----------|-------|----------|
+| BitReader | 20 | LSB-first bit reading, buffer management |
+| PrefixCode | 16 | Huffman code construction & decoding |
+| Container | 17 | RIFF/WebP parsing, all chunk types |
+| VP8L Transforms | 11 | All 4 inverse transforms |
+| Alpha Channel | 11 | ALPH chunk, all filter modes |
+| BoolDecoder | 16 | Range decoder, probability handling |
+| IDCT | 16 | 4x4 IDCT, Walsh-Hadamard |
+| Image Decoding | 9 | Error handling, validation |
+| Real Images | 6 | Hand-crafted test bitstreams |
+| Real Files | 9 | Actual WebP files from libwebp |
+
+**Test Highlights:**
+- ✅ Bit-exact verification of low-level operations
+- ✅ Real WebP file parsing (3 test files from libwebp)
+- ✅ Edge case handling (empty input, truncation, corruption)
+- ✅ All VP8L transform modes (14 predictor modes)
+- ✅ Alpha channel filtering (horizontal, vertical, gradient)
+- ✅ IDCT/WHT transform correctness
+
+See `TESTING.md` for detailed test documentation.
 
 ## Performance
 
@@ -161,12 +181,14 @@ The decoder uses:
 ```bash
 stack build --fast  # Quick compilation
 stack build         # Optimized build
+nix build           # Nix build (used by garnix CI)
 ```
 
 **Test:**
 ```bash
 stack test          # Run test suite
 stack test --coverage  # With coverage
+nix build .#checks  # Run via Nix flake
 ```
 
 **Format:**
@@ -174,13 +196,15 @@ stack test --coverage  # With coverage
 nix fmt             # Format with Ormolu
 ```
 
+**CI/CD:**
+The project uses garnix for continuous integration via `flake.nix`.
+
 ## Documentation
 
 Comprehensive implementation documentation:
 - `PLAN.md` - Detailed implementation plan with module structure and algorithms
 - `docs/webp-format.md` - WebP container + VP8L lossless specification (RFC 9649)
 - `docs/vp8-bitstream.md` - VP8 lossy bitstream specification (RFC 6386)
-- `docs/Juicy.Pixels/` - JuicyPixels library source for reference
 
 ## License
 

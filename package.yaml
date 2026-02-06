@@ -27,3 +27,5 @@ tests:
     dependencies:
       - JuicyPixels-webp
       - hspec
+      - QuickCheck
+      - directory

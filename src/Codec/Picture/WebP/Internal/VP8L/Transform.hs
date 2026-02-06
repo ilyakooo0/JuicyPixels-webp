@@ -1,8 +1,8 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.VP8L.Transform
-  ( VP8LTransform (..)
-  , applyInverseTransforms
+  ( VP8LTransform (..),
+    applyInverseTransforms,
   )
 where
 
@@ -249,7 +249,6 @@ select left top =
 
       sum1 = pa + pr + pg + pb
       sum2 = 0
-
    in if sum1 < sum2 then left else top
 
 -- | Clamp add subtract full (mode 12)
@@ -308,13 +307,12 @@ clampAddSubtractHalf base delta1 delta2 =
 inverseColorIndexing :: VS.Vector Word32 -> Int -> Int -> Int -> VSM.MVector s Word32 -> ST s ()
 inverseColorIndexing palette widthBits width height pixels = do
   if widthBits == 0
-    then
-      forM_ [0 .. width * height - 1] $ \i -> do
-        pixel <- VSM.read pixels i
-        let idx = fromIntegral ((pixel `shiftR` 8) .&. 0xFF)
-        when (idx < VS.length palette) $ do
-          let color = palette VS.! idx
-          VSM.write pixels i color
+    then forM_ [0 .. width * height - 1] $ \i -> do
+      pixel <- VSM.read pixels i
+      let idx = fromIntegral ((pixel `shiftR` 8) .&. 0xFF)
+      when (idx < VS.length palette) $ do
+        let color = palette VS.! idx
+        VSM.write pixels i color
     else do
       let bitsPerPixel = 8 `shiftR` widthBits
           pixelsPerByte = 1 `shiftL` widthBits

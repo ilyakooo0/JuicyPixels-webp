@@ -1,11 +1,11 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.BitReader
-  ( BitReader
-  , initBitReader
-  , readBits
-  , readBit
-  , getBytesRemaining
+  ( BitReader,
+    initBitReader,
+    readBits,
+    readBit,
+    getBytesRemaining,
   )
 where
 
@@ -16,10 +16,10 @@ import Data.Word
 -- | LSB-first bit reader for VP8L
 -- This is a hot path - called millions of times per image
 data BitReader = BitReader
-  { brBytes :: !B.ByteString
-  , brOffset :: !Int
-  , brBits :: !Word64
-  , brCount :: !Int
+  { brBytes :: !B.ByteString,
+    brOffset :: !Int,
+    brBits :: !Word64,
+    brCount :: !Int
   }
   deriving (Show)
 
@@ -32,13 +32,20 @@ initBitReader bs =
 -- | Read n bits (n <= 32) from the bitstream
 -- Returns the bits as Word32 and the updated reader
 -- Bits are returned LSB-first: the first bit read is at position 0
+-- If not enough bits are available, returns 0s for missing bits
 readBits :: Int -> BitReader -> (Word32, BitReader)
 readBits n reader@(BitReader bytes offset bits count)
   | n < 0 || n > 32 = error "readBits: n must be in [0, 32]"
   | n == 0 = (0, reader)
   | count < n =
-      let reader' = refillBuffer reader
-       in readBits n reader'
+      let reader'@(BitReader _ _ _ count') = refillBuffer reader
+       in if count' > count
+            then readBits n reader' -- Made progress, try again
+            else
+              -- Can't refill more, return what we have padded with zeros
+              let mask = (1 `shiftL` count) - 1
+                  result = fromIntegral (bits .&. mask)
+               in (result, BitReader bytes offset 0 0)
   | otherwise =
       let mask = (1 `shiftL` n) - 1
           result = fromIntegral (bits .&. mask)

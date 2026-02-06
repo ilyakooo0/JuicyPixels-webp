@@ -2,13 +2,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Codec.Picture.WebP.Internal.Container
-  ( WebPFile (..)
-  , VP8XHeader (..)
-  , WebPChunk (..)
-  , AnimHeader (..)
-  , AnimFrame (..)
-  , FourCC
-  , parseWebP
+  ( WebPFile (..),
+    VP8XHeader (..),
+    WebPChunk (..),
+    AnimHeader (..),
+    AnimFrame (..),
+    FourCC,
+    parseWebP,
   )
 where
 
@@ -30,32 +30,32 @@ data WebPFile
 
 -- | VP8X extended format header
 data VP8XHeader = VP8XHeader
-  { vp8xHasICC :: !Bool
-  , vp8xHasAlpha :: !Bool
-  , vp8xHasExif :: !Bool
-  , vp8xHasXMP :: !Bool
-  , vp8xHasAnimation :: !Bool
-  , vp8xCanvasWidth :: !Int
-  , vp8xCanvasHeight :: !Int
+  { vp8xHasICC :: !Bool,
+    vp8xHasAlpha :: !Bool,
+    vp8xHasExif :: !Bool,
+    vp8xHasXMP :: !Bool,
+    vp8xHasAnimation :: !Bool,
+    vp8xCanvasWidth :: !Int,
+    vp8xCanvasHeight :: !Int
   }
   deriving (Show, Eq)
 
 -- | Animation header
 data AnimHeader = AnimHeader
-  { animBackgroundColor :: !Word32
-  , animLoopCount :: !Word16
+  { animBackgroundColor :: !Word32,
+    animLoopCount :: !Word16
   }
   deriving (Show, Eq)
 
 -- | Animation frame
 data AnimFrame = AnimFrame
-  { anmfX :: !Int
-  , anmfY :: !Int
-  , anmfWidth :: !Int
-  , anmfHeight :: !Int
-  , anmfDuration :: !Int
-  , anmfBlend :: !Bool
-  , anmfDispose :: !Bool
+  { anmfX :: !Int,
+    anmfY :: !Int,
+    anmfWidth :: !Int,
+    anmfHeight :: !Int,
+    anmfDuration :: !Int,
+    anmfBlend :: !Bool,
+    anmfDispose :: !Bool
   }
   deriving (Show, Eq)
 
@@ -131,13 +131,13 @@ getVP8XChunk = do
 
   return $
     VP8XHeader
-      { vp8xHasICC = hasICC
-      , vp8xHasAlpha = hasAlpha
-      , vp8xHasExif = hasExif
-      , vp8xHasXMP = hasXMP
-      , vp8xHasAnimation = hasAnimation
-      , vp8xCanvasWidth = fromIntegral canvasWidthMinus1 + 1
-      , vp8xCanvasHeight = fromIntegral canvasHeightMinus1 + 1
+      { vp8xHasICC = hasICC,
+        vp8xHasAlpha = hasAlpha,
+        vp8xHasExif = hasExif,
+        vp8xHasXMP = hasXMP,
+        vp8xHasAnimation = hasAnimation,
+        vp8xCanvasWidth = fromIntegral canvasWidthMinus1 + 1,
+        vp8xCanvasHeight = fromIntegral canvasHeightMinus1 + 1
       }
 
 -- | Read chunks until end of input
@@ -180,7 +180,8 @@ getChunkData :: FourCC -> Get B.ByteString
 getChunkData expectedTag = do
   tag <- getByteString 4
   unless (tag == expectedTag) $
-    fail $ "Expected " ++ show expectedTag ++ " chunk"
+    fail $
+      "Expected " ++ show expectedTag ++ " chunk"
 
   chunkSize <- getWord32le
   let size = fromIntegral chunkSize
@@ -216,13 +217,13 @@ getANMFChunk totalSize = do
 
   let frame =
         AnimFrame
-          { anmfX = frameX
-          , anmfY = frameY
-          , anmfWidth = fromIntegral frameWidthMinus1 + 1
-          , anmfHeight = fromIntegral frameHeightMinus1 + 1
-          , anmfDuration = duration
-          , anmfBlend = blend
-          , anmfDispose = dispose
+          { anmfX = frameX,
+            anmfY = frameY,
+            anmfWidth = fromIntegral frameWidthMinus1 + 1,
+            anmfHeight = fromIntegral frameHeightMinus1 + 1,
+            anmfDuration = duration,
+            anmfBlend = blend,
+            anmfDispose = dispose
           }
 
   case runGetOrFail getChunksUntilEnd (BL.fromStrict subChunksData) of

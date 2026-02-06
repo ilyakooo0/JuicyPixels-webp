@@ -1,17 +1,17 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.VP8.IDCT
-  ( idct4x4
-  , iwht4x4
+  ( idct4x4,
+    iwht4x4,
   )
 where
 
 import Control.Monad (forM_)
 import Control.Monad.ST
 import Data.Bits
+import Data.Int
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
-import Data.Int
 
 -- IDCT constants
 cospi8sqrt2minus1 :: Int

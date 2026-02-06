@@ -56,6 +56,16 @@ test-suite JuicyPixels-webp-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      AlphaSpec
+      BitReaderSpec
+      BoolDecoderSpec
+      ContainerSpec
+      IDCTSpec
+      ImageDecodingSpec
+      PrefixCodeSpec
+      RealFilesSpec
+      RealImageSpec
+      TransformSpec
       Paths_JuicyPixels_webp
   autogen-modules:
       Paths_JuicyPixels_webp
@@ -65,9 +75,11 @@ test-suite JuicyPixels-webp-test
   build-depends:
       JuicyPixels
     , JuicyPixels-webp
+    , QuickCheck
     , base >=4.7 && <5
     , binary
     , bytestring
+    , directory
     , hspec
     , primitive
     , vector

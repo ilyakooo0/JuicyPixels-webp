@@ -31,18 +31,13 @@ These are the primary references for implementation. They have been cross-checke
 
 Both docs have section indexes at the top for navigation.
 
-## JuicyPixels Reference Source
+## JuicyPixels Integration
 
-A copy of the JuicyPixels library source is at `docs/Juicy.Pixels/`. Key files for understanding the API patterns:
-
-- `docs/Juicy.Pixels/src/Codec/Picture.hs` — top-level decode dispatch (`decodeImage`, `eitherLoad`)
-- `docs/Juicy.Pixels/src/Codec/Picture/Types.hs` — `Image`, `DynamicImage`, `Pixel` typeclass, `MutableImage`
-- `docs/Juicy.Pixels/src/Codec/Picture/Metadata.hs` — `Metadatas`, `SourceFormat` (closed type, no `SourceWebP`), `basicMetadata`
-- `docs/Juicy.Pixels/src/Codec/Picture/InternalHelper.hs` — `runGetStrict` for Binary.Get in Either String
-- `docs/Juicy.Pixels/src/Codec/Picture/Png.hs` — reference decoder pattern (decodePng, decodePngWithMetadata, etc.)
-- `docs/Juicy.Pixels/src/Codec/Picture/Jpg.hs` — another reference decoder (JPEG has IDCT, similar complexity)
-- `docs/Juicy.Pixels/src/Codec/Picture/Jpg/Internal/FastIdct.hs` — reference for integer IDCT implementation style
-- `docs/Juicy.Pixels/src/Codec/Picture/Saving.hs` — encoding dispatch pattern (DynamicImage -> ByteString)
+The implementation integrates with JuicyPixels using standard patterns:
+- `Image` and `DynamicImage` types for decoded images
+- `Metadatas` for EXIF/XMP data
+- `decodeWebP` / `decodeWebPWithMetadata` API pattern matching other formats
+- Standard error handling with `Either String`
 
 ## Critical Implementation Gotchas
 

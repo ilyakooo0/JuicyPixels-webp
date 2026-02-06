@@ -1,9 +1,9 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.VP8.Header
-  ( VP8FrameHeader (..)
-  , FilterDeltas (..)
-  , parseVP8Header
+  ( VP8FrameHeader (..),
+    FilterDeltas (..),
+    parseVP8Header,
   )
 where
 
@@ -21,31 +21,31 @@ import Data.Word
 
 -- | Filter delta values
 data FilterDeltas = FilterDeltas
-  { fdRefLfDelta :: !(VU.Vector Int)
-  , fdModeLfDelta :: !(VU.Vector Int)
+  { fdRefLfDelta :: !(VU.Vector Int),
+    fdModeLfDelta :: !(VU.Vector Int)
   }
   deriving (Show, Eq)
 
 -- | VP8 frame header
 data VP8FrameHeader = VP8FrameHeader
-  { vp8Width :: !Int
-  , vp8Height :: !Int
-  , vp8HScale :: !Int
-  , vp8VScale :: !Int
-  , vp8ColorSpace :: !Int
-  , vp8ClampingReq :: !Bool
-  , vp8Segments :: !(Maybe SegmentInfo)
-  , vp8FilterType :: !Int
-  , vp8FilterLevel :: !Int
-  , vp8Sharpness :: !Int
-  , vp8FilterDeltas :: !(Maybe FilterDeltas)
-  , vp8NumDCTPartitions :: !Int
-  , vp8QuantIndices :: !QuantIndices
-  , vp8CoeffProbs :: !(VU.Vector Word8)
-  , vp8SkipEnabled :: !Bool
-  , vp8ProbSkipFalse :: !Word8
-  , vp8FirstPartition :: !B.ByteString
-  , vp8DCTPartitions :: ![B.ByteString]
+  { vp8Width :: !Int,
+    vp8Height :: !Int,
+    vp8HScale :: !Int,
+    vp8VScale :: !Int,
+    vp8ColorSpace :: !Int,
+    vp8ClampingReq :: !Bool,
+    vp8Segments :: !(Maybe SegmentInfo),
+    vp8FilterType :: !Int,
+    vp8FilterLevel :: !Int,
+    vp8Sharpness :: !Int,
+    vp8FilterDeltas :: !(Maybe FilterDeltas),
+    vp8NumDCTPartitions :: !Int,
+    vp8QuantIndices :: !QuantIndices,
+    vp8CoeffProbs :: !(VU.Vector Word8),
+    vp8SkipEnabled :: !Bool,
+    vp8ProbSkipFalse :: !Word8,
+    vp8FirstPartition :: !B.ByteString,
+    vp8DCTPartitions :: ![B.ByteString]
   }
   deriving (Show)
 
@@ -94,24 +94,24 @@ parseVP8Header bs = do
 
       return $
         VP8FrameHeader
-          { vp8Width = w
-          , vp8Height = h
-          , vp8HScale = hscale
-          , vp8VScale = vscale
-          , vp8ColorSpace = if colorSpace then 1 else 0
-          , vp8ClampingReq = clampingType
-          , vp8Segments = segments
-          , vp8FilterType = if filterType then 1 else 0
-          , vp8FilterLevel = filterLevel
-          , vp8Sharpness = sharpness
-          , vp8FilterDeltas = filterDeltas
-          , vp8NumDCTPartitions = numPartitions
-          , vp8QuantIndices = quantIndices
-          , vp8CoeffProbs = coeffProbs
-          , vp8SkipEnabled = skipEnabled
-          , vp8ProbSkipFalse = probSkip
-          , vp8FirstPartition = partitionBytes
-          , vp8DCTPartitions = dctPartitions
+          { vp8Width = w,
+            vp8Height = h,
+            vp8HScale = hscale,
+            vp8VScale = vscale,
+            vp8ColorSpace = if colorSpace then 1 else 0,
+            vp8ClampingReq = clampingType,
+            vp8Segments = segments,
+            vp8FilterType = if filterType then 1 else 0,
+            vp8FilterLevel = filterLevel,
+            vp8Sharpness = sharpness,
+            vp8FilterDeltas = filterDeltas,
+            vp8NumDCTPartitions = numPartitions,
+            vp8QuantIndices = quantIndices,
+            vp8CoeffProbs = coeffProbs,
+            vp8SkipEnabled = skipEnabled,
+            vp8ProbSkipFalse = probSkip,
+            vp8FirstPartition = partitionBytes,
+            vp8DCTPartitions = dctPartitions
           }
   where
     fromStrict = B.fromStrict
@@ -180,11 +180,11 @@ parseSegmentation decoder = do
 
       let info =
             SegmentInfo
-              { segmentEnabled = enabled
-              , segmentUpdateMap = updateMap
-              , segmentAbsoluteMode = absoluteMode
-              , segmentQuantizer = quantizers
-              , segmentFilterStrength = filterStrengths
+              { segmentEnabled = enabled,
+                segmentUpdateMap = updateMap,
+                segmentAbsoluteMode = absoluteMode,
+                segmentQuantizer = quantizers,
+                segmentFilterStrength = filterStrengths
               }
 
       return (Just info, d5)
@@ -303,12 +303,12 @@ parseQuantIndices decoder = do
 
   let qi =
         QuantIndices
-          { qiYacQi = yacQi
-          , qiYdcDelta = ydcDelta
-          , qiY2dcDelta = y2dcDelta
-          , qiY2acDelta = y2acDelta
-          , qiUvdcDelta = uvdcDelta
-          , qiUvacDelta = uvacDelta
+          { qiYacQi = yacQi,
+            qiYdcDelta = ydcDelta,
+            qiY2dcDelta = y2dcDelta,
+            qiY2acDelta = y2acDelta,
+            qiUvdcDelta = uvdcDelta,
+            qiUvacDelta = uvacDelta
           }
 
   return (qi, d6)

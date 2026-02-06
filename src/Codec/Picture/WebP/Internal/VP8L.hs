@@ -1,8 +1,8 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.VP8L
-  ( decodeVP8L
-  , decodeVP8LHeaderless
+  ( decodeVP8L,
+    decodeVP8LHeaderless,
   )
 where
 
@@ -12,8 +12,8 @@ import Codec.Picture.WebP.Internal.VP8L.LZ77
 import Codec.Picture.WebP.Internal.VP8L.PrefixCode
 import Codec.Picture.WebP.Internal.VP8L.Transform
 import Control.Monad (foldM, replicateM, when)
-import qualified Data.ByteString as B
 import Data.Bits
+import qualified Data.ByteString as B
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import Data.Word
@@ -25,7 +25,8 @@ decodeVP8L bs = do
 
   let (signature, reader1) = readBits 8 reader
   when (signature /= 0x2F) $
-    Left $ "Invalid VP8L signature: " ++ show signature
+    Left $
+      "Invalid VP8L signature: " ++ show signature
 
   let (widthMinus1, reader2) = readBits 14 reader1
       (heightMinus1, reader3) = readBits 14 reader2
@@ -36,7 +37,8 @@ decodeVP8L bs = do
       (versionNum, reader5) = readBits 3 reader4
 
   when (versionNum /= 0) $
-    Left $ "Unsupported VP8L version: " ++ show versionNum
+    Left $
+      "Unsupported VP8L version: " ++ show versionNum
 
   decodeVP8LImage width height alphaIsUsed reader5
 
@@ -124,7 +126,8 @@ decodeVP8LImageData width height reader _transforms = do
       then do
         let (cacheBits, r) = readBits 4 reader1
         when (cacheBits < 1 || cacheBits > 11) $
-          Left $ "Invalid color cache bits: " ++ show cacheBits
+          Left $
+            "Invalid color cache bits: " ++ show cacheBits
         return (Just $ createColorCache (fromIntegral cacheBits), r)
       else return (Nothing, reader1)
 
@@ -185,13 +188,13 @@ readPrefixCodeGroup reader maybeCache = do
 
   return
     ( PrefixCodeGroup
-        { pcgGreen = greenCode
-        , pcgRed = redCode
-        , pcgBlue = blueCode
-        , pcgAlpha = alphaCode
-        , pcgDistance = distCode
-        }
-    , reader5
+        { pcgGreen = greenCode,
+          pcgRed = redCode,
+          pcgBlue = blueCode,
+          pcgAlpha = alphaCode,
+          pcgDistance = distCode
+        },
+      reader5
     )
 
 -- | Read a single prefix code with given alphabet size
@@ -242,4 +245,3 @@ pixelsToImage width height pixels alphaIsUsed =
               3 -> if alphaIsUsed then fromIntegral ((pixel `shiftR` 24) .&. 0xFF) else 255
               _ -> 0
    in Image width height pixelData
-

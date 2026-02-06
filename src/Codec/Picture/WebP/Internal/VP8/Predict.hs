@@ -1,9 +1,9 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.VP8.Predict
-  ( predict16x16
-  , predict8x8
-  , predict4x4
+  ( predict16x16,
+    predict8x8,
+    predict4x4,
   )
 where
 
@@ -54,20 +54,23 @@ predict16x16DC output stride x y = do
   let topAvailable = y > 0
       leftAvailable = x > 0
 
-  sum <- if topAvailable && leftAvailable
-    then do
-      topSum <- sumRow output stride (x, y - 1) 16
-      leftSum <- sumCol output stride (x - 1, y) 16
-      return $ (topSum + leftSum + 16) `shiftR` 5
-    else if topAvailable
+  sum <-
+    if topAvailable && leftAvailable
       then do
         topSum <- sumRow output stride (x, y - 1) 16
-        return $ (topSum + 8) `shiftR` 4
-      else if leftAvailable
-        then do
-          leftSum <- sumCol output stride (x - 1, y) 16
-          return $ (leftSum + 8) `shiftR` 4
-        else return 128
+        leftSum <- sumCol output stride (x - 1, y) 16
+        return $ (topSum + leftSum + 16) `shiftR` 5
+      else
+        if topAvailable
+          then do
+            topSum <- sumRow output stride (x, y - 1) 16
+            return $ (topSum + 8) `shiftR` 4
+          else
+            if leftAvailable
+              then do
+                leftSum <- sumCol output stride (x - 1, y) 16
+                return $ (leftSum + 8) `shiftR` 4
+              else return 128
 
   fillBlock output stride (x, y) 16 16 sum
 
@@ -102,20 +105,23 @@ predict8x8DC output stride x y = do
   let topAvailable = y > 0
       leftAvailable = x > 0
 
-  sum <- if topAvailable && leftAvailable
-    then do
-      topSum <- sumRow output stride (x, y - 1) 8
-      leftSum <- sumCol output stride (x - 1, y) 8
-      return $ (topSum + leftSum + 8) `shiftR` 4
-    else if topAvailable
+  sum <-
+    if topAvailable && leftAvailable
       then do
         topSum <- sumRow output stride (x, y - 1) 8
-        return $ (topSum + 4) `shiftR` 3
-      else if leftAvailable
-        then do
-          leftSum <- sumCol output stride (x - 1, y) 8
-          return $ (leftSum + 4) `shiftR` 3
-        else return 128
+        leftSum <- sumCol output stride (x - 1, y) 8
+        return $ (topSum + leftSum + 8) `shiftR` 4
+      else
+        if topAvailable
+          then do
+            topSum <- sumRow output stride (x, y - 1) 8
+            return $ (topSum + 4) `shiftR` 3
+          else
+            if leftAvailable
+              then do
+                leftSum <- sumCol output stride (x - 1, y) 8
+                return $ (leftSum + 4) `shiftR` 3
+              else return 128
 
   fillBlock output stride (x, y) 8 8 sum
 
@@ -150,20 +156,23 @@ predict4x4DC output stride x y = do
   let topAvailable = y > 0
       leftAvailable = x > 0
 
-  sum <- if topAvailable && leftAvailable
-    then do
-      topSum <- sumRow output stride (x, y - 1) 4
-      leftSum <- sumCol output stride (x - 1, y) 4
-      return $ (topSum + leftSum + 4) `shiftR` 3
-    else if topAvailable
+  sum <-
+    if topAvailable && leftAvailable
       then do
         topSum <- sumRow output stride (x, y - 1) 4
-        return $ (topSum + 2) `shiftR` 2
-      else if leftAvailable
-        then do
-          leftSum <- sumCol output stride (x - 1, y) 4
-          return $ (leftSum + 2) `shiftR` 2
-        else return 128
+        leftSum <- sumCol output stride (x - 1, y) 4
+        return $ (topSum + leftSum + 4) `shiftR` 3
+      else
+        if topAvailable
+          then do
+            topSum <- sumRow output stride (x, y - 1) 4
+            return $ (topSum + 2) `shiftR` 2
+          else
+            if leftAvailable
+              then do
+                leftSum <- sumCol output stride (x - 1, y) 4
+                return $ (leftSum + 2) `shiftR` 2
+              else return 128
 
   fillBlock output stride (x, y) 4 4 sum
 

@@ -1,8 +1,8 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.Animation
-  ( decodeAnimation
-  , WebPAnimFrame (..)
+  ( decodeAnimation,
+    WebPAnimFrame (..),
   )
 where
 
@@ -15,10 +15,10 @@ import qualified Data.ByteString as B
 
 -- | Animation frame with metadata
 data WebPAnimFrame = WebPAnimFrame
-  { webpFrameImage :: DynamicImage
-  , webpFrameDuration :: Int
-  , webpFrameX :: Int
-  , webpFrameY :: Int
+  { webpFrameImage :: DynamicImage,
+    webpFrameDuration :: Int,
+    webpFrameX :: Int,
+    webpFrameY :: Int
   }
 
 -- | Decode animation frames from a WebP file
@@ -71,10 +71,10 @@ decodeAnimFrame (frame, subChunks) = do
 
   return $
     WebPAnimFrame
-      { webpFrameImage = img
-      , webpFrameDuration = duration
-      , webpFrameX = x
-      , webpFrameY = y
+      { webpFrameImage = img,
+        webpFrameDuration = duration,
+        webpFrameX = x,
+        webpFrameY = y
       }
 
 -- Helper functions to find chunks

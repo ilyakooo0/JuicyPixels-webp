@@ -1,11 +1,11 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.VP8L.PrefixCode
-  ( PrefixCode (..)
-  , buildPrefixCode
-  , decodeSymbol
-  , readCodeLengths
-  , kCodeLengthCodeOrder
+  ( PrefixCode (..),
+    buildPrefixCode,
+    decodeSymbol,
+    readCodeLengths,
+    kCodeLengthCodeOrder,
   )
 where
 

@@ -1,16 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Codec.Picture.WebP
-  ( decodeWebP
-  , decodeWebPWithMetadata
-  , decodeWebPFirstFrame
-  , decodeWebPAnimation
-  , WebPAnimFrame (..)
+  ( decodeWebP,
+    decodeWebPWithMetadata,
+    decodeWebPFirstFrame,
+    decodeWebPAnimation,
+    WebPAnimFrame (..),
   )
 where
 
-import Codec.Picture.Types
 import Codec.Picture.Metadata
+import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.Animation (WebPAnimFrame (..), decodeAnimation)
 import Codec.Picture.WebP.Internal.Container
 import Codec.Picture.WebP.Internal.VP8

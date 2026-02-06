@@ -1,17 +1,17 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.VP8.Coefficients
-  ( decodeCoefficients
+  ( decodeCoefficients,
   )
 where
 
 import Codec.Picture.WebP.Internal.VP8.BoolDecoder
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad.ST
+import Data.Int
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as VU
-import Data.Int
 import Data.Word
 
 -- | Decode DCT coefficients for a 4x4 block

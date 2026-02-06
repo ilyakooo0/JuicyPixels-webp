@@ -119,11 +119,13 @@
                     git
                     jujutsu
                     stack
-                    (python3.withPackages (ps: with ps; [
-                      httpx
-                      beautifulsoup4
-                      fastmcp
-                    ]))
+                    (python3.withPackages (
+                      ps: with ps; [
+                        httpx
+                        beautifulsoup4
+                        fastmcp
+                      ]
+                    ))
 
                     # CLI tools
                     bash

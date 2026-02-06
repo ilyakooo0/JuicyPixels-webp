@@ -1,7 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.VP8.LoopFilter
-  ( applyLoopFilter
+  ( applyLoopFilter,
   )
 where
 
@@ -9,9 +9,9 @@ import Codec.Picture.WebP.Internal.VP8.Header
 import Control.Monad (forM_, when)
 import Control.Monad.ST
 import Data.Bits
+import Data.Int
 import qualified Data.Vector.Storable.Mutable as VSM
 import Data.Word
-import Data.Int
 
 -- | Apply loop filter to reconstructed frame
 applyLoopFilter :: VP8FrameHeader -> VSM.MVector s Word8 -> Int -> Int -> ST s ()
@@ -44,11 +44,13 @@ applyNormalLoopFilter header yPlane width height = do
   let filterLevel = vp8FilterLevel header
       sharpness = vp8Sharpness header
 
-  let interiorLimit = if sharpness > 0
-        then if sharpness > 4
-          then 0
-          else 9 - sharpness
-        else filterLevel * 2 + filterLevel
+  let interiorLimit =
+        if sharpness > 0
+          then
+            if sharpness > 4
+              then 0
+              else 9 - sharpness
+          else filterLevel * 2 + filterLevel
 
       mbEdgeLimit = (filterLevel + 2) * 2 + interiorLimit
       subEdgeLimit = filterLevel * 2 + interiorLimit

@@ -1,52 +1,52 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.VP8.Dequant
-  ( DequantFactors (..)
-  , QuantIndices (..)
-  , SegmentInfo (..)
-  , computeDequantFactors
-  , dequantizeBlock
+  ( DequantFactors (..),
+    QuantIndices (..),
+    SegmentInfo (..),
+    computeDequantFactors,
+    dequantizeBlock,
   )
 where
 
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad.ST
 import Data.Bits
+import Data.Int
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as VU
-import Data.Int
 import Data.Word
 
 -- | Quantization indices from frame header
 data QuantIndices = QuantIndices
-  { qiYacQi :: !Int
-  , qiYdcDelta :: !Int
-  , qiY2dcDelta :: !Int
-  , qiY2acDelta :: !Int
-  , qiUvdcDelta :: !Int
-  , qiUvacDelta :: !Int
+  { qiYacQi :: !Int,
+    qiYdcDelta :: !Int,
+    qiY2dcDelta :: !Int,
+    qiY2acDelta :: !Int,
+    qiUvdcDelta :: !Int,
+    qiUvacDelta :: !Int
   }
   deriving (Show, Eq)
 
 -- | Segment information
 data SegmentInfo = SegmentInfo
-  { segmentEnabled :: !Bool
-  , segmentUpdateMap :: !Bool
-  , segmentAbsoluteMode :: !Bool
-  , segmentQuantizer :: !(VU.Vector Int)
-  , segmentFilterStrength :: !(VU.Vector Int)
+  { segmentEnabled :: !Bool,
+    segmentUpdateMap :: !Bool,
+    segmentAbsoluteMode :: !Bool,
+    segmentQuantizer :: !(VU.Vector Int),
+    segmentFilterStrength :: !(VU.Vector Int)
   }
   deriving (Show, Eq)
 
 -- | Dequantization factors for a segment
 data DequantFactors = DequantFactors
-  { dqYDC :: !Int16
-  , dqYAC :: !Int16
-  , dqY2DC :: !Int16
-  , dqY2AC :: !Int16
-  , dqUVDC :: !Int16
-  , dqUVAC :: !Int16
+  { dqYDC :: !Int16,
+    dqYAC :: !Int16,
+    dqY2DC :: !Int16,
+    dqY2AC :: !Int16,
+    dqUVDC :: !Int16,
+    dqUVAC :: !Int16
   }
   deriving (Show, Eq)
 
@@ -90,12 +90,12 @@ computeSegmentDequant qi maybeSegInfo segment =
       y2acAdjusted = max 8 ((y2ac * 155) `div` 100)
       uvdcCapped = min 132 uvdc
    in DequantFactors
-        { dqYDC = fromIntegral ydc
-        , dqYAC = fromIntegral yac
-        , dqY2DC = fromIntegral y2dcAdjusted
-        , dqY2AC = fromIntegral y2acAdjusted
-        , dqUVDC = fromIntegral uvdcCapped
-        , dqUVAC = fromIntegral uvac
+        { dqYDC = fromIntegral ydc,
+          dqYAC = fromIntegral yac,
+          dqY2DC = fromIntegral y2dcAdjusted,
+          dqY2AC = fromIntegral y2acAdjusted,
+          dqUVDC = fromIntegral uvdcCapped,
+          dqUVAC = fromIntegral uvac
         }
 
 -- | Compute a single quantizer value

@@ -68,8 +68,6 @@
                 JuicyPixels-webp = pkgs.lib.pipe hprev.JuicyPixels-webp (
                   with pkgs.haskell.lib;
                   [
-                    dontCheck
-                    dontHaddock
                     doStrip
                     disableLibraryProfiling
                     disableExecutableProfiling
@@ -82,7 +80,9 @@
                 validation-selective = pkgs.haskell.lib.doJailbreak hprev.validation-selective;
                 doctest-discover = pkgs.haskell.lib.dontCheck hprev.doctest-discover;
                 fourmolu = pkgs.haskell.lib.dontCheck hprev.fourmolu;
-                haskell-language-server = pkgs.haskell.lib.doJailbreak (pkgs.haskell.lib.dontCheck hprev.haskell-language-server);
+                haskell-language-server = pkgs.haskell.lib.doJailbreak (
+                  pkgs.haskell.lib.dontCheck hprev.haskell-language-server
+                );
                 path = pkgs.haskell.lib.dontCheck hprev.path;
                 HTF = pkgs.haskell.lib.dontCheck hprev.HTF;
                 hw-prim = pkgs.haskell.lib.dontCheck hprev.hw-prim;
@@ -188,6 +188,8 @@
         formatter = treefmtEval.config.build.wrapper;
         checks = {
           formatting = treefmtEval.config.build.check self;
+          # Run test suite as part of checks (garnix will execute this)
+          tests = haskellPkgSet.JuicyPixels-webp;
         };
       }
     );

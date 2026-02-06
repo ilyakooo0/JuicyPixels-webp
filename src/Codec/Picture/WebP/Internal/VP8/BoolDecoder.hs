@@ -1,31 +1,31 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Codec.Picture.WebP.Internal.VP8.BoolDecoder
-  ( BoolDecoder
-  , initBoolDecoder
-  , boolRead
-  , boolLiteral
-  , boolSigned
-  , boolReadTree
+  ( BoolDecoder (..),
+    initBoolDecoder,
+    boolRead,
+    boolLiteral,
+    boolSigned,
+    boolReadTree,
   )
 where
 
 import Data.Bits
 import qualified Data.ByteString as B
+import Data.Int
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import Data.Word
-import Data.Int
 
 -- | Boolean arithmetic decoder for VP8
 -- Range is maintained in [128..255]
 -- This is a hot path - called millions of times per image
 data BoolDecoder = BoolDecoder
-  { bdBytes :: !B.ByteString
-  , bdRange :: !Word32
-  , bdValue :: !Word32
-  , bdCount :: !Int
-  , bdPos :: !Int
+  { bdBytes :: !B.ByteString,
+    bdRange :: !Word32,
+    bdValue :: !Word32,
+    bdCount :: !Int,
+    bdPos :: !Int
   }
   deriving (Show)
 
@@ -38,11 +38,11 @@ initBoolDecoder bs
           byte1 = fromIntegral (B.index bs 1) :: Word32
           value = (byte0 `shiftL` 8) .|. byte1
        in BoolDecoder
-            { bdBytes = bs
-            , bdRange = 255
-            , bdValue = value
-            , bdCount = 0
-            , bdPos = 2
+            { bdBytes = bs,
+              bdRange = 255,
+              bdValue = value,
+              bdCount = 0,
+              bdPos = 2
             }
 
 -- | Read a single bit with given probability
@@ -57,14 +57,14 @@ boolRead prob decoder@(BoolDecoder bytes range value count pos) =
               newValue = value - bigSplit
               (finalRange, finalValue, finalCount, finalPos) =
                 renormalize bytes newRange newValue count pos
-           in ( True
-              , BoolDecoder bytes finalRange finalValue finalCount finalPos
+           in ( True,
+                BoolDecoder bytes finalRange finalValue finalCount finalPos
               )
         else
           let (finalRange, finalValue, finalCount, finalPos) =
                 renormalize bytes split value count pos
-           in ( False
-              , BoolDecoder bytes finalRange finalValue finalCount finalPos
+           in ( False,
+                BoolDecoder bytes finalRange finalValue finalCount finalPos
               )
 
 -- | Read n bits as a literal (probability 128, MSB-first)
