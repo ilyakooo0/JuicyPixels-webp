@@ -41,27 +41,19 @@ encodeVP8LIdentity img =
   where
     (|>) = flip ($)
 
--- | Write identity code: all 256 symbols with length 8, symbol N → code N
+-- | Write identity code: all 256 symbols with length 8
 writeIdentityCode :: BitWriter -> BitWriter
 writeIdentityCode w =
-  let -- Write as normal code
-      w1 = writeBit False w  -- is_simple = 0
+  let w1 = writeBit False w  -- is_simple = 0 (normal code)
 
-      -- Code length code: Just need symbol 8 (for "length 8")
-      -- Make it simple: symbol 8 gets code 0 (length 1)
-      -- kCodeLengthCodeOrder = [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, ...]
-      -- Symbol 8 is at position 11
+      -- Write code length code with only symbol 8 (for "length 8")
+      -- Symbol 8 is at position 11 in kCodeLengthCodeOrder
+      numCLC = 12  -- Include through position 11
+      w2 = writeBits 4 (numCLC - 4) w1  -- Write 8, meaning 4+8=12 code lengths
 
-      -- Simplest CLC: Use simple code with symbol 8
-      -- Wait, we can't write a simple code for the CLC - it expects normal format
-      -- Let me use: symbols 0-8 all with length 1, giving 1-bit codes for each
-
-      numCLC = 12  -- Through symbol 8
-      w2 = writeBits 4 (numCLC - 4) w1  -- 8 lengths
-
-      -- Write all 12 CLC lengths as 1 (but this won't validate - need proper tree)
-      -- Let me use: symbol 8 has length 1, all others have length 0
-      -- This gives us a degenerate tree where only symbol 8 exists
+      -- Write 12 lengths for kCodeLengthCodeOrder positions 0-11
+      -- [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8]
+      -- Only symbol 8 (position 11) gets length 1
       w3 = writeBits 3 0 w2   -- pos 0 (sym 17): len 0
       w4 = writeBits 3 0 w3   -- pos 1 (sym 18): len 0
       w5 = writeBits 3 0 w4   -- pos 2 (sym 0): len 0
@@ -73,13 +65,14 @@ writeIdentityCode w =
       w11 = writeBits 3 0 w10 -- pos 8 (sym 16): len 0
       w12 = writeBits 3 0 w11 -- pos 9 (sym 6): len 0
       w13 = writeBits 3 0 w12 -- pos 10 (sym 7): len 0
-      w14 = writeBits 3 1 w13 -- pos 11 (sym 8): len 1
+      w14 = writeBits 3 1 w13 -- pos 11 (sym 8): len 1 ✓
 
-      -- use_max_symbol = 0 (all 256 symbols)
+      -- use_max_symbol = 0 (don't specify, use all 256)
       w15 = writeBit False w14
 
-      -- Write 256 code lengths, all are "8" (using symbol 8, code 0, len 1)
-      -- Symbol 8 in CLC is encoded as bit 0
+      -- Write 256 code lengths for symbols 0-255
+      -- Each symbol gets length 8, encoded using symbol 8 from CLC
+      -- Symbol 8 has code 0 (single symbol with len 1), so write bit 0 for each
       w16 = foldl (\wa _ -> writeBit False wa) w15 [0..255]
 
    in w16
