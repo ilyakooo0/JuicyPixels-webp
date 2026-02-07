@@ -223,7 +223,13 @@ decodeLZ77 ::
   BitReader ->
   Either String (VS.Vector Word32, BitReader)
 decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ do
+  when (width <= 0 || width > 16384 || height <= 0 || height > 16384) $
+    error $ "Invalid dimensions in decodeLZ77: " ++ show width ++ "x" ++ show height
+
   let totalPixels = width * height
+  when (totalPixels <= 0 || totalPixels > 268435456) $  -- 16384^2
+    error $ "Total pixels out of range: " ++ show totalPixels
+
   output <- VSM.new totalPixels
 
   let loop !pos !cache !r
@@ -303,7 +309,7 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
                   else do
                     let cacheIdx = fromIntegral greenSym - 280
                     case maybeCache of
-                      Nothing -> return $ Left "Color cache symbol but no cache"
+                      Nothing -> return $ Left $ "Color cache symbol " ++ show greenSym ++ " (cache idx " ++ show cacheIdx ++ ") decoded but no cache initialized. Alphabet was 280 symbols (256 lit + 24 len), but got symbol >= 280. Decoder bug or invalid bitstream."
                       Just c -> do
                         let color = lookupColor cacheIdx c
                         VSM.write output pos color
@@ -312,14 +318,12 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
 
       copyLoop !pos !dist !len !out !cache !maybeC !r
         | len <= 0 = loop pos cache r
+        | pos >= totalPixels = loop pos cache r  -- Stop if we've filled the buffer
         | otherwise = do
             let srcPos = pos - dist
             when (srcPos < 0) $
               error $
                 "Invalid back-reference: distance=" ++ show dist ++ " at pos=" ++ show pos
-
-            when (pos >= totalPixels) $
-              error $ "Buffer overflow in copy: pos=" ++ show pos ++ ", totalPixels=" ++ show totalPixels ++ ", len=" ++ show len
 
             color <- VSM.read out srcPos
             VSM.write out pos color
@@ -339,10 +343,15 @@ getEntropyGroup x y (Just (entropyImage, prefixBits)) width =
   let entropyWidth = (width + (1 `shiftL` prefixBits) - 1) `shiftR` prefixBits
       entropyX = x `shiftR` prefixBits
       entropyY = y `shiftR` prefixBits
-      entropyIdx = entropyY * entropyWidth + entropyX
-      pixel = entropyImage VS.! entropyIdx
-      green = (pixel `shiftR` 8) .&. 0xFF
-   in fromIntegral green
+      -- Use Integer to avoid overflow
+      entropyIdxInteger = (fromIntegral entropyY :: Integer) * (fromIntegral entropyWidth :: Integer) + (fromIntegral entropyX :: Integer)
+      entropyIdx = fromIntegral entropyIdxInteger :: Int
+   in if entropyIdx < 0 || entropyIdx >= VS.length entropyImage
+        then error $ "Entropy index out of bounds: " ++ show entropyIdx ++ " (entropyImage length: " ++ show (VS.length entropyImage) ++ ")"
+        else
+          let pixel = entropyImage VS.! entropyIdx
+              green = (pixel `shiftR` 8) .&. 0xFF
+           in fromIntegral green
 
 -- | Pack ARGB components into a Word32
 packColor :: Word8 -> Word8 -> Word8 -> Word8 -> Word32

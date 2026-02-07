@@ -44,7 +44,11 @@ applyInverseTransform (TransformColorIndex palette widthBits) width height pixel
 -- | Inverse subtract green transform
 inverseSubtractGreen :: Int -> Int -> VSM.MVector s Word32 -> ST s ()
 inverseSubtractGreen width height pixels = do
-  forM_ [0 .. width * height - 1] $ \i -> do
+  let totalPixels = width * height
+  when (totalPixels < 0 || totalPixels > 100000000) $
+    error $ "Invalid pixel count in subtract green: " ++ show totalPixels
+
+  forM_ [0 .. totalPixels - 1] $ \i -> do
     pixel <- VSM.read pixels i
     let r = fromIntegral ((pixel `shiftR` 16) .&. 0xFF) :: Word8
         g = fromIntegral ((pixel `shiftR` 8) .&. 0xFF) :: Word8
@@ -60,6 +64,9 @@ inverseSubtractGreen width height pixels = do
 -- | Inverse color transform
 inverseColorTransform :: Int -> VS.Vector Word32 -> Int -> Int -> VSM.MVector s Word32 -> ST s ()
 inverseColorTransform sizeBits transformData width height pixels = do
+  when (sizeBits < 2 || sizeBits > 10) $
+    error $ "Invalid sizeBits in color transform: " ++ show sizeBits
+
   let blockSize = 1 `shiftL` sizeBits
       transformWidth = (width + blockSize - 1) `shiftR` sizeBits
 
@@ -67,14 +74,17 @@ inverseColorTransform sizeBits transformData width height pixels = do
     forM_ [0 .. width - 1] $ \x -> do
       let transformX = x `shiftR` sizeBits
           transformY = y `shiftR` sizeBits
-          transformIdx = transformY * transformWidth + transformX
+          -- Use Integer to avoid overflow
+          transformIdxInteger = (fromIntegral transformY :: Integer) * (fromIntegral transformWidth :: Integer) + (fromIntegral transformX :: Integer)
+          transformIdx = fromIntegral transformIdxInteger :: Int
           transformPixel = transformData VS.! transformIdx
 
           greenToRed = toInt8 (fromIntegral ((transformPixel `shiftR` 16) .&. 0xFF) :: Word8)
           greenToBlue = toInt8 (fromIntegral ((transformPixel `shiftR` 8) .&. 0xFF) :: Word8)
           redToBlue = toInt8 (fromIntegral (transformPixel .&. 0xFF) :: Word8)
 
-          idx = y * width + x
+          idxInteger = (fromIntegral y :: Integer) * (fromIntegral width :: Integer) + (fromIntegral x :: Integer)
+          idx = fromIntegral idxInteger :: Int
 
       pixel <- VSM.read pixels idx
 
@@ -103,6 +113,9 @@ toInt8 w =
 -- | Inverse predictor transform
 inversePredictorTransform :: Int -> VS.Vector Word32 -> Int -> Int -> VSM.MVector s Word32 -> ST s ()
 inversePredictorTransform sizeBits transformData width height pixels = do
+  when (sizeBits < 2 || sizeBits > 10) $
+    error $ "Invalid sizeBits in predictor transform: " ++ show sizeBits
+
   let blockSize = 1 `shiftL` sizeBits
       transformWidth = (width + blockSize - 1) `shiftR` sizeBits
 
@@ -110,18 +123,33 @@ inversePredictorTransform sizeBits transformData width height pixels = do
     forM_ [0 .. width - 1] $ \x -> do
       let transformX = x `shiftR` sizeBits
           transformY = y `shiftR` sizeBits
-          transformIdx = transformY * transformWidth + transformX
+          -- Use Integer to avoid overflow
+          transformIdxInteger = (fromIntegral transformY :: Integer) * (fromIntegral transformWidth :: Integer) + (fromIntegral transformX :: Integer)
+          transformIdx = fromIntegral transformIdxInteger :: Int
           transformPixel = transformData VS.! transformIdx
           mode = fromIntegral ((transformPixel `shiftR` 8) .&. 0xFF) :: Int
 
-          idx = y * width + x
+          idxInteger = (fromIntegral y :: Integer) * (fromIntegral width :: Integer) + (fromIntegral x :: Integer)
+          idx = fromIntegral idxInteger :: Int
 
       pixel <- VSM.read pixels idx
 
-      left <- if x > 0 then VSM.read pixels (y * width + x - 1) else return 0xFF000000
-      top <- if y > 0 then VSM.read pixels ((y - 1) * width + x) else return 0xFF000000
-      topLeft <- if x > 0 && y > 0 then VSM.read pixels ((y - 1) * width + x - 1) else return 0xFF000000
-      topRight <- if x < width - 1 && y > 0 then VSM.read pixels ((y - 1) * width + x + 1) else return top
+      left <- if x > 0 then VSM.read pixels (idx - 1) else return 0xFF000000
+      top <- if y > 0 then do
+                let topIdxInteger = (fromIntegral (y - 1) :: Integer) * (fromIntegral width :: Integer) + (fromIntegral x :: Integer)
+                    topIdx = fromIntegral topIdxInteger :: Int
+                VSM.read pixels topIdx
+             else return 0xFF000000
+      topLeft <- if x > 0 && y > 0 then do
+                   let tlIdxInteger = (fromIntegral (y - 1) :: Integer) * (fromIntegral width :: Integer) + (fromIntegral (x - 1) :: Integer)
+                       tlIdx = fromIntegral tlIdxInteger :: Int
+                   VSM.read pixels tlIdx
+                 else return 0xFF000000
+      topRight <- if x < width - 1 && y > 0 then do
+                    let trIdxInteger = (fromIntegral (y - 1) :: Integer) * (fromIntegral width :: Integer) + (fromIntegral (x + 1) :: Integer)
+                        trIdx = fromIntegral trIdxInteger :: Int
+                    VSM.read pixels trIdx
+                  else return top
 
       let predicted = predictor mode left top topLeft topRight
           result = addPixels pixel predicted
@@ -306,8 +334,10 @@ clampAddSubtractHalf base delta1 delta2 =
 -- | Inverse color indexing transform
 inverseColorIndexing :: VS.Vector Word32 -> Int -> Int -> Int -> VSM.MVector s Word32 -> ST s ()
 inverseColorIndexing palette widthBits width height pixels = do
+  let totalPixels = width * height
+
   if widthBits == 0
-    then forM_ [0 .. width * height - 1] $ \i -> do
+    then forM_ [0 .. totalPixels - 1] $ \i -> do
       pixel <- VSM.read pixels i
       let idx = fromIntegral ((pixel `shiftR` 8) .&. 0xFF)
       when (idx < VS.length palette) $ do
@@ -322,14 +352,20 @@ inverseColorIndexing palette widthBits width height pixels = do
         forM_ [0 .. width - 1] $ \x -> do
           let packedIdx = x `shiftR` widthBits
               subIdx = x .&. (pixelsPerByte - 1)
-              idx = y * width + packedIdx
+              -- Use Integer to avoid overflow for large images
+              idxInteger = (fromIntegral y :: Integer) * (fromIntegral width :: Integer) + (fromIntegral packedIdx :: Integer)
+              idx = fromIntegral idxInteger :: Int
 
-          when (idx < VSM.length pixels) $ do
+          when (idx >= 0 && idx < VSM.length pixels) $ do
             pixel <- VSM.read pixels idx
             let green = (pixel `shiftR` 8) .&. 0xFF
-                colorIdx = (green `shiftR` (subIdx * bitsPerPixel)) .&. mask
-                outIdx = y * width + x
+                shiftAmt = subIdx * bitsPerPixel
+                colorIdx = if shiftAmt > 20
+                             then error $ "Bit shift overflow: subIdx=" ++ show subIdx ++ ", bitsPerPixel=" ++ show bitsPerPixel
+                             else (green `shiftR` shiftAmt) .&. mask
+                outIdxInteger = (fromIntegral y :: Integer) * (fromIntegral width :: Integer) + (fromIntegral x :: Integer)
+                outIdx = fromIntegral outIdxInteger :: Int
 
-            when (fromIntegral colorIdx < VS.length palette && outIdx < VSM.length pixels) $ do
+            when (fromIntegral colorIdx < VS.length palette && outIdx >= 0 && outIdx < VSM.length pixels) $ do
               let color = palette VS.! fromIntegral colorIdx
               VSM.write pixels outIdx color

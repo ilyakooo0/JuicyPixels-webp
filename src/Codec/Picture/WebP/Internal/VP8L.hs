@@ -17,6 +17,7 @@ import qualified Data.ByteString as B
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import Data.Word
+import Debug.Trace (trace)
 
 -- | Decode a VP8L lossless WebP image
 decodeVP8L :: B.ByteString -> Either String (Image PixelRGBA8)
@@ -52,11 +53,24 @@ decodeVP8LHeaderless width height bs = do
 -- | Decode the VP8L image data (common path for full and headless)
 decodeVP8LImage :: Int -> Int -> Bool -> BitReader -> Either String (Image PixelRGBA8)
 decodeVP8LImage width height alphaIsUsed reader = do
+  when (width <= 0 || width > 16384) $
+    Left $ "Invalid width in decodeVP8LImage: " ++ show width
+  when (height <= 0 || height > 16384) $
+    Left $ "Invalid height in decodeVP8LImage: " ++ show height
+
+  trace ("VP8L: Reading transforms for " ++ show width ++ "x" ++ show height) $ return ()
+
   (transforms, reader1) <- readTransforms width height reader
+
+  trace ("VP8L: Read " ++ show (length transforms) ++ " transforms, decoding image data") $ return ()
 
   (pixels, _) <- decodeVP8LImageData width height reader1 transforms
 
+  trace ("VP8L: Decoded " ++ show (VS.length pixels) ++ " pixels, applying inverse transforms") $ return ()
+
   finalPixels <- applyInverseTransforms transforms width height pixels
+
+  trace ("VP8L: Applied transforms, creating image") $ return ()
 
   let image = pixelsToImage width height finalPixels alphaIsUsed
   return image
@@ -78,12 +92,16 @@ readTransform :: Int -> Int -> BitReader -> Either String (VP8LTransform, BitRea
 readTransform width height reader = do
   let (transformType, reader1) = readBits 2 reader
 
+  trace ("Reading transform type " ++ show transformType) $ return ()
+
   case transformType of
     0 -> do
       let (sizeBits, reader2) = readBits 3 reader1
           blockSize = 1 `shiftL` fromIntegral sizeBits
           transformWidth = (width + blockSize - 1) `shiftR` fromIntegral sizeBits
           transformHeight = (height + blockSize - 1) `shiftR` fromIntegral sizeBits
+
+      trace ("Predictor transform: sizeBits=" ++ show sizeBits ++ ", subimage=" ++ show transformWidth ++ "x" ++ show transformHeight) $ return ()
 
       (transformData, reader3) <- decodeSubresolutionImage transformWidth transformHeight reader2
 
@@ -115,6 +133,8 @@ readTransform width height reader = do
 -- Per RFC 9649: subresolution images have NO transforms and NO meta prefix codes
 decodeSubresolutionImage :: Int -> Int -> BitReader -> Either String (VS.Vector Word32, BitReader)
 decodeSubresolutionImage width height reader = do
+  trace ("Decoding subresolution image: " ++ show width ++ "x" ++ show height) $ return ()
+
   -- Subresolution images: read color cache, then single prefix code group, then LZ77
   let (usesColorCache, reader1) = readBit reader
 
@@ -125,12 +145,17 @@ decodeSubresolutionImage width height reader = do
         when (cacheBits < 1 || cacheBits > 11) $
           Left $
             "Invalid color cache bits: " ++ show cacheBits
+        trace ("Subresolution: color cache with " ++ show cacheBits ++ " bits") $ return ()
         return (Just $ createColorCache (fromIntegral cacheBits), r)
-      else return (Nothing, reader1)
+      else do
+        trace "Subresolution: no color cache" $ return ()
+        return (Nothing, reader1)
 
+  trace "Subresolution: reading prefix code group" $ return ()
   -- Subresolution images always use a single prefix code group (no meta prefix codes bit)
   (group, reader3) <- readPrefixCodeGroup reader2 maybeCache
 
+  trace "Subresolution: decoding LZ77" $ return ()
   -- Decode LZ77 data
   decodeLZ77 width height maybeCache group Nothing reader3
 
@@ -198,11 +223,19 @@ readPrefixCodeGroup reader maybeCache = do
         Nothing -> 0
         Just cache -> 1 `shiftL` ccBits cache
 
+  trace ("Reading prefix code group, cache size=" ++ show cacheSize) $ return ()
+
+  trace "  Reading green code..." $ return ()
   (greenCode, reader1) <- readPrefixCodeWithAlphabet (256 + 24 + cacheSize) reader
+  trace "  Reading red code..." $ return ()
   (redCode, reader2) <- readPrefixCodeWithAlphabet 256 reader1
+  trace "  Reading blue code..." $ return ()
   (blueCode, reader3) <- readPrefixCodeWithAlphabet 256 reader2
+  trace "  Reading alpha code..." $ return ()
   (alphaCode, reader4) <- readPrefixCodeWithAlphabet 256 reader3
+  trace "  Reading distance code..." $ return ()
   (distCode, reader5) <- readPrefixCodeWithAlphabet 40 reader4
+  trace "  All codes read successfully" $ return ()
 
   return
     ( PrefixCodeGroup
@@ -218,11 +251,15 @@ readPrefixCodeGroup reader maybeCache = do
 -- | Read a single prefix code with given alphabet size
 readPrefixCodeWithAlphabet :: Int -> BitReader -> Either String (PrefixCode, BitReader)
 readPrefixCodeWithAlphabet alphabetSize reader = do
+  trace ("    Reading code lengths for alphabet size " ++ show alphabetSize) $ return ()
   (codeLengths, reader1) <- readCodeLengths alphabetSize reader
 
+  trace ("    Building prefix code (max length: " ++ show (if VU.null codeLengths then 0 else VU.maximum codeLengths) ++ ")") $ return ()
   case buildPrefixCode codeLengths of
     Left err -> Left $ "Failed to build prefix code for alphabet size " ++ show alphabetSize ++ ": " ++ err
-    Right code -> return (code, reader1)
+    Right code -> do
+      trace "    Code built successfully" $ return ()
+      return (code, reader1)
 
 -- | Apply subtraction coding to palette data
 applySubtractionCoding :: VS.Vector Word32 -> Int -> VS.Vector Word32
@@ -252,14 +289,18 @@ applySubtractionCoding palette size = VS.generate size $ \i ->
 -- | Convert pixel data to JuicyPixels image
 pixelsToImage :: Int -> Int -> VS.Vector Word32 -> Bool -> Image PixelRGBA8
 pixelsToImage width height pixels alphaIsUsed =
-  let pixelData = VS.generate (width * height * 4) $ \i ->
+  let totalComponents = width * height * 4
+      pixelData = VS.generate totalComponents $ \i ->
         let pixelIdx = i `div` 4
             component = i `mod` 4
-            pixel = pixels VS.! pixelIdx
-         in case component of
-              0 -> fromIntegral ((pixel `shiftR` 16) .&. 0xFF)
-              1 -> fromIntegral ((pixel `shiftR` 8) .&. 0xFF)
-              2 -> fromIntegral (pixel .&. 0xFF)
-              3 -> if alphaIsUsed then fromIntegral ((pixel `shiftR` 24) .&. 0xFF) else 255
-              _ -> 0
+         in if pixelIdx < 0 || pixelIdx >= VS.length pixels
+              then error $ "Pixel index out of bounds: " ++ show pixelIdx ++ " (pixels length: " ++ show (VS.length pixels) ++ ", i=" ++ show i ++ ")"
+              else
+                let pixel = pixels VS.! pixelIdx
+                 in case component of
+                      0 -> fromIntegral ((pixel `shiftR` 16) .&. 0xFF)  -- R
+                      1 -> fromIntegral ((pixel `shiftR` 8) .&. 0xFF)   -- G
+                      2 -> fromIntegral (pixel .&. 0xFF)                  -- B
+                      3 -> if alphaIsUsed then fromIntegral ((pixel `shiftR` 24) .&. 0xFF) else 255  -- A
+                      _ -> 0
    in Image width height pixelData
