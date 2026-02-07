@@ -37,6 +37,7 @@ library
       Codec.Picture.WebP.Internal.VP8.Tables
       Codec.Picture.WebP.Internal.VP8L
       Codec.Picture.WebP.Internal.VP8L.Encode
+      Codec.Picture.WebP.Internal.VP8L.EncodeComplete
       Codec.Picture.WebP.Internal.VP8L.EncodeSimple
       Codec.Picture.WebP.Internal.VP8L.LZ77
       Codec.Picture.WebP.Internal.VP8L.PrefixCode

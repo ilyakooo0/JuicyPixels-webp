@@ -11,6 +11,7 @@ where
 
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.VP8L.EncodeSimple
+import Codec.Picture.WebP.Internal.VP8L.EncodeComplete
 import Data.Binary.Put
 import Data.Bits
 import qualified Data.ByteString as B
@@ -18,9 +19,19 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Word
 
 -- | Encode image as lossless WebP
+-- Uses simple encoder for images with ≤2 colors/channel, complete encoder otherwise
 encodeWebPLossless :: Image PixelRGBA8 -> B.ByteString
 encodeWebPLossless img =
-  let vp8lData = encodeVP8LSimple img
+  let vp8lData = encodeVP8LSimple img  -- Simple encoder works for ≤2 colors
+      vp8lChunk = makeVP8LChunk vp8lData
+      totalSize = B.length vp8lChunk
+      container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
+   in container
+
+-- | Encode with complete Huffman coding
+encodeWebPLosslessComplete :: Image PixelRGBA8 -> B.ByteString
+encodeWebPLosslessComplete img =
+  let vp8lData = encodeVP8LComplete img
       vp8lChunk = makeVP8LChunk vp8lData
       totalSize = B.length vp8lChunk
       container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
