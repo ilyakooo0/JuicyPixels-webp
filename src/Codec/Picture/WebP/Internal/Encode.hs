@@ -15,6 +15,7 @@ import Codec.Picture.WebP.Internal.VP8L.EncodeComplete
 import Codec.Picture.WebP.Internal.VP8L.EncodeUncompressed
 import Codec.Picture.WebP.Internal.VP8L.EncodeIdentity
 import Codec.Picture.WebP.Internal.VP8L.EncodeAny
+import qualified Codec.Picture.WebP.Internal.VP8.Encode as VP8.Encode
 import Data.Binary.Put
 import Data.Bits
 import qualified Data.ByteString as B
@@ -49,10 +50,18 @@ encodeWebPLosslessComplete img =
       container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
    in container
 
--- | Encode image as lossy WebP (stub for now)
+-- | Encode image as lossy WebP using VP8 codec
+-- Quality: 0-100 (higher = better quality, larger file)
+--   0-30:   Low quality, small files
+--   31-70:  Medium quality (recommended for web)
+--   71-100: High quality, larger files
 encodeWebPLossy :: Image PixelRGB8 -> Int -> B.ByteString
 encodeWebPLossy img quality =
-  error "VP8 lossy encoding not yet implemented"
+  let vp8Data = VP8.Encode.encodeVP8 img quality
+      vp8Chunk = makeVP8Chunk vp8Data
+      totalSize = B.length vp8Chunk
+      container = makeRIFFContainer (fromIntegral totalSize) vp8Chunk
+   in container
 
 -- | Create RIFF container for WebP
 makeRIFFContainer :: Word32 -> B.ByteString -> B.ByteString

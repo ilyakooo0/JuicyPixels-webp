@@ -68,12 +68,12 @@ writeCodeFor256Alphabet :: [Word8] -> BitWriter -> BitWriter
 writeCodeFor256Alphabet [] = writeSimpleCode 0
 writeCodeFor256Alphabet [s] = writeSimpleCode (fromIntegral s)
 writeCodeFor256Alphabet [s1, s2] = write2Code (fromIntegral s1) (fromIntegral s2)
-writeCodeFor256Alphabet syms =
+writeCodeFor256Alphabet syms@(s:_) =
   -- For 3+ symbols, write them all explicitly as a multi-symbol simple code
   -- This is valid per spec but limited to small alphabets
   if length syms <= 4
     then writeMultiSymbolSimpleCode syms
-    else writeSimpleCode (fromIntegral $ head syms)  -- Fallback
+    else writeSimpleCode (fromIntegral s)  -- Fallback: use first symbol
 
 writeSimpleCode :: Word16 -> BitWriter -> BitWriter
 writeSimpleCode sym w =
@@ -87,10 +87,11 @@ write2Code s1 s2 w =
 
 -- | Write multi-symbol simple code (3-4 symbols only)
 writeMultiSymbolSimpleCode :: [Word8] -> BitWriter -> BitWriter
-writeMultiSymbolSimpleCode syms w =
+writeMultiSymbolSimpleCode [] w = writeSimpleCode 0 w  -- Empty case (shouldn't happen)
+writeMultiSymbolSimpleCode (s:_) w =
   -- Use simple code format to list all symbols explicitly
   -- For now, just use first symbol as fallback
-  writeSimpleCode (fromIntegral $ head syms) w
+  writeSimpleCode (fromIntegral s) w
 
 writePixelData :: VS.Vector Word8 -> Int -> UniqueVals -> BitWriter -> BitWriter
 writePixelData pixels n uv w =

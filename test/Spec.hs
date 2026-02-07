@@ -13,6 +13,7 @@ import qualified RealFilesSpec
 import qualified RealImageSpec
 import Test.Hspec
 import qualified TransformSpec
+import qualified VP8EncodeSpec
 
 main :: IO ()
 main = hspec $ do
@@ -26,3 +27,4 @@ main = hspec $ do
   describe "IDCT" IDCTSpec.spec
   describe "Real Images" RealImageSpec.spec
   describe "Real Files" RealFilesSpec.spec
+  describe "VP8 Lossy Encoder" VP8EncodeSpec.spec

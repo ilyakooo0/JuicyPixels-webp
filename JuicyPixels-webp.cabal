@@ -28,12 +28,20 @@ library
       Codec.Picture.WebP.Internal.Encode
       Codec.Picture.WebP.Internal.VP8
       Codec.Picture.WebP.Internal.VP8.BoolDecoder
+      Codec.Picture.WebP.Internal.VP8.BoolEncoder
       Codec.Picture.WebP.Internal.VP8.Coefficients
+      Codec.Picture.WebP.Internal.VP8.ColorConvert
+      Codec.Picture.WebP.Internal.VP8.DCT
       Codec.Picture.WebP.Internal.VP8.Dequant
+      Codec.Picture.WebP.Internal.VP8.Encode
+      Codec.Picture.WebP.Internal.VP8.EncodeCoefficients
+      Codec.Picture.WebP.Internal.VP8.EncodeHeader
       Codec.Picture.WebP.Internal.VP8.Header
       Codec.Picture.WebP.Internal.VP8.IDCT
       Codec.Picture.WebP.Internal.VP8.LoopFilter
+      Codec.Picture.WebP.Internal.VP8.ModeSelection
       Codec.Picture.WebP.Internal.VP8.Predict
+      Codec.Picture.WebP.Internal.VP8.Quantize
       Codec.Picture.WebP.Internal.VP8.Tables
       Codec.Picture.WebP.Internal.VP8L
       Codec.Picture.WebP.Internal.VP8L.EncodeAny
@@ -75,6 +83,7 @@ test-suite JuicyPixels-webp-test
       RealFilesSpec
       RealImageSpec
       TransformSpec
+      VP8EncodeSpec
       Paths_JuicyPixels_webp
   autogen-modules:
       Paths_JuicyPixels_webp
