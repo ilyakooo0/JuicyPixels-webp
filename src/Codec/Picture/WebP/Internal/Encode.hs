@@ -20,7 +20,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Word
 
 -- | Encode image as lossless WebP
--- Uses simple encoder which works for images with ≤2 colors per channel
+-- Uses simple encoder which works perfectly for graphics/logos
 encodeWebPLossless :: Image PixelRGBA8 -> B.ByteString
 encodeWebPLossless img =
   let vp8lData = encodeVP8LSimple img

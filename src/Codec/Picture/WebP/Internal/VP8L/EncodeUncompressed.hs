@@ -87,23 +87,21 @@ writeUncompressed256 w =
       -- Symbol 8 = code 1 = bit 1
       w16 = writeBit True w15
 
-      -- Now repeat using symbol 16 (code 0)
-      -- Symbol 16 repeats previous value 3-6 times (2 extra bits)
-      -- We need to repeat 255 more times total
-      -- Do it in chunks: 16 repeats max 6 times, so we need 255/6 = 42.5, so 43 uses of symbol 16
-      -- Actually symbol 16 is "copy previous" 3-6 times
+      -- Now repeat using symbol 16 (code 0, repeat previous 3-6 times)
+      -- We need 255 more copies of length 8
+      -- Symbol 16 can repeat 3-6 times with 2 extra bits
+      -- Use max repeat (6) as many times as needed
 
-      -- Write as many repeat-6 as possible
-      repeatFull = 255 `div` 6  -- 42 times
-      remainingAfterFull = 255 `mod` 6  -- 3
+      -- Helper to write one repeat-6
+      writeRepeat6 wa = writeBit False wa |> writeBits 2 3
+        where (|>) = flip ($)
 
-      -- Write repeatFull times: symbol 16 (code 0) + 2 bits (6-3=3)
-      w17 = foldl (\wa _ -> writeBits 2 3 (writeBit False wa)) w16 [1..repeatFull]
+      -- Write 42 repeat-6 operations (42*6 = 252)
+      w17 = foldl (\wa _ -> writeRepeat6 wa) w16 [1..42]
 
-      -- Write remaining
-      w18 = if remainingAfterFull > 0
-              then writeBits 2 (fromIntegral $ remainingAfterFull - 3) (writeBit False w17)
-              else w17
+      -- Write final repeat-3 (255 - 252 = 3 remaining)
+      w18 = writeBit False w17 |> writeBits 2 0  -- repeat 3 times (0+3=3)
+        where (|>) = flip ($)
 
    in w18
 
