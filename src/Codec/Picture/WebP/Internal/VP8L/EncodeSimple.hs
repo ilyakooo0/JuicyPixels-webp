@@ -20,13 +20,13 @@ encodeVP8LSimple :: Image PixelRGBA8 -> B.ByteString
 encodeVP8LSimple img =
   let width = imageWidth img
       height = imageHeight img
-      
-      -- Convert to ARGB with subtract-green
-      argbPixels = convertAndTransform img
-      
+
+      -- Convert to ARGB WITHOUT transform for now (to test)
+      argbPixels = convertWithoutTransform img
+
       -- Analyze channels
       info = analyzeChannels argbPixels
-      
+
       -- Build bitstream
       w = emptyBitWriter
         |> writeBits 8 0x2F  -- Signature
@@ -34,22 +34,29 @@ encodeVP8LSimple img =
         |> writeBits 14 (fromIntegral $ height - 1)
         |> writeBit True  -- alpha_is_used
         |> writeBits 3 0  -- version
-        |> writeBit True  -- has_transform
-        |> writeBits 2 2  -- SUBTRACT_GREEN
-        |> writeBit False  -- no more transforms
+        |> writeBit False  -- NO transform (testing)
         |> writeBit False  -- no color cache
         |> writeBit False  -- single prefix code group
-        |> writeChannelCode (ciGreen info) 
+        |> writeChannelCode (ciGreen info)
         |> writeChannelCode (ciRed info)
         |> writeChannelCode (ciBlue info)
         |> writeChannelCode (ciAlpha info)
         |> writeSimple1 0  -- Distance code
         |> writeOnePixels argbPixels info
         |> finalizeBitWriter
-        
+
    in bitWriterToByteString w
   where
     (|>) = flip ($)
+
+convertWithoutTransform :: Image PixelRGBA8 -> VS.Vector Word32
+convertWithoutTransform img = VS.generate (imageWidth img * imageHeight img) $ \i ->
+  let pixels = imageData img
+      r = pixels VS.! (i * 4)
+      g = pixels VS.! (i * 4 + 1)
+      b = pixels VS.! (i * 4 + 2)
+      a = pixels VS.! (i * 4 + 3)
+   in packARGB a r g b
 
 data ChannelInfo = ChannelInfo
   { ciGreen :: !(VU.Vector Word8),
@@ -117,6 +124,7 @@ writeOnePixel info w px =
       r = fromIntegral ((px `shiftR` 16) .&. 0xFF)
       b = fromIntegral (px .&. 0xFF)
       a = fromIntegral ((px `shiftR` 24) .&. 0xFF)
+      -- Note: VP8L pixel encoding order is Green, Red, Blue, Alpha
    in w |> writeValue g (ciGreen info)
          |> writeValue r (ciRed info)
          |> writeValue b (ciBlue info)
