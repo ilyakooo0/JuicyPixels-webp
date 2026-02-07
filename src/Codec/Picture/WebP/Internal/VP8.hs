@@ -57,15 +57,19 @@ decodeVP8 bs = do
                   -- Read UV mode
                   let (uvMode, decoder2) = boolReadTree kfUVModeTree kfUVModeProbs decoder1
 
-                  -- Full coefficient-based reconstruction for non-B_PRED modes
+                  -- Full coefficient-based reconstruction
                   decoder3 <- if yMode == 4
                     then do
-                      -- B_PRED is complex (16 individual modes), use simplified for now
-                      let yVal = fromIntegral $ min 255 $ max 0 $ 160 + (mbX * 4) + (mbY * 2)
-                          uVal = 128
-                          vVal = 128
-                      fillMBSimple yBuf uBuf vBuf mbY mbX mbWidth yVal uVal vVal
-                      return decoder2
+                      -- B_PRED: 16 4x4 blocks with individual modes
+                      decoderBPred <- reconstructBPred yBuf mbY mbX mbWidth decoder2 coeffProbs header
+
+                      -- Reconstruct U and V with 8x8 prediction
+                      predict8x8 uvMode uBuf (mbWidth * 8) (mbX * 8) (mbY * 8)
+                      predict8x8 uvMode vBuf (mbWidth * 8) (mbX * 8) (mbY * 8)
+                      decoderU <- reconstructChroma uBuf mbY mbX mbWidth uvMode decoderBPred coeffProbs (computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0)
+                      decoderV <- reconstructChroma vBuf mbY mbX mbWidth uvMode decoderU coeffProbs (computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0)
+
+                      return decoderV
                     else do
                       -- Decode Y2 block (contains DC values for 16 Y blocks)
                       let (skip, decoder3) = if vp8SkipEnabled header
@@ -105,6 +109,10 @@ decodeVP8 bs = do
 
         _finalDecoder <- decodeMacroblocks 0 0 decoder
 
+        -- Apply loop filter to reconstructed frame
+        when (vp8FilterLevel header > 0) $ do
+          applyLoopFilter header yBuf (mbWidth * 16) (mbHeight * 16)
+
         -- Convert YUV to RGB
         yData <- VS.freeze yBuf
         uData <- VS.freeze uBuf
@@ -136,6 +144,66 @@ decodeVP8 bs = do
         VS.freeze rgbBuf
 
   return $ Image width height pixelData
+
+-- | Reconstruct B_PRED macroblock (16 individual 4x4 blocks)
+reconstructBPred :: VSM.MVector s Word8 -> Int -> Int -> Int
+                 -> BoolDecoder -> VU.Vector Word8 -> VP8FrameHeader
+                 -> ST s BoolDecoder
+reconstructBPred yBuf mbY mbX mbStride decoder coeffProbs header = do
+  let mbYBase = mbY * 16
+      mbXBase = mbX * 16
+      dequantFact = computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0
+
+  -- For B_PRED, we need to track above and left modes for context
+  -- Simplified: use default context (mode 0 = DC_PRED)
+  let defaultProbs = kfBmodeProbs  -- Flat vector, use default probabilities
+
+  -- Decode each 4x4 block with its own mode
+  let decodeBBlock blockIdx dec = do
+        let by = blockIdx `div` 4
+            bx = blockIdx `mod` 4
+            blockY = mbYBase + by * 4
+            blockX = mbXBase + bx * 4
+
+        -- Read 4x4 intra mode for this block (using simplified context)
+        -- In full implementation, would use above/left modes for context
+        -- For now, use mode 0,0 (DC prediction for both neighbors)
+        let probOffset = 0 * 10 * 9 + 0 * 9  -- above=0, left=0
+            probs = V.convert $ VU.drop probOffset kfBmodeProbs  -- Convert to boxed vector
+            (bMode, dec1) = boolReadTree kfBmodeTree probs dec
+
+        -- Apply 4x4 prediction
+        predict4x4 bMode yBuf (mbStride * 16) blockX blockY
+
+        -- Decode coefficients
+        (coeffs, hasNonzero, dec2) <- decodeCoefficients dec1 coeffProbs 3 0 0  -- Block type 3 (Y)
+
+        -- Dequantize
+        dequantizeBlock dequantFact 3 coeffs  -- Type 3: Y block with DC
+
+        -- Apply IDCT
+        idct4x4 coeffs
+
+        -- Add to prediction and clamp
+        forM_ [0 :: Int .. 3] $ \dy ->
+          forM_ [0 :: Int .. 3] $ \dx -> do
+            let yIdx = (blockY + dy) * mbStride * 16 + (blockX + dx)
+            pred <- VSM.read yBuf yIdx
+            residual <- VSM.read coeffs (dy * 4 + dx)
+            let reconstructed = fromIntegral pred + fromIntegral residual
+                clamped = fromIntegral $ min 255 $ max 0 reconstructed
+            VSM.write yBuf yIdx clamped
+
+        return dec2
+
+  -- Decode all 16 4x4 blocks
+  let loopBBlocks blockIdx dec
+        | blockIdx >= 16 = return dec
+        | otherwise = do
+            dec' <- decodeBBlock blockIdx dec
+            loopBBlocks (blockIdx + 1) dec'
+
+  loopBBlocks 0 decoder
 
 -- | Reconstruct 16x16 macroblock from coefficients
 reconstructMB16x16 :: VSM.MVector s Word8 -> Int -> Int -> Int -> Int

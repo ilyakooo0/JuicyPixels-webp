@@ -355,9 +355,6 @@ readCodeLengthLengths numCodeLengths reader = runST $ do
   let loop !i !r
         | i >= numCodeLengths = do
             frozen <- VU.unsafeFreeze lengths
-            -- Debug: trace code length lengths
-            -- let nonZero = [(idx, frozen VU.! idx) | idx <- [0..18], frozen VU.! idx > 0]
-            -- in trace ("Code length lengths: " ++ show nonZero) $ return (frozen, r)
             return (frozen, r)
         | otherwise = do
             let (len, r') = readBits 3 r

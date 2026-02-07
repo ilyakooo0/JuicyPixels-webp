@@ -36,7 +36,6 @@ library
       Codec.Picture.WebP.Internal.VP8L
       Codec.Picture.WebP.Internal.VP8L.LZ77
       Codec.Picture.WebP.Internal.VP8L.PrefixCode
-      Codec.Picture.WebP.Internal.VP8L.PrefixCode2
       Codec.Picture.WebP.Internal.VP8L.Transform
   other-modules:
       Paths_JuicyPixels_webp
