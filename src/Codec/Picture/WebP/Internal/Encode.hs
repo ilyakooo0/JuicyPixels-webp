@@ -13,6 +13,8 @@ import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.VP8L.EncodeSimple
 import Codec.Picture.WebP.Internal.VP8L.EncodeComplete
 import Codec.Picture.WebP.Internal.VP8L.EncodeUncompressed
+import Codec.Picture.WebP.Internal.VP8L.EncodeIdentity
+import Codec.Picture.WebP.Internal.VP8L.EncodeAny
 import Data.Binary.Put
 import Data.Bits
 import qualified Data.ByteString as B
@@ -20,10 +22,10 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Word
 
 -- | Encode image as lossless WebP
--- Uses simple encoder which works perfectly for graphics/logos
+-- Uses simple encoder which works perfectly for graphics (≤2 colors/channel)
 encodeWebPLossless :: Image PixelRGBA8 -> B.ByteString
 encodeWebPLossless img =
-  let vp8lData = encodeVP8LSimple img
+  let vp8lData = encodeVP8LAny img
       vp8lChunk = makeVP8LChunk vp8lData
       totalSize = B.length vp8lChunk
       container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
