@@ -262,10 +262,30 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
   -- Determine actual table size used
   actualSize <- VUM.read nextTablePos 0
 
+  -- Fill any remaining invalid entries in primary table with first valid symbol
+  -- This handles incomplete Huffman trees gracefully
+  trace "  Filling incomplete tree gaps with default symbol" $ return ()
+  firstSymIdx <- VUM.read symbolIdx 0
+  when (firstSymIdx > 0) $ do
+    firstSym <- VUM.read sorted 0
+    let defaultEntry = packEntry firstSym 0  -- 0-bit code (will return immediately)
+    forM_ [0 .. primarySize - 1] $ \i -> do
+      entry <- VUM.read table i
+      when (entry == invalidEntry) $
+        VUM.write table i defaultEntry
+
+  -- Also fill secondary tables
+  forM_ [primarySize .. actualSize - 1] $ \i -> do
+    entry <- VUM.read table i
+    when (entry == invalidEntry) $ do
+      firstSym <- VUM.read sorted 0
+      VUM.write table i (packEntry firstSym 0)
+
   -- Freeze and truncate to actual size
   frozenTable <- VU.unsafeFreeze table
   let finalTable = VU.take actualSize frozenTable
 
+  trace ("  Table built: size=" ++ show actualSize ++ ", primary=" ++ show primarySize) $ return ()
   return $ Right $ PrefixCodeTable finalTable primaryBits
 
 -- | Calculate the number of bits needed for a secondary table
