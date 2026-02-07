@@ -1,12 +1,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Codec.Picture.WebP
-  ( decodeWebP,
+  ( -- * Decoding
+    decodeWebP,
     decodeWebPWithMetadata,
     decodeWebPFirstFrame,
     decodeWebPAnimation,
     decodeWebPAnimationComposited,
     WebPAnimFrame (..),
+
+    -- * Encoding
+    encodeWebPLossless,
+    encodeWebPLossy,
   )
 where
 
@@ -14,6 +19,7 @@ import Codec.Picture.Metadata
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.Animation (WebPAnimFrame (..), decodeAnimation, decodeAnimationWithCompositing)
 import Codec.Picture.WebP.Internal.Container
+import Codec.Picture.WebP.Internal.Encode
 import Codec.Picture.WebP.Internal.VP8
 import Codec.Picture.WebP.Internal.VP8L
 import qualified Data.ByteString as B

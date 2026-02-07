@@ -23,7 +23,9 @@ library
       Codec.Picture.WebP.Internal.Alpha
       Codec.Picture.WebP.Internal.Animation
       Codec.Picture.WebP.Internal.BitReader
+      Codec.Picture.WebP.Internal.BitWriter
       Codec.Picture.WebP.Internal.Container
+      Codec.Picture.WebP.Internal.Encode
       Codec.Picture.WebP.Internal.VP8
       Codec.Picture.WebP.Internal.VP8.BoolDecoder
       Codec.Picture.WebP.Internal.VP8.Coefficients
@@ -34,6 +36,8 @@ library
       Codec.Picture.WebP.Internal.VP8.Predict
       Codec.Picture.WebP.Internal.VP8.Tables
       Codec.Picture.WebP.Internal.VP8L
+      Codec.Picture.WebP.Internal.VP8L.Encode
+      Codec.Picture.WebP.Internal.VP8L.EncodeSimple
       Codec.Picture.WebP.Internal.VP8L.LZ77
       Codec.Picture.WebP.Internal.VP8L.PrefixCode
       Codec.Picture.WebP.Internal.VP8L.Transform
