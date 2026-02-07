@@ -29,11 +29,11 @@ encodeVP8LIdentity img =
         |> writeBit False  -- no transforms
         |> writeBit False  -- no color cache
         |> writeBit False  -- single prefix code group
-        |> writeIdentityCode  -- Green
-        |> writeIdentityCode  -- Red
-        |> writeIdentityCode  -- Blue
-        |> writeIdentityCode  -- Alpha
-        |> writeSimple1 0     -- Distance
+        |> writeIdentityCode 280  -- Green (256 + 24 length codes)
+        |> writeIdentityCode 256  -- Red
+        |> writeIdentityCode 256  -- Blue
+        |> writeIdentityCode 256  -- Alpha
+        |> writeSimple1 0          -- Distance
         |> writeAllPixels pixels (width * height)
         |> finalizeBitWriter
 
@@ -41,9 +41,9 @@ encodeVP8LIdentity img =
   where
     (|>) = flip ($)
 
--- | Write identity code: all 256 symbols with length 8
-writeIdentityCode :: BitWriter -> BitWriter
-writeIdentityCode w =
+-- | Write identity code: all symbols with length 8
+writeIdentityCode :: Int -> BitWriter -> BitWriter
+writeIdentityCode alphabetSize w =
   let w1 = writeBit False w  -- is_simple = 0 (normal code)
 
       -- Write code length code with only symbol 8 (for "length 8")
@@ -67,13 +67,12 @@ writeIdentityCode w =
       w13 = writeBits 3 0 w12 -- pos 10 (sym 7): len 0
       w14 = writeBits 3 1 w13 -- pos 11 (sym 8): len 1 ✓
 
-      -- use_max_symbol = 0 (don't specify, use all 256)
+      -- use_max_symbol = 0 (use all symbols in alphabet)
       w15 = writeBit False w14
 
-      -- Write 256 code lengths for symbols 0-255
-      -- Each symbol gets length 8, encoded using symbol 8 from CLC
-      -- Symbol 8 has code 0 (single symbol with len 1), so write bit 0 for each
-      w16 = foldl (\wa _ -> writeBit False wa) w15 [0..255]
+      -- Write code lengths for all symbols in alphabet
+      -- Each symbol gets length 8, encoded using symbol 8 from CLC (bit 0)
+      w16 = foldl (\wa _ -> writeBit False wa) w15 [0 .. alphabetSize - 1]
 
    in w16
 

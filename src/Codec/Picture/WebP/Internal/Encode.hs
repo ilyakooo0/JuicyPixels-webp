@@ -22,10 +22,10 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Word
 
 -- | Encode image as lossless WebP
--- Uses identity encoder which works for ALL images
+-- Uses simple encoder which works perfectly for graphics (≤2 colors/channel)
 encodeWebPLossless :: Image PixelRGBA8 -> B.ByteString
 encodeWebPLossless img =
-  let vp8lData = encodeVP8LIdentity img
+  let vp8lData = encodeVP8LSimple img
       vp8lChunk = makeVP8LChunk vp8lData
       totalSize = B.length vp8lChunk
       container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
