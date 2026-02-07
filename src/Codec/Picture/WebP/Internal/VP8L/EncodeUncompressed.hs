@@ -37,16 +37,15 @@ encodeVP8LUncompressed img =
   where
     (|>) = flip ($)
 
--- | Write uncompressed prefix codes (all 256 symbols with length 8)
+-- | Write uncompressed prefix codes
 writeUncompressedCodes :: BitWriter -> BitWriter
 writeUncompressedCodes w =
-  -- Write 5 codes: Green, Red, Blue, Alpha, Distance
-  -- Each with all 256 symbols having length 8 (identity encoding)
-  w |> writeUncompressed256
-    |> writeUncompressed256
-    |> writeUncompressed256
-    |> writeUncompressed256
-    |> writeSimpleCode 0  -- Distance: single symbol
+  -- Write 5 codes: Green(256), Red(256), Blue(256), Alpha(256), Distance(40)
+  w |> writeUncompressed256  -- Green
+    |> writeUncompressed256  -- Red
+    |> writeUncompressed256  -- Blue
+    |> writeUncompressed256  -- Alpha
+    |> writeSimpleCode 0     -- Distance: simple code (no back-refs in uncompressed)
   where
     (|>) = flip ($)
 
