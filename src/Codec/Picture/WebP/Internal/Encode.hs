@@ -20,11 +20,18 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Word
 
 -- | Encode image as lossless WebP
--- Uses simple encoder for ≤2 colors/channel, uncompressed for others
+-- Uses simple encoder which works for images with ≤2 colors per channel
 encodeWebPLossless :: Image PixelRGBA8 -> B.ByteString
 encodeWebPLossless img =
-  -- For maximum compatibility, use uncompressed encoding
-  -- This works for ALL images
+  let vp8lData = encodeVP8LSimple img
+      vp8lChunk = makeVP8LChunk vp8lData
+      totalSize = B.length vp8lChunk
+      container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
+   in container
+
+-- | Encode with uncompressed mode (for debugging)
+encodeWebPLosslessUncompressed :: Image PixelRGBA8 -> B.ByteString
+encodeWebPLosslessUncompressed img =
   let vp8lData = encodeVP8LUncompressed img
       vp8lChunk = makeVP8LChunk vp8lData
       totalSize = B.length vp8lChunk
