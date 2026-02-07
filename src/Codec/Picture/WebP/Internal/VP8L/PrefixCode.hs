@@ -17,7 +17,6 @@ import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import qualified Data.Vector.Unboxed.Mutable as VUM
 import Data.Word
-import Debug.Trace (trace)
 
 -- | Prefix code (Huffman code) representation
 -- Either a single symbol (0-bit code) or a lookup table
@@ -49,7 +48,7 @@ buildPrefixCode codeLengths
 -- | Build a two-level lookup table for prefix code decoding
 -- This implementation closely follows libwebp's BuildHuffmanTable algorithm
 buildPrefixCodeTable :: VU.Vector Int -> Either String PrefixCode
-buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbols=" ++ show (VU.length codeLengths) ++ ", maxLen=" ++ show (VU.maximum codeLengths)) $ runST $ do
+buildPrefixCodeTable codeLengths = runST $ do
   let numSymbols = VU.length codeLengths
       maxCodeLength = VU.maximum codeLengths
 
@@ -61,16 +60,12 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
       -- Need to allocate blCount/offset for at least primaryBits+1 to avoid out of bounds when iterating up to primaryBits
       histogramSize = max (maxCodeLength + 1) (primaryBits + 1)
 
-  trace ("  Allocating histogram of size " ++ show histogramSize) $ return ()
-
   -- Step 1: Build histogram of code lengths
   blCount <- VUM.replicate histogramSize (0 :: Int)
   VU.forM_ (VU.indexed codeLengths) $ \(_sym, len) ->
     when (len > 0) $ do
       count <- VUM.read blCount len
       VUM.write blCount len (count + 1)
-
-  trace "  Histogram built" $ return ()
 
   -- Step 2: Create sorted symbol array (sorted by code length, then by symbol value)
   sorted <- VUM.new numSymbols
@@ -102,7 +97,6 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
   VUM.write nextTablePos 0 primarySize
 
   -- Step 4: Compute canonical codes (next_code array)
-  trace "  Computing canonical codes" $ return ()
   nextCode <- VUM.replicate histogramSize (0 :: Int)
   codeAcc <- VUM.new 1
   VUM.write codeAcc 0 0
@@ -116,14 +110,12 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
       error $ "Code overflow at length " ++ show len ++ ": code=" ++ show code ++ ", count=" ++ show count ++ ", newCode=" ++ show newCode
     VUM.write codeAcc 0 newCode
 
-  trace "  Filling primary table" $ return ()
   -- Step 5: Fill primary table (codes with length <= primaryBits)
   symbolIdx <- VUM.new 1
   VUM.write symbolIdx 0 0
 
   forM_ [1 .. primaryBits] $ \len -> do
     count <- VUM.read blCount len
-    trace ("    Length " ++ show len ++ ": " ++ show count ++ " symbols") $ return ()
     forM_ [1 .. count] $ \_ -> do
       symIdx <- VUM.read symbolIdx 0
       sym <- VUM.read sorted symIdx
@@ -137,19 +129,15 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
           revKey = reverseBits code len
           replicateCount = 1 `shiftL` (primaryBits - len)
 
-      trace ("      Symbol " ++ show sym ++ " -> code " ++ show code ++ " (len " ++ show len ++ "), replicate " ++ show replicateCount ++ " times") $ return ()
-
       -- Replicate entry for all bit patterns with this prefix
       forM_ [0 .. (replicateCount - 1)] $ \i -> do
         let idx = revKey .|. (i `shiftL` len)
         VUM.write table idx entry
 
   -- Step 6: Fill secondary tables (codes with length > primaryBits)
-  trace ("  Filling secondary tables for lengths " ++ show (primaryBits + 1) ++ " to " ++ show maxCodeLength) $ return ()
   when (maxCodeLength > primaryBits) $ do
     forM_ [(primaryBits + 1) .. maxCodeLength] $ \len -> do
       count <- VUM.read blCount len
-      trace ("    Length " ++ show len ++ ": " ++ show count ++ " symbols") $ return ()
       forM_ [1 .. count] $ \symNum -> do
         symIdx <- VUM.read symbolIdx 0
         sym <- VUM.read sorted symIdx
@@ -162,22 +150,16 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
         let shortCode = code .&. ((1 `shiftL` primaryBits) - 1)
             revShort = reverseBits shortCode primaryBits
 
-        trace ("      Symbol " ++ show sym ++ " (code=" ++ show code ++ ", len=" ++ show len ++ ")") $ return ()
-
         -- Check if we need a new secondary table
         existing <- VUM.read table revShort
         let existingLen = fromIntegral (existing .&. 0xFFFF) :: Int
             existingSymbol = fromIntegral (existing `shiftR` 16) :: Int
 
-        trace ("        revShort=" ++ show revShort ++ ", existing=0x" ++ showHex existing ++ " (sym=" ++ show existingSymbol ++ ", len=" ++ show existingLen ++ ")") $ return ()
-
         (secondaryTableBits, secondaryOffset) <-
           if existing == invalidEntry
             then do
-              trace ("        Allocating new secondary table (was invalid)") $ return ()
               -- Calculate size needed for this secondary table
               tableBits <- calculateSecondaryTableBits blCount len primaryBits maxCodeLength
-              trace ("          tableBits=" ++ show tableBits) $ return ()
               when (tableBits < 0 || tableBits > 10) $
                 error $ "Invalid tableBits: " ++ show tableBits
               let tableSize = 1 `shiftL` tableBits
@@ -188,13 +170,11 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
               -- Store pointer in primary table: offset in symbol field, total bits (primary + secondary) in len field
               let totalBits = tableBits + primaryBits
               VUM.write table revShort (packEntry (fromIntegral offset) totalBits)
-              trace ("          Allocated secondary table at offset " ++ show offset ++ " with size " ++ show tableSize ++ ", totalBits=" ++ show totalBits) $ return ()
               return (totalBits, offset)
             else if existingLen > 0 && existingLen <= primaryBits
               then do
                 -- This slot has a direct symbol! We need to allocate a secondary table
                 -- Move the existing symbol to the secondary table
-                trace ("        Promoting slot to secondary table (had symbol " ++ show existingSymbol ++ " len " ++ show existingLen ++ ")") $ return ()
 
                 -- Calculate size needed for this secondary table
                 tableBits <- calculateSecondaryTableBits blCount len primaryBits maxCodeLength
@@ -219,13 +199,11 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
                 forM_ [0 .. existingReplicateCount - 1] $ \i ->
                   VUM.write table (offset + i) existingEntry
 
-                trace ("          Moved existing symbol to secondary table, allocated at offset " ++ show offset) $ return ()
                 return (totalBits, offset)
               else do
                 -- Existing secondary table pointer
                 let totalBits = existingLen
                     offset = existingSymbol
-                trace ("        Using existing secondary table: totalBits=" ++ show totalBits ++ ", offset=" ++ show offset) $ return ()
                 when (totalBits <= primaryBits || totalBits > 20) $
                   error $ "Invalid totalBits from existing entry: " ++ show totalBits ++ " (should be > " ++ show primaryBits ++ ", existing=0x" ++ showHex existing ++ ")"
                 return (totalBits, offset)
@@ -236,21 +214,17 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
             revLong = reverseBits longPart longBits
             actualSecondaryBits = secondaryTableBits - primaryBits
 
-        trace ("        longPart=" ++ show longPart ++ ", longBits=" ++ show longBits ++ ", actualSecondaryBits=" ++ show actualSecondaryBits ++ ", secondaryTableBits=" ++ show secondaryTableBits) $ return ()
-
         -- Check if secondary table is large enough
-        when (actualSecondaryBits < longBits) $ do
-          trace ("        ERROR: Secondary table too small! actualSecondaryBits=" ++ show actualSecondaryBits ++ " < longBits=" ++ show longBits) $ return ()
+        when (actualSecondaryBits < longBits) $
           -- This can happen when the table was allocated for shorter codes
           -- We need to either expand the table or skip this symbol
           -- For now, skip this symbol (incomplete tree is OK in VP8L)
-          trace ("        Skipping symbol due to insufficient secondary table size") $ return ()
+          return ()
 
         when (actualSecondaryBits >= longBits) $ do
           let replicateCount = 1 `shiftL` (actualSecondaryBits - longBits)
               entry = packEntry sym longBits
 
-          trace ("        replicateCount=" ++ show replicateCount) $ return ()
           when (replicateCount < 0 || replicateCount > 10000) $
             error $ "Invalid replicateCount: " ++ show replicateCount
 
@@ -264,7 +238,6 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
 
   -- Fill any remaining invalid entries in primary table with first valid symbol
   -- This handles incomplete Huffman trees gracefully
-  trace "  Filling incomplete tree gaps with default symbol" $ return ()
   firstSymIdx <- VUM.read symbolIdx 0
   when (firstSymIdx > 0) $ do
     firstSym <- VUM.read sorted 0
@@ -285,7 +258,6 @@ buildPrefixCodeTable codeLengths = trace ("Building prefix code table: numSymbol
   frozenTable <- VU.unsafeFreeze table
   let finalTable = VU.take actualSize frozenTable
 
-  trace ("  Table built: size=" ++ show actualSize ++ ", primary=" ++ show primarySize) $ return ()
   return $ Right $ PrefixCodeTable finalTable primaryBits
 
 -- | Calculate the number of bits needed for a secondary table
@@ -333,9 +305,8 @@ decodeSymbol (PrefixCodeTable table primaryBits) reader =
                             -- This can happen if the encoder used an incomplete tree
                             -- For now, return a dummy symbol (0) and consume bits
                             -- Better: return error
-                            trace ("WARNING: Incomplete tree, returning dummy symbol for idx=" ++ show idx) $
-                              let (_, reader2) = readBits secondaryBits reader1
-                               in (0, reader2)
+                            let (_, reader2) = readBits secondaryBits reader1
+                             in (0, reader2)
                           else
                             let symbol2 = fromIntegral (entry2 `shiftR` 16)
                                 len2 = fromIntegral (entry2 .&. 0xFFFF)
