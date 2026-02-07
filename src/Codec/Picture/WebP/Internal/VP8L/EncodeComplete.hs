@@ -211,25 +211,55 @@ writeNormalCode :: VU.Vector (Word8, Word32, Int) -> BitWriter -> BitWriter
 writeNormalCode codes w =
   -- Extract code lengths
   let codeLengths = VU.replicate 256 0 VU.// VU.toList (VU.map (\(sym, _, len) -> (fromIntegral sym, len)) codes)
-      maxSym = VU.maximum $ VU.map (\(sym, _, _) -> fromIntegral sym) codes
+      maxSym = VU.maximum $ VU.map (\(sym, _, _) -> fromIntegral sym) codes :: Int
 
       w1 = writeBit False w  -- is_simple = 0
 
-      -- Write code length code (simplified: all symbols 0-8 have length 1)
-      w2 = writeBits 4 5 w1  -- num_code_lengths = 9
-      w3 = foldl (\wa _ -> writeBits 3 1 wa) w2 [1..9]
+      -- Write code length code
+      -- Simple strategy: all symbols 0-8 have length 3, giving us 3-bit codes
+      -- kCodeLengthCodeOrder = [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, ...]
+      -- We need symbols 0-8 to encode lengths 0-8
+      -- Positions: 17(0), 18(1), 0(2), 1(3), 2(4), 3(5), 4(6), 5(7), 16(8), 6(9), 7(10), 8(11)
+      numCLC = 12  -- Through symbol 8
+      w2 = writeBits 4 (numCLC - 4) w1
+
+      -- Write CLC lengths: all get length 3 for simplicity
+      w3 = foldl (\wa _ -> writeBits 3 3 wa) w2 [1..numCLC]
 
       -- use_max_symbol = 1
       w4 = writeBit True w3
       maxSymBits = max 2 (ceilLog2 maxSym)
       w5 = writeBits 3 (fromIntegral $ (maxSymBits - 2) `div` 2) w4
-      w6 = writeBits maxSymBits (fromIntegral $ maxSym - 2) w5
+      w6 = writeBits maxSymBits (fromIntegral $ max 0 (maxSym - 2)) w5
 
       -- Write code lengths using the CLC
-      -- With all CLC symbols having len 1, symbol N is encoded as N in 4 bits (ceil(log2(9)))
+      -- The code length code maps symbol N to code based on position in kCodeLengthCodeOrder
+      -- kCodeLengthCodeOrder = [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, ...]
+      -- With all having length 3, canonical codes are assigned in order: 0,1,2,3,4,5,6,7,8,9,10,11
+
+      -- To encode length L: use symbol L in the code length code
+      -- Symbol L is at position positionOf(L) in kCodeLengthCodeOrder
+      -- With length 3, symbol L gets code = positionOf(L)
+
+      -- kCodeLengthCodeOrder positions:
+      -- pos 0:17, pos 1:18, pos 2:0, pos 3:1, pos 4:2, pos 5:3, pos 6:4, pos 7:5, pos 8:16, pos 9:6, pos 10:7, pos 11:8
+      -- So: sym 0→pos 2→code 2, sym 1→pos 3→code 3, ..., sym 8→pos 11→code 11
+
+      codeForLength len
+        | len == 0 = 2   -- Symbol 0 at position 2
+        | len == 1 = 3   -- Symbol 1 at position 3
+        | len == 2 = 4
+        | len == 3 = 5
+        | len == 4 = 6
+        | len == 5 = 7
+        | len == 6 = 9   -- Symbol 6 at position 9
+        | len == 7 = 10
+        | len == 8 = 11
+        | otherwise = 0
+
       w7 = VU.ifoldl' (\wa sym len ->
              if sym <= maxSym
-               then writeBits 4 (fromIntegral len) wa
+               then writeBits 3 (fromIntegral $ codeForLength len) wa
                else wa
            ) w6 codeLengths
 
