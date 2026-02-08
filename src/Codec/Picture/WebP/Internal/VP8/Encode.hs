@@ -157,16 +157,16 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbY mbX 
   let mbXpix = mbX * 16
       mbYpix = mbY * 16
 
-  -- Step 1: Select Y mode (simplified: always use DC_PRED)
-  -- Prediction uses modes 0-3 (DC/V/H/TM)
-  -- Tree encoding uses values 1-4 (DC=1, V=2, H=3, TM missing, B_PRED=4)
-  -- Map prediction mode to tree value: add 1
-  let predMode = 0 -- DC_PRED for prediction
-      yMode = predMode + 1 -- Tree value for encoding (DC_PRED = 1)
+  -- Step 1: Select best Y mode using SAD
+  (predMode, _) <- selectIntra16x16Mode yOrig yRecon paddedW mbXpix mbYpix
+  -- Map prediction mode (0-3) to tree value (1-4): DC=1, V=2, H=3, TM=4
+  let yMode = predMode + 1
 
-  -- Step 2: Select UV mode (simplified: always use DC_PRED)
-  let uvPredMode = 0 -- DC_PRED for prediction
-      uvMode = uvPredMode + 1 -- Tree value for encoding
+  -- Step 2: Select best UV mode using SAD
+  let chromaX = mbX * 8
+      chromaY = mbY * 8
+  (uvPredMode, _) <- selectChromaMode uOrig uRecon (paddedW `div` 2) chromaX chromaY
+  let uvMode = uvPredMode + 1
 
   -- Step 3: Write modes to bitstream
   -- Hardcoded bit patterns for DC_PRED mode (temporary workaround)
@@ -181,37 +181,31 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbY mbX 
       enc2 = boolWrite 114 False enc2a -- UV mode: Second bit = 0
 
   -- Step 4: Encode Y blocks (non-B_PRED mode: use Y2)
-  -- Predict 16x16 block (use prediction mode, not tree value)
-  predict16x16 predMode yRecon paddedW mbXpix mbYpix
-
-  -- Compute residuals and encode
-  enc3 <- encodeYBlocks yOrig yRecon paddedW mbXpix mbYpix dequantFactors coeffProbs enc2
+  -- Prediction was already done during mode selection, now encode
+  enc3 <- encodeYBlocks yOrig yRecon paddedW mbXpix mbYpix predMode dequantFactors coeffProbs enc2
 
   -- Step 5: Encode U blocks
-  let chromaW = paddedW `div` 2
-      chromaX = mbX * 8
-      chromaY = mbY * 8
-
-  predict8x8 uvPredMode uRecon chromaW chromaX chromaY
-  enc4 <- encodeChromaBlocks uOrig uRecon chromaW chromaX chromaY dequantFactors coeffProbs enc3 2
+  enc4 <- encodeChromaBlocks uOrig uRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs enc3 2
 
   -- Step 6: Encode V blocks
-  predict8x8 uvPredMode vRecon chromaW chromaX chromaY
-  enc5 <- encodeChromaBlocks vOrig vRecon chromaW chromaX chromaY dequantFactors coeffProbs enc4 2
+  enc5 <- encodeChromaBlocks vOrig vRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs enc4 2
 
   return enc5
 
 -- | Encode Y blocks for a macroblock (16x16)
 encodeYBlocks ::
   VSM.MVector s Word8 -> -- Y original
-  VSM.MVector s Word8 -> -- Y reconstruction (contains prediction)
+  VSM.MVector s Word8 -> -- Y reconstruction (will contain prediction)
   Int -> -- Stride
   Int -> Int -> -- X, Y position
+  Int -> -- Prediction mode (0-3)
   DequantFactors ->
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
   ST s BoolEncoder
-encodeYBlocks yOrig yRecon stride x y dequantFactors coeffProbs enc = do
+encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc = do
+  -- Apply prediction
+  predict16x16 predMode yRecon stride x y
   -- Collect 16 Y block DCs for Y2
   y2DCs <- VSM.new 16
 
@@ -286,12 +280,15 @@ encodeChromaBlocks ::
   VSM.MVector s Word8 -> -- Chroma reconstruction
   Int -> -- Stride
   Int -> Int -> -- X, Y position
+  Int -> -- Prediction mode (0-3)
   DequantFactors ->
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
   Int -> -- Block type (2 for UV)
   ST s BoolEncoder
-encodeChromaBlocks chromaOrig chromaRecon stride x y dequantFactors coeffProbs enc blockType = do
+encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coeffProbs enc blockType = do
+  -- Apply prediction
+  predict8x8 predMode chromaRecon stride x y
   -- Process 4 chroma blocks (4x4 each)
   let processBlock !blockIdx !e
         | blockIdx >= 4 = return e

@@ -21,7 +21,9 @@ library
   exposed-modules:
       Codec.Picture.WebP
       Codec.Picture.WebP.Internal.Alpha
+      Codec.Picture.WebP.Internal.AlphaEncode
       Codec.Picture.WebP.Internal.Animation
+      Codec.Picture.WebP.Internal.AnimationEncode
       Codec.Picture.WebP.Internal.BitReader
       Codec.Picture.WebP.Internal.BitWriter
       Codec.Picture.WebP.Internal.Container
