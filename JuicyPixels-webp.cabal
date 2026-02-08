@@ -38,6 +38,7 @@ library
       Codec.Picture.WebP.Internal.VP8.Encode
       Codec.Picture.WebP.Internal.VP8.EncodeCoefficients
       Codec.Picture.WebP.Internal.VP8.EncodeHeader
+      Codec.Picture.WebP.Internal.VP8.EncodeMode
       Codec.Picture.WebP.Internal.VP8.Header
       Codec.Picture.WebP.Internal.VP8.IDCT
       Codec.Picture.WebP.Internal.VP8.LoopFilter
@@ -79,11 +80,17 @@ test-suite JuicyPixels-webp-test
       BitReaderSpec
       BoolDecoderSpec
       ContainerSpec
+      EdgeCasesSpec
+      GoldenFilesSpec
+      GoldenSpec
       IDCTSpec
       ImageDecodingSpec
       PrefixCodeSpec
+      PropertySpec
+      QualitySpec
       RealFilesSpec
       RealImageSpec
+      RoundtripSpec
       TransformSpec
       VP8EncodeSpec
       Paths_JuicyPixels_webp
@@ -100,6 +107,7 @@ test-suite JuicyPixels-webp-test
     , binary
     , bytestring
     , directory
+    , filepath
     , hspec
     , primitive
     , vector

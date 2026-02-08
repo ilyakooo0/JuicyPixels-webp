@@ -14,6 +14,7 @@ import Codec.Picture.WebP.Internal.VP8.DCT
 import Codec.Picture.WebP.Internal.VP8.Dequant
 import Codec.Picture.WebP.Internal.VP8.EncodeCoefficients
 import Codec.Picture.WebP.Internal.VP8.EncodeHeader
+import Codec.Picture.WebP.Internal.VP8.EncodeMode
 import Codec.Picture.WebP.Internal.VP8.IDCT
 import Codec.Picture.WebP.Internal.VP8.ModeSelection
 import Codec.Picture.WebP.Internal.VP8.Predict
@@ -168,17 +169,9 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbY mbX 
   (uvPredMode, _) <- selectChromaMode uOrig uRecon (paddedW `div` 2) chromaX chromaY
   let uvMode = uvPredMode + 1
 
-  -- Step 3: Write modes to bitstream
-  -- Hardcoded bit patterns for DC_PRED mode (temporary workaround)
-  -- Y mode DC_PRED (value 1): bits "10" with probs [145, 156]
-  -- First bit: 1 (right from root to skip B_PRED)
-  -- Second bit: 0 (left to get DC_PRED)
-  let enc1a = boolWrite 145 True enc  -- Y mode: First bit = 1
-      enc1b = boolWrite 156 False enc1a -- Y mode: Second bit = 0
-
-  -- UV mode DC_PRED (value 1): bits "10" with probs [142, 114]
-      enc2a = boolWrite 142 True enc1b  -- UV mode: First bit = 1
-      enc2 = boolWrite 114 False enc2a -- UV mode: Second bit = 0
+  -- Step 3: Write modes to bitstream using selected modes
+  let enc1 = encodeYMode predMode enc
+      enc2 = encodeUVMode uvPredMode enc1
 
   -- Step 4: Encode Y blocks (non-B_PRED mode: use Y2)
   -- Prediction was already done during mode selection, now encode
@@ -204,8 +197,12 @@ encodeYBlocks ::
   BoolEncoder ->
   ST s BoolEncoder
 encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc = do
-  -- Apply prediction
-  predict16x16 predMode yRecon stride x y
+  -- Create temporary buffer for prediction (don't overwrite reconstruction yet)
+  predBuf <- VSM.clone yRecon
+
+  -- Apply prediction to temporary buffer
+  predict16x16 predMode predBuf stride x y
+
   -- Collect 16 Y block DCs for Y2
   y2DCs <- VSM.new 16
 
@@ -226,7 +223,7 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc = d
                     py = y + subY + row
                     idx = py * stride + px
                 orig <- VSM.read yOrig idx
-                pred <- VSM.read yRecon idx
+                pred <- VSM.read predBuf idx  -- Use prediction buffer, not reconstruction
                 let residual = fromIntegral orig - fromIntegral pred :: Int16
                 VSM.write residuals (row * 4 + col) residual
 
@@ -248,16 +245,16 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc = d
             dequantizeBlock dequantFactors 0 residuals
             idct4x4 residuals
 
-            -- Add prediction back and clip
+            -- Add prediction back and clip, write to reconstruction buffer
             forM_ [0 .. 3] $ \row ->
               forM_ [0 .. 3] $ \col -> do
                 let px = x + subX + col
                     py = y + subY + row
                     idx = py * stride + px
-                pred <- VSM.read yRecon idx
+                pred <- VSM.read predBuf idx  -- Get prediction value
                 res <- VSM.read residuals (row * 4 + col)
                 let reconstructed = clip255 (fromIntegral pred + fromIntegral res)
-                VSM.write yRecon idx reconstructed
+                VSM.write yRecon idx reconstructed  -- Write to reconstruction for future MBs
 
             processBlock (blockIdx + 1) e'
 
@@ -287,8 +284,12 @@ encodeChromaBlocks ::
   Int -> -- Block type (2 for UV)
   ST s BoolEncoder
 encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coeffProbs enc blockType = do
-  -- Apply prediction
-  predict8x8 predMode chromaRecon stride x y
+  -- Create temporary buffer for prediction
+  predBuf <- VSM.clone chromaRecon
+
+  -- Apply prediction to temporary buffer
+  predict8x8 predMode predBuf stride x y
+
   -- Process 4 chroma blocks (4x4 each)
   let processBlock !blockIdx !e
         | blockIdx >= 4 = return e
@@ -306,7 +307,7 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coe
                     py = y + subY + row
                     idx = py * stride + px
                 orig <- VSM.read chromaOrig idx
-                pred <- VSM.read chromaRecon idx
+                pred <- VSM.read predBuf idx  -- Use prediction buffer
                 let residual = fromIntegral orig - fromIntegral pred :: Int16
                 VSM.write residuals (row * 4 + col) residual
 
@@ -323,16 +324,16 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coe
             dequantizeBlock dequantFactors blockType residuals
             idct4x4 residuals
 
-            -- Add prediction back
+            -- Add prediction back and write to reconstruction buffer
             forM_ [0 .. 3] $ \row ->
               forM_ [0 .. 3] $ \col -> do
                 let px = x + subX + col
                     py = y + subY + row
                     idx = py * stride + px
-                pred <- VSM.read chromaRecon idx
+                pred <- VSM.read predBuf idx  -- Get prediction value
                 res <- VSM.read residuals (row * 4 + col)
                 let reconstructed = clip255 (fromIntegral pred + fromIntegral res)
-                VSM.write chromaRecon idx reconstructed
+                VSM.write chromaRecon idx reconstructed  -- Write to reconstruction for future MBs
 
             processBlock (blockIdx + 1) e'
 

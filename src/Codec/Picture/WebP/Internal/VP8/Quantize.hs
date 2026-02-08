@@ -14,12 +14,23 @@ import qualified Data.Vector.Storable.Mutable as VSM
 
 -- | Convert quality parameter (0-100) to yac_qi value (0-127)
 -- Higher quality → lower qi → finer quantization
+-- Uses libwebp-inspired mapping for good perceptual quality
 qualityToYacQi :: Int -> Int
 qualityToYacQi quality =
   let clamped = max 0 (min 100 quality)
-      -- Map quality 0-100 to qi 127-0 (inversely)
-      qi = 127 - (clamped * 127 `div` 100)
-   in max 0 (min 127 qi)
+      -- libwebp-inspired mapping:
+      -- Quality 0-50: Larger steps for file size reduction
+      -- Quality 50-100: Smaller steps for quality preservation
+      qi = if clamped <= 50
+            then
+              -- For low quality, map more aggressively
+              -- Quality 0 -> qi 127, Quality 50 -> qi 29
+              127 - (clamped * 98 `div` 50)
+            else
+              -- For high quality, use finer steps
+              -- Quality 50 -> qi 29, Quality 100 -> qi 4 (not 0, preserve some quantization)
+              29 - ((clamped - 50) * 25 `div` 50)
+   in max 4 (min 127 qi)  -- Never go below qi=4 for stability
 
 -- | Quantize a 4x4 block in place
 -- blockType: 0 = Y (AC only), 1 = Y2, 2 = UV, 3 = Y (full)
