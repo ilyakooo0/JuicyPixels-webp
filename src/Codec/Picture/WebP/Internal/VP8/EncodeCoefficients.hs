@@ -41,7 +41,6 @@ encodeCoefficients coeffs coeffProbs blockType initialCtx startPos encoder = do
           probIdx = blockType * 264 + band * 33 + initialCtx * 11
           enc' = boolWriteTree coeffTreeU (getCoeffProbs coeffProbs probIdx 0) 11 encoder
       return (enc', False)
-
     Just lastNz -> do
       -- There are nonzeros: encode coefficients up to and including lastNz, then EOB
       -- Track skipEOB: after DCT_0, skip the first bit in tree encoding
@@ -50,7 +49,7 @@ encodeCoefficients coeffs coeffProbs blockType initialCtx startPos encoder = do
                 -- After the last nonzero, write EOB (token 11)
                 -- But if we've encoded all 16 positions, no EOB needed (decoder knows to stop)
                 if pos >= 16
-                  then return (enc, True)  -- No EOB needed at position 16
+                  then return (enc, True) -- No EOB needed at position 16
                   else do
                     let band = coeffBands VU.! pos
                         probIdx = blockType * 264 + band * 33 + ctx * 11
@@ -109,7 +108,7 @@ encodeTokenWithSkip tree probs targetValue skipEOB enc =
           -- so we skip it and the first probability
           actualPath = if skipEOB then drop 1 fullPath else fullPath
           actualProbs = if skipEOB then VU.drop 1 probs else probs
-      in writePath actualPath actualProbs 0 enc
+       in writePath actualPath actualProbs 0 enc
     Nothing -> error $ "VP8 encoder: value " ++ show targetValue ++ " not in tree"
   where
     findPath !i !depth !path
@@ -117,9 +116,9 @@ encodeTokenWithSkip tree probs targetValue skipEOB enc =
       | otherwise =
           let leftNode = tree VU.! i
               rightNode = tree VU.! (i + 1)
-          in case checkNode leftNode (False : path) of
-               Just p -> Just p
-               Nothing -> checkNode rightNode (True : path)
+           in case checkNode leftNode (False : path) of
+                Just p -> Just p
+                Nothing -> checkNode rightNode (True : path)
       where
         checkNode node path'
           | node == 0 = if targetValue == 0 then Just path' else Nothing

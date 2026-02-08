@@ -32,7 +32,8 @@ data AnimationFrame = AnimationFrame
 -- Returns complete WebP data with ANIM and ANMF chunks
 encodeAnimation ::
   [AnimationFrame] -> -- Frames to encode
-  Int -> Int -> -- Canvas width, height
+  Int ->
+  Int -> -- Canvas width, height
   Word32 -> -- Background color (BGRA)
   Word16 -> -- Loop count (0 = infinite)
   Int -> -- Quality (0-100)
@@ -50,7 +51,6 @@ encodeAnimation frames canvasWidth canvasHeight bgColor loopCount quality =
       -- Combine all chunks
       allChunks = vp8xChunk <> animChunk <> mconcat anmfChunks
       totalSize = B.length allChunks
-
    in makeRIFFContainer (fromIntegral totalSize) allChunks
 
 -- | Encode a single animation frame
@@ -68,22 +68,18 @@ encodeAnimFrame quality frame =
               alphChunk = makeALPHChunk alphaData
            in alphChunk <> vp8Chunk
         _ -> error "Unsupported image format for animation encoding"
-
-      -- Create ANMF chunk containing the frame
-   in makeANMFChunk frame imageChunk
+   in -- Create ANMF chunk containing the frame
+      makeANMFChunk frame imageChunk
 
 -- | Create ANIM chunk
 makeANIMChunk :: Word32 -> Word16 -> B.ByteString
 makeANIMChunk bgColor loopCount =
   let fourCC = B.pack [65, 78, 73, 77] -- "ANIM"
       chunkSize = BL.toStrict $ runPut $ putWord32le 6 -- ANIM payload is 6 bytes
-
       payload = BL.toStrict $ runPut $ do
         putWord32le bgColor -- Background color (BGRA)
         putWord16le loopCount -- Loop count
-
       padding = B.empty -- 6 bytes is even, no padding needed
-
    in fourCC <> chunkSize <> payload <> padding
 
 -- | Create ANMF chunk for a single frame
@@ -109,8 +105,8 @@ makeANMFChunk frame imageData =
       -- Bit 2: blend (0 = no blend/replace, 1 = alpha blend)
       -- Bits 3-7: reserved
       flags =
-        ( if frameDispose frame then bit 1 else 0 )
-        .|. ( if frameBlend frame then bit 2 else 0 )
+        (if frameDispose frame then bit 1 else 0)
+          .|. (if frameBlend frame then bit 2 else 0)
 
       header = BL.toStrict $ runPut $ do
         -- X coordinate (24 bits)
@@ -144,5 +140,4 @@ makeANMFChunk frame imageData =
       payload = header <> imageData
       chunkSize = BL.toStrict $ runPut $ putWord32le (fromIntegral $ B.length payload)
       padding = if odd (B.length payload) then B.singleton 0 else B.empty
-
    in fourCC <> chunkSize <> payload <> padding

@@ -12,14 +12,14 @@ module Codec.Picture.WebP.Internal.Encode
 where
 
 import Codec.Picture.Types
-import Codec.Picture.WebP.Internal.VP8L.EncodeSimple
-import Codec.Picture.WebP.Internal.VP8L.EncodeComplete
-import Codec.Picture.WebP.Internal.VP8L.EncodeUncompressed
-import Codec.Picture.WebP.Internal.VP8L.EncodeIdentity
-import Codec.Picture.WebP.Internal.VP8L.EncodeAny
-import Codec.Picture.WebP.Internal.VP8L.EncodeWorking
-import qualified Codec.Picture.WebP.Internal.VP8.Encode as VP8.Encode
 import Codec.Picture.WebP.Internal.AlphaEncode
+import qualified Codec.Picture.WebP.Internal.VP8.Encode as VP8.Encode
+import Codec.Picture.WebP.Internal.VP8L.EncodeAny
+import Codec.Picture.WebP.Internal.VP8L.EncodeComplete
+import Codec.Picture.WebP.Internal.VP8L.EncodeIdentity
+import Codec.Picture.WebP.Internal.VP8L.EncodeSimple
+import Codec.Picture.WebP.Internal.VP8L.EncodeUncompressed
+import Codec.Picture.WebP.Internal.VP8L.EncodeWorking
 import Data.Binary.Put
 import Data.Bits
 import qualified Data.ByteString as B
@@ -30,7 +30,7 @@ import Data.Word
 -- Uses proper Huffman coding for true lossless compression
 encodeWebPLossless :: Image PixelRGBA8 -> B.ByteString
 encodeWebPLossless img =
-  let vp8lData = encodeVP8LComplete img  -- Complete encoder with proper Huffman coding
+  let vp8lData = encodeVP8LComplete img -- Complete encoder with proper Huffman coding
       vp8lChunk = makeVP8LChunk vp8lData
       totalSize = B.length vp8lChunk
       container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
@@ -93,7 +93,8 @@ makeVP8Chunk vp8Data =
 
 -- | Create VP8X chunk (extended format header)
 makeVP8XChunk ::
-  Int -> Int -> -- Width, height
+  Int ->
+  Int -> -- Width, height
   Bool -> -- Has alpha
   Bool -> -- Has animation
   B.ByteString
@@ -110,8 +111,8 @@ makeVP8XChunk width height hasAlpha hasAnim =
       -- Bit 5: has animation
       -- Bits 6-7: reserved
       flags =
-        ( if hasAlpha then bit 4 else 0 )
-        .|. ( if hasAnim then bit 1 else 0 )
+        (if hasAlpha then bit 4 else 0)
+          .|. (if hasAnim then bit 1 else 0)
 
       -- Reserved 3 bytes
       reserved = B.pack [0, 0, 0]
@@ -131,7 +132,6 @@ makeVP8XChunk width height hasAlpha hasAnim =
         putWord8 (fromIntegral $ (height24 `shiftR` 16) .&. 0xFF)
 
       payload = B.singleton flags <> reserved <> widthBytes <> heightBytes
-
    in fourCC <> chunkSize <> payload
 
 -- | Encode RGBA image as lossy WebP with alpha channel
@@ -157,5 +157,4 @@ encodeWebPLossyWithAlpha img quality =
       -- Combine chunks in extended format
       allChunks = vp8xChunk <> alphChunk <> vp8Chunk
       totalSize = B.length allChunks
-
    in makeRIFFContainer (fromIntegral totalSize) allChunks

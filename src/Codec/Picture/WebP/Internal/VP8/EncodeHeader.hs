@@ -118,7 +118,6 @@ generateCompressedHeader quantIndices filterLevel filterType =
       --                   1 = skip mode enabled (must read prob_skip_false byte)
       -- For simple encoder, disable skip mode (don't read per-MB skip flags)
       enc17 = boolWriteLiteral 1 0 enc16 -- mb_no_skip_coeff = 0 (skip mode disabled)
-
    in enc17
 
 -- | Write coefficient probability updates (all zeros for simple encoder)
@@ -136,6 +135,6 @@ writeCoeffProbUpdates enc =
         | otherwise =
             let idx = i * 264 + j * 33 + k * 11 + l
                 updateProb = coeffUpdateProbs VU.! idx
-                e' = boolWrite updateProb False e  -- write False (no update)
+                e' = boolWrite updateProb False e -- write False (no update)
              in loop i j k (l + 1) e'
    in loop 0 0 0 0 enc

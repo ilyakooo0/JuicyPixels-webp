@@ -111,8 +111,10 @@ spec = do
           Left err -> expectationFailure $ "Animation decode failed: " ++ err
 
       it "encodes animation with multiple frames" $ do
-        let frames = [ WebPEncodeFrame (ImageRGB8 $ generateImage (\_ _ -> PixelRGB8 (fromIntegral i) 0 0) 16 16) 50 0 0
-                     | i <- [0..4] ]
+        let frames =
+              [ WebPEncodeFrame (ImageRGB8 $ generateImage (\_ _ -> PixelRGB8 (fromIntegral i) 0 0) 16 16) 50 0 0
+              | i <- [0 .. 4]
+              ]
             encoded = encodeWebPAnimation frames 16 16 80
 
         case decodeWebPAnimation encoded of

@@ -46,7 +46,8 @@ inverseSubtractGreen :: Int -> Int -> VSM.MVector s Word32 -> ST s ()
 inverseSubtractGreen width height pixels = do
   let totalPixels = width * height
   when (totalPixels < 0 || totalPixels > 100000000) $
-    error $ "Invalid pixel count in subtract green: " ++ show totalPixels
+    error $
+      "Invalid pixel count in subtract green: " ++ show totalPixels
 
   forM_ [0 .. totalPixels - 1] $ \i -> do
     pixel <- VSM.read pixels i
@@ -65,7 +66,8 @@ inverseSubtractGreen width height pixels = do
 inverseColorTransform :: Int -> VS.Vector Word32 -> Int -> Int -> VSM.MVector s Word32 -> ST s ()
 inverseColorTransform sizeBits transformData width height pixels = do
   when (sizeBits < 2 || sizeBits > 10) $
-    error $ "Invalid sizeBits in color transform: " ++ show sizeBits
+    error $
+      "Invalid sizeBits in color transform: " ++ show sizeBits
 
   let blockSize = 1 `shiftL` sizeBits
       transformWidth = (width + blockSize - 1) `shiftR` sizeBits
@@ -114,7 +116,8 @@ toInt8 w =
 inversePredictorTransform :: Int -> VS.Vector Word32 -> Int -> Int -> VSM.MVector s Word32 -> ST s ()
 inversePredictorTransform sizeBits transformData width height pixels = do
   when (sizeBits < 2 || sizeBits > 10) $
-    error $ "Invalid sizeBits in predictor transform: " ++ show sizeBits
+    error $
+      "Invalid sizeBits in predictor transform: " ++ show sizeBits
 
   let blockSize = 1 `shiftL` sizeBits
       transformWidth = (width + blockSize - 1) `shiftR` sizeBits
@@ -135,21 +138,27 @@ inversePredictorTransform sizeBits transformData width height pixels = do
       pixel <- VSM.read pixels idx
 
       left <- if x > 0 then VSM.read pixels (idx - 1) else return 0xFF000000
-      top <- if y > 0 then do
-                let topIdxInteger = (fromIntegral (y - 1) :: Integer) * (fromIntegral width :: Integer) + (fromIntegral x :: Integer)
-                    topIdx = fromIntegral topIdxInteger :: Int
-                VSM.read pixels topIdx
-             else return 0xFF000000
-      topLeft <- if x > 0 && y > 0 then do
-                   let tlIdxInteger = (fromIntegral (y - 1) :: Integer) * (fromIntegral width :: Integer) + (fromIntegral (x - 1) :: Integer)
-                       tlIdx = fromIntegral tlIdxInteger :: Int
-                   VSM.read pixels tlIdx
-                 else return 0xFF000000
-      topRight <- if x < width - 1 && y > 0 then do
-                    let trIdxInteger = (fromIntegral (y - 1) :: Integer) * (fromIntegral width :: Integer) + (fromIntegral (x + 1) :: Integer)
-                        trIdx = fromIntegral trIdxInteger :: Int
-                    VSM.read pixels trIdx
-                  else return top
+      top <-
+        if y > 0
+          then do
+            let topIdxInteger = (fromIntegral (y - 1) :: Integer) * (fromIntegral width :: Integer) + (fromIntegral x :: Integer)
+                topIdx = fromIntegral topIdxInteger :: Int
+            VSM.read pixels topIdx
+          else return 0xFF000000
+      topLeft <-
+        if x > 0 && y > 0
+          then do
+            let tlIdxInteger = (fromIntegral (y - 1) :: Integer) * (fromIntegral width :: Integer) + (fromIntegral (x - 1) :: Integer)
+                tlIdx = fromIntegral tlIdxInteger :: Int
+            VSM.read pixels tlIdx
+          else return 0xFF000000
+      topRight <-
+        if x < width - 1 && y > 0
+          then do
+            let trIdxInteger = (fromIntegral (y - 1) :: Integer) * (fromIntegral width :: Integer) + (fromIntegral (x + 1) :: Integer)
+                trIdx = fromIntegral trIdxInteger :: Int
+            VSM.read pixels trIdx
+          else return top
 
       let predicted = predictor mode left top topLeft topRight
           result = addPixels pixel predicted
@@ -360,9 +369,10 @@ inverseColorIndexing palette widthBits width height pixels = do
             pixel <- VSM.read pixels idx
             let green = (pixel `shiftR` 8) .&. 0xFF
                 shiftAmt = subIdx * bitsPerPixel
-                colorIdx = if shiftAmt > 20
-                             then error $ "Bit shift overflow: subIdx=" ++ show subIdx ++ ", bitsPerPixel=" ++ show bitsPerPixel
-                             else (green `shiftR` shiftAmt) .&. mask
+                colorIdx =
+                  if shiftAmt > 20
+                    then error $ "Bit shift overflow: subIdx=" ++ show subIdx ++ ", bitsPerPixel=" ++ show bitsPerPixel
+                    else (green `shiftR` shiftAmt) .&. mask
                 outIdxInteger = (fromIntegral y :: Integer) * (fromIntegral width :: Integer) + (fromIntegral x :: Integer)
                 outIdx = fromIntegral outIdxInteger :: Int
 

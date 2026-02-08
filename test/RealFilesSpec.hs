@@ -5,10 +5,10 @@ module RealFilesSpec (spec) where
 import Codec.Picture.Types
 import Codec.Picture.WebP
 import Codec.Picture.WebP.Internal.Container
+import Control.Exception (SomeException, evaluate, try)
 import qualified Data.ByteString as B
-import Test.Hspec
-import Control.Exception (try, evaluate, SomeException)
 import Data.List (isInfixOf)
+import Test.Hspec
 
 spec :: Spec
 spec = describe "Real WebP Files" $ do
@@ -51,7 +51,6 @@ spec = describe "Real WebP Files" $ do
           -- Graceful error with informative message
           err `shouldSatisfy` (\e -> "cache" `isInfixOf` e || "bitstream" `isInfixOf` e || not (null e))
         Left _ -> return () -- Exception (also acceptable for unsupported variants)
-
   describe "Error Handling" $ do
     it "handles truncated file gracefully" $ do
       fileData <- B.readFile "test/data/test.webp"

@@ -27,11 +27,11 @@ import Codec.Picture.WebP.Internal.Container
 import Codec.Picture.WebP.Internal.Encode (encodeWebPLossless, encodeWebPLossy, encodeWebPLossyWithAlpha)
 import Codec.Picture.WebP.Internal.VP8
 import Codec.Picture.WebP.Internal.VP8L
+import Control.Monad (forM_)
+import Control.Monad.ST
 import qualified Data.ByteString as B
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
-import Control.Monad.ST
-import Control.Monad (forM_)
 import Data.Word
 
 -- | Frame for encoding animations
@@ -45,7 +45,8 @@ data WebPEncodeFrame = WebPEncodeFrame
 -- | Encode animation to WebP
 encodeWebPAnimation ::
   [WebPEncodeFrame] -> -- Frames to encode
-  Int -> Int -> -- Canvas width, height
+  Int ->
+  Int -> -- Canvas width, height
   Int -> -- Quality (0-100)
   B.ByteString
 encodeWebPAnimation frames canvasWidth canvasHeight quality =

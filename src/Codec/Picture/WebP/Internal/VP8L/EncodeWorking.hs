@@ -10,8 +10,8 @@ import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.BitWriter
 import Control.Monad.ST
 import Data.Bits
-import Data.List (nub, sort)
 import qualified Data.ByteString as B
+import Data.List (nub, sort)
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import qualified Data.Vector.Unboxed.Mutable as VUM
@@ -27,23 +27,23 @@ encodeVP8LWorking img =
       -- Find unique values in each channel
       uniqueVals = findUniqueValues pixels (width * height)
 
-      w = emptyBitWriter
-        |> writeBits 8 0x2F
-        |> writeBits 14 (fromIntegral $ width - 1)
-        |> writeBits 14 (fromIntegral $ height - 1)
-        |> writeBit True
-        |> writeBits 3 0
-        |> writeBit False  -- no transforms
-        |> writeBit False  -- no color cache
-        |> writeBit False  -- single prefix code group
-        |> writeSymbolSet (uvGreen uniqueVals)  -- Green
-        |> writeSymbolSet (uvRed uniqueVals)    -- Red
-        |> writeSymbolSet (uvBlue uniqueVals)   -- Blue
-        |> writeSymbolSet (uvAlpha uniqueVals)  -- Alpha
-        |> writeSimple 0                         -- Distance
-        |> encodeAllPixels pixels (width * height) uniqueVals
-        |> finalizeBitWriter
-
+      w =
+        emptyBitWriter
+          |> writeBits 8 0x2F
+          |> writeBits 14 (fromIntegral $ width - 1)
+          |> writeBits 14 (fromIntegral $ height - 1)
+          |> writeBit True
+          |> writeBits 3 0
+          |> writeBit False -- no transforms
+          |> writeBit False -- no color cache
+          |> writeBit False -- single prefix code group
+          |> writeSymbolSet (uvGreen uniqueVals) -- Green
+          |> writeSymbolSet (uvRed uniqueVals) -- Red
+          |> writeSymbolSet (uvBlue uniqueVals) -- Blue
+          |> writeSymbolSet (uvAlpha uniqueVals) -- Alpha
+          |> writeSimple 0 -- Distance
+          |> encodeAllPixels pixels (width * height) uniqueVals
+          |> finalizeBitWriter
    in bitWriterToByteString w
   where
     (|>) = flip ($)
@@ -73,12 +73,14 @@ writeSymbolSet syms = writeMulti syms
 writeSimple :: Word16 -> BitWriter -> BitWriter
 writeSimple sym w =
   writeBit True w |> writeBit False |> writeBit True |> writeBits 8 (fromIntegral sym)
-  where (|>) = flip ($)
+  where
+    (|>) = flip ($)
 
 write2 :: Word16 -> Word16 -> BitWriter -> BitWriter
 write2 s1 s2 w =
   writeBit True w |> writeBit True |> writeBit True |> writeBits 8 (fromIntegral s1) |> writeBits 8 (fromIntegral s2)
-  where (|>) = flip ($)
+  where
+    (|>) = flip ($)
 
 -- | Write code for multiple symbols (3-256)
 -- Strategy: Assign length based on position, use canonical codes
@@ -91,7 +93,7 @@ writeMulti syms w =
       -- All symbols get the same length for simplicity
       -- This is valid but not optimal
 
-      w1 = writeBit False w  -- is_simple = 0
+      w1 = writeBit False w -- is_simple = 0
 
       -- Write code length code
       -- We need to encode length codeLen for each symbol
@@ -104,11 +106,15 @@ writeMulti syms w =
 
       -- Write CLC lengths: only symbol codeLen gets length 1
       kCodeLengthCodeOrder = [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-      w3 = foldl (\wa i ->
-             let sym = kCodeLengthCodeOrder !! i
-                 len = if sym == codeLen then 1 else 0
-              in writeBits 3 (fromIntegral len) wa
-           ) w2 [0 .. numCLC - 1]
+      w3 =
+        foldl
+          ( \wa i ->
+              let sym = kCodeLengthCodeOrder !! i
+                  len = if sym == codeLen then 1 else 0
+               in writeBits 3 (fromIntegral len) wa
+          )
+          w2
+          [0 .. numCLC - 1]
 
       -- use_max_symbol = 1
       w4 = writeBit True w3
@@ -119,40 +125,47 @@ writeMulti syms w =
 
       -- Write code lengths for symbols 0 to maxSym
       -- Symbol codeLen in CLC is encoded as bit 0 (since it's the only symbol with len 1)
-      w7 = foldl (\wa sym ->
-             if fromIntegral sym `elem` syms
-               then writeBit False wa  -- Symbol codeLen (length for this symbol)
-               else writeBit False wa  -- Symbol codeLen (length 0? or skip?)
-           ) w6 [0 .. fromIntegral maxSym]
-
+      w7 =
+        foldl
+          ( \wa sym ->
+              if fromIntegral sym `elem` syms
+                then writeBit False wa -- Symbol codeLen (length for this symbol)
+                else writeBit False wa -- Symbol codeLen (length 0? or skip?)
+          )
+          w6
+          [0 .. fromIntegral maxSym]
    in w7
 
 encodeAllPixels :: VS.Vector Word8 -> Int -> UniqueValues -> BitWriter -> BitWriter
 encodeAllPixels pixels numPixels uv w =
-  foldl (\wa i ->
-    let g = pixels VS.! (i * 4 + 1)
-        r = pixels VS.! (i * 4)
-        b = pixels VS.! (i * 4 + 2)
-        a = pixels VS.! (i * 4 + 3)
-     in wa |> encodeValue g (uvGreen uv)
-           |> encodeValue r (uvRed uv)
-           |> encodeValue b (uvBlue uv)
-           |> encodeValue a (uvAlpha uv)
-  ) w [0 .. numPixels - 1]
+  foldl
+    ( \wa i ->
+        let g = pixels VS.! (i * 4 + 1)
+            r = pixels VS.! (i * 4)
+            b = pixels VS.! (i * 4 + 2)
+            a = pixels VS.! (i * 4 + 3)
+         in wa
+              |> encodeValue g (uvGreen uv)
+              |> encodeValue r (uvRed uv)
+              |> encodeValue b (uvBlue uv)
+              |> encodeValue a (uvAlpha uv)
+    )
+    w
+    [0 .. numPixels - 1]
   where
     (|>) = flip ($)
 
 encodeValue :: Word8 -> [Word8] -> BitWriter -> BitWriter
 encodeValue val syms w
-  | length syms == 1 = w  -- 0-bit code
-  | length syms == 2 = writeBit (val == (syms !! 1)) w  -- 1-bit code
+  | length syms == 1 = w -- 0-bit code
+  | length syms == 2 = writeBit (val == (syms !! 1)) w -- 1-bit code
   | otherwise =
       -- Fixed-length code: find index and write it
-      case lookup val (zip syms [0..]) of
+      case lookup val (zip syms [0 ..]) of
         Just idx ->
           let codeLen = ceiling (logBase 2 (fromIntegral $ length syms) :: Double)
            in writeBits codeLen (fromIntegral idx) w
-        Nothing -> w  -- Shouldn't happen
+        Nothing -> w -- Shouldn't happen
   where
     lookup _ [] = Nothing
-    lookup x ((y,v):rest) = if x == y then Just v else lookup x rest
+    lookup x ((y, v) : rest) = if x == y then Just v else lookup x rest

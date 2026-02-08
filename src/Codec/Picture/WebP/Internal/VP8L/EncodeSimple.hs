@@ -28,23 +28,23 @@ encodeVP8LSimple img =
       info = analyzeChannels argbPixels
 
       -- Build bitstream
-      w = emptyBitWriter
-        |> writeBits 8 0x2F  -- Signature
-        |> writeBits 14 (fromIntegral $ width - 1)
-        |> writeBits 14 (fromIntegral $ height - 1)
-        |> writeBit True  -- alpha_is_used
-        |> writeBits 3 0  -- version
-        |> writeBit False  -- NO transform (testing)
-        |> writeBit False  -- no color cache
-        |> writeBit False  -- single prefix code group
-        |> writeChannelCode (ciGreen info)
-        |> writeChannelCode (ciRed info)
-        |> writeChannelCode (ciBlue info)
-        |> writeChannelCode (ciAlpha info)
-        |> writeSimple1 0  -- Distance code
-        |> writeOnePixels argbPixels info
-        |> finalizeBitWriter
-
+      w =
+        emptyBitWriter
+          |> writeBits 8 0x2F -- Signature
+          |> writeBits 14 (fromIntegral $ width - 1)
+          |> writeBits 14 (fromIntegral $ height - 1)
+          |> writeBit True -- alpha_is_used
+          |> writeBits 3 0 -- version
+          |> writeBit False -- NO transform (testing)
+          |> writeBit False -- no color cache
+          |> writeBit False -- single prefix code group
+          |> writeChannelCode (ciGreen info)
+          |> writeChannelCode (ciRed info)
+          |> writeChannelCode (ciBlue info)
+          |> writeChannelCode (ciAlpha info)
+          |> writeSimple1 0 -- Distance code
+          |> writeOnePixels argbPixels info
+          |> finalizeBitWriter
    in bitWriterToByteString w
   where
     (|>) = flip ($)
@@ -112,12 +112,14 @@ writeChannelCode syms w
 writeSimple1 :: Word16 -> BitWriter -> BitWriter
 writeSimple1 sym w =
   writeBit True w |> writeBit False |> writeBit True |> writeBits 8 (fromIntegral sym)
-  where (|>) = flip ($)
+  where
+    (|>) = flip ($)
 
 writeSimple2 :: Word16 -> Word16 -> BitWriter -> BitWriter
 writeSimple2 s1 s2 w =
   writeBit True w |> writeBit True |> writeBit True |> writeBits 8 (fromIntegral s1) |> writeBits 8 (fromIntegral s2)
-  where (|>) = flip ($)
+  where
+    (|>) = flip ($)
 
 writeOnePixels :: VS.Vector Word32 -> ChannelInfo -> BitWriter -> BitWriter
 writeOnePixels pixels info writer =
@@ -129,17 +131,19 @@ writeOnePixel info w px =
       r = fromIntegral ((px `shiftR` 16) .&. 0xFF)
       b = fromIntegral (px .&. 0xFF)
       a = fromIntegral ((px `shiftR` 24) .&. 0xFF)
-      -- Note: VP8L pixel encoding order is Green, Red, Blue, Alpha
-   in w |> writeValue g (ciGreen info)
-         |> writeValue r (ciRed info)
-         |> writeValue b (ciBlue info)
-         |> writeValue a (ciAlpha info)
-  where (|>) = flip ($)
+   in -- Note: VP8L pixel encoding order is Green, Red, Blue, Alpha
+      w
+        |> writeValue g (ciGreen info)
+        |> writeValue r (ciRed info)
+        |> writeValue b (ciBlue info)
+        |> writeValue a (ciAlpha info)
+  where
+    (|>) = flip ($)
 
 writeValue :: Word8 -> VU.Vector Word8 -> BitWriter -> BitWriter
 writeValue val syms w
-  | VU.length syms == 1 = w  -- 0-bit code (single symbol)
-  | VU.length syms == 2 = writeBit (val == (syms VU.! 1)) w  -- 1-bit simple code
+  | VU.length syms == 1 = w -- 0-bit code (single symbol)
+  | VU.length syms == 2 = writeBit (val == (syms VU.! 1)) w -- 1-bit simple code
   | otherwise =
       -- For 3+ symbols, we quantized to 2 (min/max)
       -- Write 0 for min, 1 for max (whichever is closer)

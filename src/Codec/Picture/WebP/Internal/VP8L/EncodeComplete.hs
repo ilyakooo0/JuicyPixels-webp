@@ -210,16 +210,19 @@ adjustForKraft :: VU.Vector (Int, Int) -> VU.Vector (Int, Int)
 adjustForKraft symLens =
   let n = VU.length symLens
       -- Calculate current Kraft sum (scaled by 2^maxCodeLength)
-      kraftSum = VU.foldl' (\acc (_, len) ->
-          acc + (1 `shiftL` (maxCodeLength - len))
-        ) 0 symLens
+      kraftSum =
+        VU.foldl'
+          ( \acc (_, len) ->
+              acc + (1 `shiftL` (maxCodeLength - len))
+          )
+          0
+          symLens
 
       -- Target is 2^maxCodeLength (scaled sum should equal this)
       target = 1 `shiftL` maxCodeLength :: Int
-
-      -- If sum > target, increase lengths; if sum < target, we're OK
+   in -- If sum > target, increase lengths; if sum < target, we're OK
       -- (Kraft inequality allows sum <= 1)
-   in if kraftSum > target
+      if kraftSum > target
         then -- Need to increase some lengths
           increaseUntilValid symLens kraftSum target
         else symLens
@@ -232,13 +235,18 @@ increaseUntilValid symLens currentSum targetSum
       -- Find the symbol with shortest length that can be increased
       let minLen = VU.minimum $ VU.map snd symLens
           -- Increase length of first symbol with minLen
-          (updated, newSum) = VU.ifoldl' (\(acc, csum) i (sym, len) ->
-              if len == minLen && csum > targetSum && len < maxCodeLength
-                then let newLen = len + 1
-                         delta = (1 `shiftL` (maxCodeLength - len)) - (1 `shiftL` (maxCodeLength - newLen))
-                      in (VU.snoc acc (sym, newLen), csum - delta)
-                else (VU.snoc acc (sym, len), csum)
-            ) (VU.empty, currentSum) symLens
+          (updated, newSum) =
+            VU.ifoldl'
+              ( \(acc, csum) i (sym, len) ->
+                  if len == minLen && csum > targetSum && len < maxCodeLength
+                    then
+                      let newLen = len + 1
+                          delta = (1 `shiftL` (maxCodeLength - len)) - (1 `shiftL` (maxCodeLength - newLen))
+                       in (VU.snoc acc (sym, newLen), csum - delta)
+                    else (VU.snoc acc (sym, len), csum)
+              )
+              (VU.empty, currentSum)
+              symLens
        in if newSum == currentSum
             then symLens -- Can't reduce further
             else increaseUntilValid updated newSum targetSum
@@ -340,7 +348,6 @@ writeNormalCode codes alphabetSize w =
       -- kCodeLengthCodeOrder = [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
       -- We need symbols 0-15 for literal code lengths, so write up to position 18 (which includes 15)
       numClcToWrite = 19 -- All 19 positions to ensure we cover symbols 0-15
-
       w1 = writeBit False w -- is_simple = 0
 
       -- Write number of CLC lengths
@@ -348,12 +355,16 @@ writeNormalCode codes alphabetSize w =
 
       -- Write CLC lengths: 4 bits for symbols 0-15, 0 for symbols 16-18
       clcOrder = [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-      w3 = foldl (\wa i ->
-             let clcSym = clcOrder !! i
-                 -- Symbols 0-15 get length 4, symbols 16-18 get length 0
-                 clcLen = if clcSym <= 15 then 4 else 0
-              in writeBits 3 (fromIntegral clcLen) wa
-           ) w2 [0 .. numClcToWrite - 1]
+      w3 =
+        foldl
+          ( \wa i ->
+              let clcSym = clcOrder !! i
+                  -- Symbols 0-15 get length 4, symbols 16-18 get length 0
+                  clcLen = if clcSym <= 15 then 4 else 0
+               in writeBits 3 (fromIntegral clcLen) wa
+          )
+          w2
+          [0 .. numClcToWrite - 1]
 
       -- Build canonical codes for the fixed CLC
       -- With 16 symbols all having length 4, they get codes 0..15
@@ -374,12 +385,17 @@ writeNormalCode codes alphabetSize w =
       -- Write code lengths directly using fixed 4-bit codes
       -- Each code length 0-15 is encoded as its own value with 4 bits
       -- Decoder reads symbols 0 to max_symbol-1, so we write sym < maxSymbol
-      w7 = VU.ifoldl' (\wa sym len ->
-             if sym < maxSymbol
-               then let (code, codeLen) = fixedClcCodes VU.! len
-                     in writeBitsReversed codeLen (fromIntegral code) wa
-               else wa
-           ) w6 codeLengthArray
+      w7 =
+        VU.ifoldl'
+          ( \wa sym len ->
+              if sym < maxSymbol
+                then
+                  let (code, codeLen) = fixedClcCodes VU.! len
+                   in writeBitsReversed codeLen (fromIntegral code) wa
+                else wa
+          )
+          w6
+          codeLengthArray
    in w7
 
 -- | Build code length array from codes
@@ -440,9 +456,13 @@ findNumClcToWrite :: VU.Vector Int -> [Int] -> Int
 findNumClcToWrite clcLengths order =
   let -- Find last non-zero in order
       indexed = zip [0 ..] order
-      lastNonZero = foldl (\acc (i, sym) ->
-          if clcLengths VU.! sym > 0 then i + 1 else acc
-        ) 4 indexed
+      lastNonZero =
+        foldl
+          ( \acc (i, sym) ->
+              if clcLengths VU.! sym > 0 then i + 1 else acc
+          )
+          4
+          indexed
    in max 4 lastNonZero
 
 -- | Build canonical codes for CLC
@@ -541,9 +561,9 @@ ceilLog2 n
   | n <= 256 = 8
   | otherwise = 9
 
-when :: Monad m => Bool -> m () -> m ()
+when :: (Monad m) => Bool -> m () -> m ()
 when True action = action
 when False _ = return ()
 
-forM_ :: Monad m => [a] -> (a -> m b) -> m ()
+forM_ :: (Monad m) => [a] -> (a -> m b) -> m ()
 forM_ xs f = sequence_ (map f xs)

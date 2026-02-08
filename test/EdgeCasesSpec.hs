@@ -71,8 +71,8 @@ spec = do
         case decodeWebP encoded of
           Right (ImageRGB8 dec) -> do
             let PixelRGB8 r g b = pixelAt dec 16 16
-            (fromIntegral r :: Int, fromIntegral g :: Int, fromIntegral b :: Int) `shouldSatisfy`
-              (\(r', g', b') -> r' < 10 && g' < 10 && b' < 10)
+            (fromIntegral r :: Int, fromIntegral g :: Int, fromIntegral b :: Int)
+              `shouldSatisfy` (\(r', g', b') -> r' < 10 && g' < 10 && b' < 10)
           _ -> expectationFailure "Failed all-black"
 
       it "handles all-white image" $ do
@@ -82,8 +82,8 @@ spec = do
         case decodeWebP encoded of
           Right (ImageRGB8 dec) -> do
             let PixelRGB8 r g b = pixelAt dec 16 16
-            (fromIntegral r :: Int, fromIntegral g :: Int, fromIntegral b :: Int) `shouldSatisfy`
-              (\(r', g', b') -> r' > 245 && g' > 245 && b' > 245)
+            (fromIntegral r :: Int, fromIntegral g :: Int, fromIntegral b :: Int)
+              `shouldSatisfy` (\(r', g', b') -> r' > 245 && g' > 245 && b' > 245)
           _ -> expectationFailure "Failed all-white"
 
       it "handles primary colors" $ do
@@ -94,13 +94,12 @@ spec = do
                 Right (ImageRGB8 _) -> return ()
                 _ -> expectationFailure $ "Failed color " ++ show (r, g, b)
 
-        testColor (255, 0, 0)    -- Red
-        testColor (0, 255, 0)    -- Green
-        testColor (0, 0, 255)    -- Blue
-        testColor (255, 255, 0)  -- Yellow
-        testColor (255, 0, 255)  -- Magenta
-        testColor (0, 255, 255)  -- Cyan
-
+        testColor (255, 0, 0) -- Red
+        testColor (0, 255, 0) -- Green
+        testColor (0, 0, 255) -- Blue
+        testColor (255, 255, 0) -- Yellow
+        testColor (255, 0, 255) -- Magenta
+        testColor (0, 255, 255) -- Cyan
       it "handles mid-gray (128,128,128)" $ do
         let img = generateImage (\_ _ -> PixelRGB8 128 128 128) 32 32
             encoded = encodeWebPLossy img 80
@@ -141,20 +140,26 @@ spec = do
         let img = generateImage (\_ _ -> PixelRGB8 128 128 128) 32 32
             qualities = [0, 25, 50, 75, 100]
 
-        mapM_ (\q -> do
-          let encoded = encodeWebPLossy img q
-          case decodeWebP encoded of
-            Right (ImageRGB8 dec) -> imageWidth dec `shouldBe` 32
-            Right _ -> expectationFailure $ "Wrong format for quality " ++ show q
-            Left err -> expectationFailure $ "Quality " ++ show q ++ " failed: " ++ err
-          ) qualities
+        mapM_
+          ( \q -> do
+              let encoded = encodeWebPLossy img q
+              case decodeWebP encoded of
+                Right (ImageRGB8 dec) -> imageWidth dec `shouldBe` 32
+                Right _ -> expectationFailure $ "Wrong format for quality " ++ show q
+                Left err -> expectationFailure $ "Quality " ++ show q ++ " failed: " ++ err
+          )
+          qualities
 
     describe "Complex Patterns" $ do
       it "handles random-looking noise pattern" $ do
-        let img = generateImage (\x y ->
-              let v = (x * 37 + y * 73) `mod` 256
-               in PixelRGB8 (fromIntegral v) (fromIntegral ((v + 85) `mod` 256)) (fromIntegral ((v + 170) `mod` 256))
-              ) 64 64
+        let img =
+              generateImage
+                ( \x y ->
+                    let v = (x * 37 + y * 73) `mod` 256
+                     in PixelRGB8 (fromIntegral v) (fromIntegral ((v + 85) `mod` 256)) (fromIntegral ((v + 170) `mod` 256))
+                )
+                64
+                64
             encoded = encodeWebPLossy img 70
 
         case decodeWebP encoded of
@@ -170,12 +175,16 @@ spec = do
           _ -> expectationFailure "Failed high-frequency pattern"
 
       it "handles smooth gradients" $ do
-        let img = generateImage (\x y ->
-              let r = fromIntegral ((x * 255) `div` 127)
-                  g = fromIntegral ((y * 255) `div` 127)
-                  b = fromIntegral (((x + y) * 255) `div` 254)
-               in PixelRGB8 r g b
-              ) 128 128
+        let img =
+              generateImage
+                ( \x y ->
+                    let r = fromIntegral ((x * 255) `div` 127)
+                        g = fromIntegral ((y * 255) `div` 127)
+                        b = fromIntegral (((x + y) * 255) `div` 254)
+                     in PixelRGB8 r g b
+                )
+                128
+                128
             encoded = encodeWebPLossy img 80
 
         case decodeWebP encoded of
@@ -202,19 +211,22 @@ spec = do
 
         case decodeWebP encoded of
           Right (ImageRGBA8 dec) -> do
-            let PixelRGBA8 _ _ _ a1 = pixelAt dec 0 0   -- even
-                PixelRGBA8 _ _ _ a2 = pixelAt dec 1 0   -- odd
+            let PixelRGBA8 _ _ _ a1 = pixelAt dec 0 0 -- even
+                PixelRGBA8 _ _ _ a2 = pixelAt dec 1 0 -- odd
             a1 `shouldBe` 255
             a2 `shouldBe` 0
           _ -> expectationFailure "Failed checkerboard alpha"
 
     describe "Animation Edge Cases" $ do
       it "handles many frames (20 frames)" $ do
-        let frames = [ WebPEncodeFrame
-                        (ImageRGB8 $ generateImage (\_ _ -> PixelRGB8 (fromIntegral i) 0 0) 16 16)
-                        50  -- 50ms per frame
-                        0 0
-                     | i <- [0..19] ]
+        let frames =
+              [ WebPEncodeFrame
+                  (ImageRGB8 $ generateImage (\_ _ -> PixelRGB8 (fromIntegral i) 0 0) 16 16)
+                  50 -- 50ms per frame
+                  0
+                  0
+              | i <- [0 .. 19]
+              ]
             encoded = encodeWebPAnimation frames 16 16 80
 
         case decodeWebPAnimation encoded of
@@ -222,11 +234,14 @@ spec = do
           Left err -> expectationFailure $ "Failed many frames: " ++ err
 
       it "handles varying frame durations" $ do
-        let frames = [ WebPEncodeFrame
-                        (ImageRGB8 $ generateImage (\_ _ -> PixelRGB8 255 0 0) 16 16)
-                        (i * 100)
-                        0 0
-                     | i <- [1..5] ]
+        let frames =
+              [ WebPEncodeFrame
+                  (ImageRGB8 $ generateImage (\_ _ -> PixelRGB8 255 0 0) 16 16)
+                  (i * 100)
+                  0
+                  0
+              | i <- [1 .. 5]
+              ]
             encoded = encodeWebPAnimation frames 16 16 80
 
         case decodeWebPAnimation encoded of
@@ -253,10 +268,14 @@ spec = do
         B.length encodedComplex `shouldSatisfy` (> B.length encodedSolid)
 
       it "both lossless and lossy produce valid output for complex images" $ do
-        let img = generateImage (\x y ->
-              let v = (x * y) `mod` 256
-               in PixelRGB8 (fromIntegral v) (fromIntegral ((v + 100) `mod` 256)) (fromIntegral ((v + 200) `mod` 256))
-              ) 128 128
+        let img =
+              generateImage
+                ( \x y ->
+                    let v = (x * y) `mod` 256
+                     in PixelRGB8 (fromIntegral v) (fromIntegral ((v + 100) `mod` 256)) (fromIntegral ((v + 200) `mod` 256))
+                )
+                128
+                128
             imgRGBA = pixelMap (\(PixelRGB8 r g b) -> PixelRGBA8 r g b 255) img
             encodedLossless = encodeWebPLossless imgRGBA
             encodedLossy = encodeWebPLossy img 80
@@ -292,12 +311,12 @@ spec = do
         let original = generateImage (\x y -> PixelRGB8 (fromIntegral x) (fromIntegral y) 128) 64 64
 
             cycle1 = case decodeWebP (encodeWebPLossy original 70) of
-                      Right (ImageRGB8 img) -> img
-                      _ -> error "Cycle 1 failed"
+              Right (ImageRGB8 img) -> img
+              _ -> error "Cycle 1 failed"
 
             cycle2 = case decodeWebP (encodeWebPLossy cycle1 70) of
-                      Right (ImageRGB8 img) -> img
-                      _ -> error "Cycle 2 failed"
+              Right (ImageRGB8 img) -> img
+              _ -> error "Cycle 2 failed"
 
             mse1 = computeMSE original cycle1
             mse2 = computeMSE original cycle2
@@ -309,12 +328,12 @@ spec = do
         let original = generateImage (\x y -> PixelRGBA8 (fromIntegral x) (fromIntegral y) 128 255) 64 64
 
             cycle1 = case decodeWebP (encodeWebPLossless original) of
-                      Right (ImageRGBA8 img) -> img
-                      _ -> error "Cycle 1 failed"
+              Right (ImageRGBA8 img) -> img
+              _ -> error "Cycle 1 failed"
 
             cycle2 = case decodeWebP (encodeWebPLossless cycle1) of
-                      Right (ImageRGBA8 img) -> img
-                      _ -> error "Cycle 2 failed"
+              Right (ImageRGBA8 img) -> img
+              _ -> error "Cycle 2 failed"
 
         -- Simple encoder quantizes channels with 3+ unique values to min/max
         -- For gradient 0-63, values get mapped to 0 or 63 based on closeness
@@ -322,19 +341,22 @@ spec = do
             PixelRGBA8 r2 g2 b2 a2 = pixelAt cycle2 32 32
         -- With quantization, error can be up to 32 (half the range)
         abs (fromIntegral r1 - 32 :: Int) `shouldSatisfy` (< 35)
-        abs (fromIntegral r2 - fromIntegral r1 :: Int) `shouldSatisfy` (< 10)  -- Cycles should be stable
+        abs (fromIntegral r2 - fromIntegral r1 :: Int) `shouldSatisfy` (< 10) -- Cycles should be stable
 
 -- Helper: Compute MSE for RGB8 images
 computeMSE :: Image PixelRGB8 -> Image PixelRGB8 -> Double
 computeMSE orig decoded =
   let w = imageWidth orig
       h = imageHeight orig
-      sumSqErr = sum [ let PixelRGB8 r1 g1 b1 = pixelAt orig x y
-                           PixelRGB8 r2 g2 b2 = pixelAt decoded x y
-                           dr = fromIntegral r1 - fromIntegral r2 :: Double
-                           dg = fromIntegral g1 - fromIntegral g2 :: Double
-                           db = fromIntegral b1 - fromIntegral b2 :: Double
-                        in dr*dr + dg*dg + db*db
-                     | y <- [0..h-1], x <- [0..w-1]
-                     ]
+      sumSqErr =
+        sum
+          [ let PixelRGB8 r1 g1 b1 = pixelAt orig x y
+                PixelRGB8 r2 g2 b2 = pixelAt decoded x y
+                dr = fromIntegral r1 - fromIntegral r2 :: Double
+                dg = fromIntegral g1 - fromIntegral g2 :: Double
+                db = fromIntegral b1 - fromIntegral b2 :: Double
+             in dr * dr + dg * dg + db * db
+          | y <- [0 .. h - 1],
+            x <- [0 .. w - 1]
+          ]
    in sumSqErr / (fromIntegral (w * h * 3))

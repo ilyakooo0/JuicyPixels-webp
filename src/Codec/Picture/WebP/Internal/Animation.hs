@@ -12,7 +12,7 @@ import Codec.Picture.WebP.Internal.Alpha
 import Codec.Picture.WebP.Internal.Container
 import Codec.Picture.WebP.Internal.VP8
 import Codec.Picture.WebP.Internal.VP8L
-import Control.Monad (when, mapM_)
+import Control.Monad (mapM_, when)
 import Control.Monad.ST
 import Data.Bits
 import qualified Data.ByteString as B

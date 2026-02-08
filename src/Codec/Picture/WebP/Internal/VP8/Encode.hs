@@ -86,17 +86,24 @@ encodeVP8 img quality = runST $ do
 
   -- Step 4: Generate compressed header and continue encoding with same BoolEncoder
   let compressedHeaderEnc = generateCompressedHeader quantIndices (encFilterLevel config) (encFilterType config)
-      -- DO NOT finalize yet! Continue with same encoder for MB data
+  -- DO NOT finalize yet! Continue with same encoder for MB data
 
   -- Step 5: Encode all macroblocks using the SAME encoder (continues arithmetic coding stream)
-  finalEncoder <- encodeMacroblocks
-    yBuf uBuf vBuf
-    yRecon uRecon vRecon
-    paddedW paddedH
-    mbRows mbCols
-    dequantFactors
-    defaultCoeffProbs
-    compressedHeaderEnc  -- Continue from compressed header encoder!
+  finalEncoder <-
+    encodeMacroblocks
+      yBuf
+      uBuf
+      vBuf
+      yRecon
+      uRecon
+      vRecon
+      paddedW
+      paddedH
+      mbRows
+      mbCols
+      dequantFactors
+      defaultCoeffProbs
+      compressedHeaderEnc -- Continue from compressed header encoder!
 
   -- Step 6: Finalize the combined stream
   let partition0 = finalizeBoolEncoder finalEncoder
@@ -114,8 +121,10 @@ encodeMacroblocks ::
   VSM.MVector s Word8 -> -- Y reconstruction
   VSM.MVector s Word8 -> -- U reconstruction
   VSM.MVector s Word8 -> -- V reconstruction
-  Int -> Int -> -- Padded width, height
-  Int -> Int -> -- MB rows, cols
+  Int ->
+  Int -> -- Padded width, height
+  Int ->
+  Int -> -- MB rows, cols
   DequantFactors ->
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
@@ -125,14 +134,21 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
         | mbY >= mbRows = return enc
         | mbX >= mbCols = loop (mbY + 1) 0 enc
         | otherwise = do
-            enc' <- encodeMacroblock
-              yOrig uOrig vOrig
-              yRecon uRecon vRecon
-              paddedW paddedH
-              mbY mbX
-              dequantFactors
-              coeffProbs
-              enc
+            enc' <-
+              encodeMacroblock
+                yOrig
+                uOrig
+                vOrig
+                yRecon
+                uRecon
+                vRecon
+                paddedW
+                paddedH
+                mbY
+                mbX
+                dequantFactors
+                coeffProbs
+                enc
             loop mbY (mbX + 1) enc'
 
   loop 0 0 encoder
@@ -145,8 +161,10 @@ encodeMacroblock ::
   VSM.MVector s Word8 -> -- Y reconstruction
   VSM.MVector s Word8 -> -- U reconstruction
   VSM.MVector s Word8 -> -- V reconstruction
-  Int -> Int -> -- Padded width, height
-  Int -> Int -> -- MB row, col
+  Int ->
+  Int -> -- Padded width, height
+  Int ->
+  Int -> -- MB row, col
   DequantFactors ->
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
@@ -187,7 +205,8 @@ encodeYBlocks ::
   VSM.MVector s Word8 -> -- Y original
   VSM.MVector s Word8 -> -- Y reconstruction (will contain prediction)
   Int -> -- Stride
-  Int -> Int -> -- X, Y position
+  Int ->
+  Int -> -- X, Y position
   Int -> -- Prediction mode (0-3)
   DequantFactors ->
   VU.Vector Word8 -> -- Coefficient probabilities
@@ -202,7 +221,7 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc = d
 
   -- Collect 16 Y block DCs for Y2 by doing forward DCT on all blocks
   y2DCs <- VSM.new 16
-  residualBlocks <- VSM.new (16 * 16)  -- Store all 16 blocks for later encoding
+  residualBlocks <- VSM.new (16 * 16) -- Store all 16 blocks for later encoding
 
   -- First pass: Compute all residuals and DCTs, collect DCs
   forM_ [0 .. 15] $ \blockIdx -> do
@@ -318,7 +337,8 @@ encodeChromaBlocks ::
   VSM.MVector s Word8 -> -- Chroma original (U or V)
   VSM.MVector s Word8 -> -- Chroma reconstruction
   Int -> -- Stride
-  Int -> Int -> -- X, Y position
+  Int ->
+  Int -> -- X, Y position
   Int -> -- Prediction mode (0-3)
   DequantFactors ->
   VU.Vector Word8 -> -- Coefficient probabilities
@@ -349,7 +369,7 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coe
                     py = y + subY + row
                     idx = py * stride + px
                 orig <- VSM.read chromaOrig idx
-                pred <- VSM.read predBuf idx  -- Use prediction buffer
+                pred <- VSM.read predBuf idx -- Use prediction buffer
                 let residual = fromIntegral orig - fromIntegral pred :: Int16
                 VSM.write residuals (row * 4 + col) residual
 
@@ -372,11 +392,10 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coe
                 let px = x + subX + col
                     py = y + subY + row
                     idx = py * stride + px
-                pred <- VSM.read predBuf idx  -- Get prediction value
+                pred <- VSM.read predBuf idx -- Get prediction value
                 res <- VSM.read residuals (row * 4 + col)
                 let reconstructed = clip255 (fromIntegral pred + fromIntegral res)
-                VSM.write chromaRecon idx reconstructed  -- Write to reconstruction for future MBs
-
+                VSM.write chromaRecon idx reconstructed -- Write to reconstruction for future MBs
             processBlock (blockIdx + 1) e'
 
   processBlock 0 enc

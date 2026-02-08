@@ -75,13 +75,17 @@ getBitPosition (BitReader _ offset _ count) =
 -- | Get reader state as a string (for debugging)
 getReaderState :: BitReader -> String
 getReaderState (BitReader _ offset bits count) =
-  "offset=" ++ show offset ++
-  ", bits=0x" ++ showHex64 bits ++
-  ", count=" ++ show count ++
-  ", pos=" ++ show (offset * 8 - count)
+  "offset="
+    ++ show offset
+    ++ ", bits=0x"
+    ++ showHex64 bits
+    ++ ", count="
+    ++ show count
+    ++ ", pos="
+    ++ show (offset * 8 - count)
   where
     showHex64 :: Word64 -> String
-    showHex64 w = concatMap toHexDigit [60, 56..0]
+    showHex64 w = concatMap toHexDigit [60, 56 .. 0]
       where
         toHexDigit shift = [hexChars !! fromIntegral ((w `shiftR` shift) .&. 0xF)]
         hexChars = "0123456789abcdef"

@@ -46,7 +46,7 @@ data VP8FrameHeader = VP8FrameHeader
     vp8ProbSkipFalse :: !Word8,
     vp8FirstPartition :: !B.ByteString,
     vp8DCTPartitions :: ![B.ByteString],
-    vp8Decoder :: !BoolDecoder  -- BoolDecoder state after compressed header
+    vp8Decoder :: !BoolDecoder -- BoolDecoder state after compressed header
   }
   deriving (Show)
 
@@ -113,7 +113,7 @@ parseVP8Header bs = do
             vp8ProbSkipFalse = probSkip,
             vp8FirstPartition = partitionBytes,
             vp8DCTPartitions = dctPartitions,
-            vp8Decoder = d13  -- Pass the decoder state after compressed header
+            vp8Decoder = d13 -- Pass the decoder state after compressed header
           }
   where
     fromStrict = B.fromStrict

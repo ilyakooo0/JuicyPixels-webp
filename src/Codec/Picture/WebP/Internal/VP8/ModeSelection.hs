@@ -10,8 +10,8 @@ where
 import Codec.Picture.WebP.Internal.VP8.Predict
 import Control.Monad (forM_)
 import Control.Monad.ST
-import Data.Word
 import qualified Data.Vector.Storable.Mutable as VSM
+import Data.Word
 
 -- Prediction modes (from Tables.hs and Predict.hs)
 -- 16x16 luma modes: DC_PRED=0, V_PRED=1, H_PRED=2, TM_PRED=3
@@ -32,15 +32,18 @@ selectIntra16x16Mode yOrig yRecon stride mbX mbY = do
   predBuf <- VSM.clone yRecon
 
   -- Try all 4 modes and find the one with lowest SAD
-  results <- mapM (\mode -> do
-    -- Compute prediction for this mode
-    predict16x16 mode predBuf stride mbX mbY
+  results <-
+    mapM
+      ( \mode -> do
+          -- Compute prediction for this mode
+          predict16x16 mode predBuf stride mbX mbY
 
-    -- Calculate SAD (sum of absolute differences)
-    sad <- computeSAD16x16 yOrig predBuf stride mbX mbY
+          -- Calculate SAD (sum of absolute differences)
+          sad <- computeSAD16x16 yOrig predBuf stride mbX mbY
 
-    return (mode, sad)
-    ) [0..3]
+          return (mode, sad)
+      )
+      [0 .. 3]
 
   -- Return mode with minimum SAD
   return $ foldl1 (\(m1, s1) (m2, s2) -> if s2 < s1 then (m2, s2) else (m1, s1)) results
@@ -63,11 +66,14 @@ selectIntra4x4Mode yOrig yRecon stride mbX mbY subBlock = do
   predBuf <- VSM.clone yRecon
 
   -- Try all 10 modes
-  results <- mapM (\mode -> do
-    predict4x4 mode predBuf stride subX subY
-    sad <- computeSAD4x4 yOrig predBuf stride subX subY
-    return (mode, sad)
-    ) [0..9]
+  results <-
+    mapM
+      ( \mode -> do
+          predict4x4 mode predBuf stride subX subY
+          sad <- computeSAD4x4 yOrig predBuf stride subX subY
+          return (mode, sad)
+      )
+      [0 .. 9]
 
   return $ foldl1 (\(m1, s1) (m2, s2) -> if s2 < s1 then (m2, s2) else (m1, s1)) results
 
@@ -83,11 +89,14 @@ selectChromaMode ::
 selectChromaMode chromaOrig chromaRecon stride mbX mbY = do
   predBuf <- VSM.clone chromaRecon
 
-  results <- mapM (\mode -> do
-    predict8x8 mode predBuf stride mbX mbY
-    sad <- computeSAD8x8 chromaOrig predBuf stride mbX mbY
-    return (mode, sad)
-    ) [0..3]
+  results <-
+    mapM
+      ( \mode -> do
+          predict8x8 mode predBuf stride mbX mbY
+          sad <- computeSAD8x8 chromaOrig predBuf stride mbX mbY
+          return (mode, sad)
+      )
+      [0 .. 3]
 
   return $ foldl1 (\(m1, s1) (m2, s2) -> if s2 < s1 then (m2, s2) else (m1, s1)) results
 
@@ -96,7 +105,8 @@ computeSAD16x16 ::
   VSM.MVector s Word8 -> -- Original
   VSM.MVector s Word8 -> -- Prediction
   Int -> -- Stride
-  Int -> Int -> -- X, Y position
+  Int ->
+  Int -> -- X, Y position
   ST s Int
 computeSAD16x16 orig pred stride x y = do
   let loop !row !col !acc
@@ -115,7 +125,8 @@ computeSAD8x8 ::
   VSM.MVector s Word8 ->
   VSM.MVector s Word8 ->
   Int ->
-  Int -> Int ->
+  Int ->
+  Int ->
   ST s Int
 computeSAD8x8 orig pred stride x y = do
   let loop !row !col !acc
@@ -134,7 +145,8 @@ computeSAD4x4 ::
   VSM.MVector s Word8 ->
   VSM.MVector s Word8 ->
   Int ->
-  Int -> Int ->
+  Int ->
+  Int ->
   ST s Int
 computeSAD4x4 orig pred stride x y = do
   let loop !row !col !acc

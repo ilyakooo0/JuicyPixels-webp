@@ -8,14 +8,14 @@ where
 
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.VP8L.EncodeUncompressed
+import Control.Monad (forM_)
+import Control.Monad.ST
 import Data.Binary.Put
 import Data.Bits
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
-import Control.Monad.ST
-import Control.Monad (forM_)
 import Data.Word
 
 -- | Encode alpha channel from RGBA image
@@ -39,7 +39,6 @@ encodeAlpha img =
             VSM.write alphaBuf alphaIdx a
 
         VS.unsafeFreeze alphaBuf
-
    in B.pack $ VS.toList alphaBytes
 
 -- | Create ALPH chunk with alpha data
@@ -53,9 +52,7 @@ makeALPHChunk alphaData =
       -- Bits 4-5: filtering (0 = none)
       -- Bits 6-7: compression (0 = uncompressed)
       headerByte = 0x00 :: Word8 -- Compression method 0 (raw bytes)
-
       payload = B.cons headerByte alphaData
       chunkSize = BL.toStrict $ runPut $ putWord32le (fromIntegral $ B.length payload)
       padding = if odd (B.length payload) then B.singleton 0 else B.empty
-
    in fourCC <> chunkSize <> payload <> padding

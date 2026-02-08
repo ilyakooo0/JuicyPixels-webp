@@ -38,8 +38,8 @@ spec = do
             let PixelRGBA8 r g b a = pixelAt decoded 32 32
             abs (fromIntegral r - 32 :: Int) `shouldSatisfy` (< 50)
             abs (fromIntegral g - 32 :: Int) `shouldSatisfy` (< 50)
-            b `shouldBe` 128  -- Constant value should be exact
-            a `shouldBe` 255  -- Constant alpha should be exact
+            b `shouldBe` 128 -- Constant value should be exact
+            a `shouldBe` 255 -- Constant alpha should be exact
           Right _ -> expectationFailure "Expected RGBA8 image"
           Left err -> expectationFailure $ "Decode failed: " ++ err
 
@@ -107,11 +107,11 @@ spec = do
                 error100 = abs (fromIntegral r100 - 64 :: Int) + abs (fromIntegral g100 - 64 :: Int)
 
             -- Quality 100 should have less error than quality 10
-            error100 `shouldSatisfy` (< error10 + 10)  -- Allow some margin
+            error100 `shouldSatisfy` (< error10 + 10) -- Allow some margin
           _ -> expectationFailure "Failed to decode images"
 
       it "encodes various sizes correctly" $ property $ \(Positive w, Positive h) -> do
-        let w' = min 256 (w `mod` 256 + 1)  -- 1-256
+        let w' = min 256 (w `mod` 256 + 1) -- 1-256
             h' = min 256 (h `mod` 256 + 1)
             img = generateImage (\_ _ -> PixelRGB8 128 128 128) w' h'
             encoded = encodeWebPLossy img 80
@@ -132,7 +132,7 @@ spec = do
           Right (ImageRGBA8 decoded) -> do
             -- Alpha should be exact (uses uncompressed format)
             let PixelRGBA8 _ _ _ a = pixelAt decoded 10 10
-            a `shouldBe` 20  -- (10 + 10) `mod` 256
+            a `shouldBe` 20 -- (10 + 10) `mod` 256
           Right _ -> expectationFailure "Expected RGBA8 image"
           Left err -> expectationFailure $ "Decode failed: " ++ err
 
@@ -160,11 +160,14 @@ spec = do
 
     describe "Animation Roundtrip" $ do
       it "preserves frame count and timing" $ do
-        let frames = [ WebPEncodeFrame
-                        (ImageRGB8 $ generateImage (\_ _ -> PixelRGB8 (fromIntegral i) 0 0) 16 16)
-                        (i * 100)  -- Different durations
-                        0 0
-                     | i <- [1..5] ]
+        let frames =
+              [ WebPEncodeFrame
+                  (ImageRGB8 $ generateImage (\_ _ -> PixelRGB8 (fromIntegral i) 0 0) 16 16)
+                  (i * 100) -- Different durations
+                  0
+                  0
+              | i <- [1 .. 5]
+              ]
             encoded = encodeWebPAnimation frames 16 16 80
 
         case decodeWebPAnimation encoded of

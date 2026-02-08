@@ -37,9 +37,10 @@ decodeCoefficients decoder coeffProbs blockType initialCtx startPos = do
             -- When skipEOB is True, we skip the first bit (EOB decision) and start
             -- at the subtree for non-EOB tokens. The tree structure after EOB is
             -- at index 2, and we skip the first probability.
-            let (token, d1) = if skipEOB
-                  then boolReadTreeAt coeffTree 2 (getCoeffProbs coeffProbs probIdx 1) d
-                  else boolReadTree coeffTree (getCoeffProbs coeffProbs probIdx 0) d
+            let (token, d1) =
+                  if skipEOB
+                    then boolReadTreeAt coeffTree 2 (getCoeffProbs coeffProbs probIdx 1) d
+                    else boolReadTree coeffTree (getCoeffProbs coeffProbs probIdx 0) d
 
             case token of
               0 -> loop (pos + 1) 0 d1 hasNonzero True
@@ -62,17 +63,17 @@ boolReadTreeAt tree startIdx probs decoder = go startIdx 0 decoder
       | probIdx >= V.length probs =
           -- No more probabilities, take left branch by default
           let node = tree V.! i
-          in if node <= 0
-               then (if node == 0 then 0 else fromIntegral (negate node), d)
-               else go (fromIntegral node) probIdx d
+           in if node <= 0
+                then (if node == 0 then 0 else fromIntegral (negate node), d)
+                else go (fromIntegral node) probIdx d
       | otherwise =
           let prob = probs V.! probIdx
               (bit, d') = boolRead prob d
               idx = i + if bit then 1 else 0
               node = tree V.! idx
-          in if node <= 0
-               then (if node == 0 then 0 else fromIntegral (negate node), d')
-               else go (fromIntegral node) (probIdx + 1) d'
+           in if node <= 0
+                then (if node == 0 then 0 else fromIntegral (negate node), d')
+                else go (fromIntegral node) (probIdx + 1) d'
 
 -- | Decode coefficient value from token
 decodeCoeffValue :: Int -> BoolDecoder -> (Int16, BoolDecoder)

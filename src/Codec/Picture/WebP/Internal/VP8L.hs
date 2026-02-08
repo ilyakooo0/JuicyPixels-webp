@@ -53,9 +53,11 @@ decodeVP8LHeaderless width height bs = do
 decodeVP8LImage :: Int -> Int -> Bool -> BitReader -> Either String (Image PixelRGBA8)
 decodeVP8LImage width height alphaIsUsed reader = do
   when (width <= 0 || width > 16384) $
-    Left $ "Invalid width in decodeVP8LImage: " ++ show width
+    Left $
+      "Invalid width in decodeVP8LImage: " ++ show width
   when (height <= 0 || height > 16384) $
-    Left $ "Invalid height in decodeVP8LImage: " ++ show height
+    Left $
+      "Invalid height in decodeVP8LImage: " ++ show height
 
   (transforms, reader1) <- readTransforms width height reader
 
@@ -266,9 +268,9 @@ pixelsToImage width height pixels alphaIsUsed =
               else
                 let pixel = pixels VS.! pixelIdx
                  in case component of
-                      0 -> fromIntegral ((pixel `shiftR` 16) .&. 0xFF)  -- R
-                      1 -> fromIntegral ((pixel `shiftR` 8) .&. 0xFF)   -- G
-                      2 -> fromIntegral (pixel .&. 0xFF)                  -- B
-                      3 -> if alphaIsUsed then fromIntegral ((pixel `shiftR` 24) .&. 0xFF) else 255  -- A
+                      0 -> fromIntegral ((pixel `shiftR` 16) .&. 0xFF) -- R
+                      1 -> fromIntegral ((pixel `shiftR` 8) .&. 0xFF) -- G
+                      2 -> fromIntegral (pixel .&. 0xFF) -- B
+                      3 -> if alphaIsUsed then fromIntegral ((pixel `shiftR` 24) .&. 0xFF) else 255 -- A
                       _ -> 0
    in Image width height pixelData

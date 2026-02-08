@@ -10,8 +10,8 @@ import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.BitWriter
 import Control.Monad.ST
 import Data.Bits
-import Data.List (nub, sort)
 import qualified Data.ByteString as B
+import Data.List (nub, sort)
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import qualified Data.Vector.Unboxed.Mutable as VUM
@@ -27,23 +27,23 @@ encodeVP8LFull img =
       -- Find unique values
       unique = findUniquePerChannel pixels (width * height)
 
-      w = emptyBitWriter
-        |> writeBits 8 0x2F
-        |> writeBits 14 (fromIntegral $ width - 1)
-        |> writeBits 14 (fromIntegral $ height - 1)
-        |> writeBit True
-        |> writeBits 3 0
-        |> writeBit False  -- no transforms
-        |> writeBit False  -- no color cache
-        |> writeBit False  -- single prefix code group
-        |> writeCodeFor256Alphabet (uniqueG unique)  -- Green
-        |> writeCodeFor256Alphabet (uniqueR unique)  -- Red
-        |> writeCodeFor256Alphabet (uniqueB unique)  -- Blue
-        |> writeCodeFor256Alphabet (uniqueA unique)  -- Alpha
-        |> writeSimpleCode 0                          -- Distance
-        |> writePixelData pixels (width * height) unique
-        |> finalizeBitWriter
-
+      w =
+        emptyBitWriter
+          |> writeBits 8 0x2F
+          |> writeBits 14 (fromIntegral $ width - 1)
+          |> writeBits 14 (fromIntegral $ height - 1)
+          |> writeBit True
+          |> writeBits 3 0
+          |> writeBit False -- no transforms
+          |> writeBit False -- no color cache
+          |> writeBit False -- single prefix code group
+          |> writeCodeFor256Alphabet (uniqueG unique) -- Green
+          |> writeCodeFor256Alphabet (uniqueR unique) -- Red
+          |> writeCodeFor256Alphabet (uniqueB unique) -- Blue
+          |> writeCodeFor256Alphabet (uniqueA unique) -- Alpha
+          |> writeSimpleCode 0 -- Distance
+          |> writePixelData pixels (width * height) unique
+          |> finalizeBitWriter
    in bitWriterToByteString w
   where
     (|>) = flip ($)
@@ -68,50 +68,56 @@ writeCodeFor256Alphabet :: [Word8] -> BitWriter -> BitWriter
 writeCodeFor256Alphabet [] = writeSimpleCode 0
 writeCodeFor256Alphabet [s] = writeSimpleCode (fromIntegral s)
 writeCodeFor256Alphabet [s1, s2] = write2Code (fromIntegral s1) (fromIntegral s2)
-writeCodeFor256Alphabet syms@(s:_) =
+writeCodeFor256Alphabet syms@(s : _) =
   -- For 3+ symbols, write them all explicitly as a multi-symbol simple code
   -- This is valid per spec but limited to small alphabets
   if length syms <= 4
     then writeMultiSymbolSimpleCode syms
-    else writeSimpleCode (fromIntegral s)  -- Fallback: use first symbol
+    else writeSimpleCode (fromIntegral s) -- Fallback: use first symbol
 
 writeSimpleCode :: Word16 -> BitWriter -> BitWriter
 writeSimpleCode sym w =
   writeBit True w |> writeBit False |> writeBit True |> writeBits 8 (fromIntegral sym)
-  where (|>) = flip ($)
+  where
+    (|>) = flip ($)
 
 write2Code :: Word16 -> Word16 -> BitWriter -> BitWriter
 write2Code s1 s2 w =
   writeBit True w |> writeBit True |> writeBit True |> writeBits 8 (fromIntegral s1) |> writeBits 8 (fromIntegral s2)
-  where (|>) = flip ($)
+  where
+    (|>) = flip ($)
 
 -- | Write multi-symbol simple code (3-4 symbols only)
 writeMultiSymbolSimpleCode :: [Word8] -> BitWriter -> BitWriter
-writeMultiSymbolSimpleCode [] w = writeSimpleCode 0 w  -- Empty case (shouldn't happen)
-writeMultiSymbolSimpleCode (s:_) w =
+writeMultiSymbolSimpleCode [] w = writeSimpleCode 0 w -- Empty case (shouldn't happen)
+writeMultiSymbolSimpleCode (s : _) w =
   -- Use simple code format to list all symbols explicitly
   -- For now, just use first symbol as fallback
   writeSimpleCode (fromIntegral s) w
 
 writePixelData :: VS.Vector Word8 -> Int -> UniqueVals -> BitWriter -> BitWriter
 writePixelData pixels n uv w =
-  foldl (\wa i ->
-    let g = pixels VS.! (i * 4 + 1)
-        r = pixels VS.! (i * 4)
-        b = pixels VS.! (i * 4 + 2)
-        a = pixels VS.! (i * 4 + 3)
-     in wa |> writeSymbol g (uniqueG uv)
-           |> writeSymbol r (uniqueR uv)
-           |> writeSymbol b (uniqueB uv)
-           |> writeSymbol a (uniqueA uv)
-  ) w [0 .. n - 1]
+  foldl
+    ( \wa i ->
+        let g = pixels VS.! (i * 4 + 1)
+            r = pixels VS.! (i * 4)
+            b = pixels VS.! (i * 4 + 2)
+            a = pixels VS.! (i * 4 + 3)
+         in wa
+              |> writeSymbol g (uniqueG uv)
+              |> writeSymbol r (uniqueR uv)
+              |> writeSymbol b (uniqueB uv)
+              |> writeSymbol a (uniqueA uv)
+    )
+    w
+    [0 .. n - 1]
   where
     (|>) = flip ($)
 
 writeSymbol :: Word8 -> [Word8] -> BitWriter -> BitWriter
 writeSymbol _ [] = id
-writeSymbol _ [_] = id  -- 0-bit code
-writeSymbol val [s1, s2] = writeBit (val == s2)  -- 1-bit code
+writeSymbol _ [_] = id -- 0-bit code
+writeSymbol val [s1, s2] = writeBit (val == s2) -- 1-bit code
 writeSymbol val syms =
   -- For 3+ symbols with fallback, always outputs first symbol (no bits)
   id

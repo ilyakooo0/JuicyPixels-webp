@@ -192,9 +192,10 @@ lengthPrefixTable = VU.generate 280 $ \sym ->
             else
               let extraBits = (code - 2) `shiftR` 1
                   -- Prevent overflow during shift
-                  base = if extraBits > 20
-                           then error $ "Length extraBits overflow: " ++ show extraBits ++ " for code " ++ show code
-                           else 2 + ((code + 2) .&. complement 1) `shiftL` extraBits
+                  base =
+                    if extraBits > 20
+                      then error $ "Length extraBits overflow: " ++ show extraBits ++ " for code " ++ show code
+                      else 2 + ((code + 2) .&. complement 1) `shiftL` extraBits
                in (base + 1, extraBits)
 
 -- | Distance prefix table: extra bits for each distance code
@@ -224,11 +225,13 @@ decodeLZ77 ::
   Either String (VS.Vector Word32, BitReader)
 decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ do
   when (width <= 0 || width > 16384 || height <= 0 || height > 16384) $
-    error $ "Invalid dimensions in decodeLZ77: " ++ show width ++ "x" ++ show height
+    error $
+      "Invalid dimensions in decodeLZ77: " ++ show width ++ "x" ++ show height
 
   let totalPixels = width * height
-  when (totalPixels <= 0 || totalPixels > 268435456) $  -- 16384^2
-    error $ "Total pixels out of range: " ++ show totalPixels
+  when (totalPixels <= 0 || totalPixels > 268435456) $ -- 16384^2
+    error $
+      "Total pixels out of range: " ++ show totalPixels
 
   output <- VSM.new totalPixels
 
@@ -237,7 +240,7 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
             result <- VS.unsafeFreeze output
             return $ Right (result, r)
         | otherwise = do
-            let (y, x) = pos `divMod` width  -- Fixed: y is row (quotient), x is column (remainder)
+            let (y, x) = pos `divMod` width -- Fixed: y is row (quotient), x is column (remainder)
                 groupIdx = getEntropyGroup x y maybeEntropyImage width
 
             let (greenSym, r1) = decodeSymbol (pcgGreen codeGroup) r
@@ -251,7 +254,8 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
                     color = packColor (fromIntegral alphaSym) (fromIntegral redSym) (fromIntegral greenSym) (fromIntegral blueSym)
 
                 when (pos >= totalPixels) $
-                  error $ "Buffer overflow: pos=" ++ show pos ++ ", totalPixels=" ++ show totalPixels
+                  error $
+                    "Buffer overflow: pos=" ++ show pos ++ ", totalPixels=" ++ show totalPixels
                 VSM.write output pos color
 
                 let cache' = case maybeCache of
@@ -264,17 +268,20 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
                   then do
                     let lengthCode = fromIntegral greenSym
                     when (lengthCode < 256 || lengthCode >= 280) $
-                      error $ "Invalid length code: " ++ show lengthCode
+                      error $
+                        "Invalid length code: " ++ show lengthCode
 
                     let (baseLen, extraBits) = lengthPrefixTable VU.! lengthCode
                     when (extraBits > 20) $
-                      error $ "Length extra bits too large: " ++ show extraBits
+                      error $
+                        "Length extra bits too large: " ++ show extraBits
 
                     let (extra, r2) = readBits extraBits r1
                         len = baseLen + fromIntegral extra
 
                     when (len > 100000) $
-                      error $ "Length too large: " ++ show len
+                      error $
+                        "Length too large: " ++ show len
 
                     let (distSym, r3) = decodeSymbol (pcgDistance codeGroup) r2
 
@@ -284,26 +291,30 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
                         else do
                           let distCode = fromIntegral distSym - 120
                           when (distCode < 0 || distCode >= 40) $
-                            error $ "Invalid distance code: " ++ show distCode ++ " (distSym=" ++ show distSym ++ ")"
+                            error $
+                              "Invalid distance code: " ++ show distCode ++ " (distSym=" ++ show distSym ++ ")"
 
                           let extraBits2 = distancePrefixTable VU.! distCode
                           when (extraBits2 > 20) $
-                            error $ "Extra bits too large: " ++ show extraBits2
+                            error $
+                              "Extra bits too large: " ++ show extraBits2
 
                           let (extra2, _) = readBits extraBits2 r3
                               -- Use Integer arithmetic to avoid overflow
                               baseInteger :: Integer
-                              baseInteger = if distCode < 4
-                                              then fromIntegral distCode + 1
-                                              else
-                                                let shifted = (fromIntegral ((distCode - 2) .&. complement 1)) `shiftL` extraBits2
-                                                 in 5 + shifted
+                              baseInteger =
+                                if distCode < 4
+                                  then fromIntegral distCode + 1
+                                  else
+                                    let shifted = (fromIntegral ((distCode - 2) .&. complement 1)) `shiftL` extraBits2
+                                     in 5 + shifted
                               distInteger = baseInteger + fromIntegral extra2 + 1
                               dist' = fromIntegral distInteger :: Int
                           return dist'
 
                     when (dist > pos) $
-                      error $ "Distance " ++ show dist ++ " exceeds position " ++ show pos
+                      error $
+                        "Distance " ++ show dist ++ " exceeds position " ++ show pos
 
                     copyLoop pos dist len output cache maybeCache r3
                   else do
@@ -318,7 +329,7 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
 
       copyLoop !pos !dist !len !out !cache !maybeC !r
         | len <= 0 = loop pos cache r
-        | pos >= totalPixels = loop pos cache r  -- Stop if we've filled the buffer
+        | pos >= totalPixels = loop pos cache r -- Stop if we've filled the buffer
         | otherwise = do
             let srcPos = pos - dist
             when (srcPos < 0) $

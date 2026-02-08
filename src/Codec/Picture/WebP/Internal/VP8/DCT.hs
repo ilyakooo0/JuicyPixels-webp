@@ -14,17 +14,17 @@ import qualified Data.Vector.Storable.Mutable as VSM
 -- Forward DCT constants (from libwebp's FTransform)
 -- These differ from inverse DCT constants for numerical precision
 kC1 :: Int
-kC1 = 20091  -- cos(pi/8) * sqrt(2) * 65536 - 65536
+kC1 = 20091 -- cos(pi/8) * sqrt(2) * 65536 - 65536
 
 kC2 :: Int
-kC2 = 35468  -- sin(pi/8) * sqrt(2) * 65536
+kC2 = 35468 -- sin(pi/8) * sqrt(2) * 65536
 
 -- libwebp forward DCT constants (smaller scale, different bias)
 fdctC1 :: Int
-fdctC1 = 2217   -- cos(pi/8) * sqrt(2) * 2048 - 2048 ≈ 2217
+fdctC1 = 2217 -- cos(pi/8) * sqrt(2) * 2048 - 2048 ≈ 2217
 
 fdctC2 :: Int
-fdctC2 = 5352   -- sin(pi/8) * sqrt(2) * 8192 ≈ 5352
+fdctC2 = 5352 -- sin(pi/8) * sqrt(2) * 8192 ≈ 5352
 
 -- | 4x4 forward DCT (in-place)
 -- Input: spatial domain residuals (original - prediction)

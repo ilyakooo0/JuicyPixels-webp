@@ -10,11 +10,16 @@ spec = do
   describe "Quality Metrics" $ do
     describe "PSNR Measurements" $ do
       it "quality 90 achieves PSNR > 25dB on gradients" $ do
-        let img = generateImage (\x y ->
-              let r = fromIntegral ((x * 255) `div` 63)
-                  g = fromIntegral ((y * 255) `div` 63)
-                  b = 128
-               in PixelRGB8 r g b) 64 64
+        let img =
+              generateImage
+                ( \x y ->
+                    let r = fromIntegral ((x * 255) `div` 63)
+                        g = fromIntegral ((y * 255) `div` 63)
+                        b = 128
+                     in PixelRGB8 r g b
+                )
+                64
+                64
             encoded = encodeWebPLossy img 90
 
         case decodeWebP encoded of
@@ -45,11 +50,16 @@ spec = do
 
     describe "Quality vs File Size" $ do
       it "higher quality produces larger files" $ do
-        let img = generateImage (\x y ->
-              PixelRGB8 (fromIntegral ((x * y) `mod` 256))
-                        (fromIntegral (x `mod` 256))
-                        (fromIntegral (y `mod` 256))
-              ) 128 128
+        let img =
+              generateImage
+                ( \x y ->
+                    PixelRGB8
+                      (fromIntegral ((x * y) `mod` 256))
+                      (fromIntegral (x `mod` 256))
+                      (fromIntegral (y `mod` 256))
+                )
+                128
+                128
             enc20 = encodeWebPLossy img 20
             enc50 = encodeWebPLossy img 50
             enc80 = encodeWebPLossy img 80
@@ -70,11 +80,16 @@ spec = do
 
       it "complex patterns use more bytes" $ do
         let solid = generateImage (\_ _ -> PixelRGB8 128 128 128) 64 64
-            complex = generateImage (\x y ->
-              PixelRGB8 (fromIntegral $ (x * 7 + y * 11) `mod` 256)
-                        (fromIntegral $ (x * 13 + y * 17) `mod` 256)
-                        (fromIntegral $ (x * 19 + y * 23) `mod` 256)
-              ) 64 64
+            complex =
+              generateImage
+                ( \x y ->
+                    PixelRGB8
+                      (fromIntegral $ (x * 7 + y * 11) `mod` 256)
+                      (fromIntegral $ (x * 13 + y * 17) `mod` 256)
+                      (fromIntegral $ (x * 19 + y * 23) `mod` 256)
+                )
+                64
+                64
             encodedSolid = encodeWebPLossy solid 80
             encodedComplex = encodeWebPLossy complex 80
 
@@ -82,21 +97,25 @@ spec = do
 
     describe "Pixel-Level Accuracy" $ do
       it "preserves corners accurately at high quality" $ do
-        let img = generateImage (\x y ->
-              PixelRGB8 (if x < 32 then 255 else 0)
-                        (if y < 32 then 255 else 0)
-                        128
-              ) 64 64
+        let img =
+              generateImage
+                ( \x y ->
+                    PixelRGB8
+                      (if x < 32 then 255 else 0)
+                      (if y < 32 then 255 else 0)
+                      128
+                )
+                64
+                64
             encoded = encodeWebPLossy img 95
 
         case decodeWebP encoded of
           Right (ImageRGB8 decoded) -> do
             -- Check corners
-            let PixelRGB8 r1 g1 _ = pixelAt decoded 0 0      -- Top-left: should be high R, high G
-                PixelRGB8 r2 g2 _ = pixelAt decoded 63 0     -- Top-right: should be low R, high G
-                PixelRGB8 r3 g3 _ = pixelAt decoded 0 63     -- Bottom-left: should be high R, low G
-                PixelRGB8 r4 g4 _ = pixelAt decoded 63 63    -- Bottom-right: should be low R, low G
-
+            let PixelRGB8 r1 g1 _ = pixelAt decoded 0 0 -- Top-left: should be high R, high G
+                PixelRGB8 r2 g2 _ = pixelAt decoded 63 0 -- Top-right: should be low R, high G
+                PixelRGB8 r3 g3 _ = pixelAt decoded 0 63 -- Bottom-left: should be high R, low G
+                PixelRGB8 r4 g4 _ = pixelAt decoded 63 63 -- Bottom-right: should be low R, low G
             fromIntegral r1 `shouldSatisfy` (> (200 :: Int))
             fromIntegral g1 `shouldSatisfy` (> (200 :: Int))
             fromIntegral r2 `shouldSatisfy` (< (50 :: Int))
@@ -104,11 +123,15 @@ spec = do
           _ -> expectationFailure "Decode failed"
 
       it "maintains color relationships" $ do
-        let img = generateImage (\x y ->
-              if x < 32
-                then PixelRGB8 255 0 0    -- Left half: red
-                else PixelRGB8 0 0 255    -- Right half: blue
-              ) 64 64
+        let img =
+              generateImage
+                ( \x y ->
+                    if x < 32
+                      then PixelRGB8 255 0 0 -- Left half: red
+                      else PixelRGB8 0 0 255 -- Right half: blue
+                )
+                64
+                64
             encoded = encodeWebPLossy img 85
 
         case decodeWebP encoded of
@@ -159,14 +182,18 @@ computePSNR :: Image PixelRGB8 -> Image PixelRGB8 -> Double
 computePSNR orig decoded =
   let w = imageWidth orig
       h = imageHeight orig
-      mse = sum [ let PixelRGB8 r1 g1 b1 = pixelAt orig x y
-                      PixelRGB8 r2 g2 b2 = pixelAt decoded x y
-                      dr = fromIntegral r1 - fromIntegral r2 :: Double
-                      dg = fromIntegral g1 - fromIntegral g2 :: Double
-                      db = fromIntegral b1 - fromIntegral b2 :: Double
-                   in dr*dr + dg*dg + db*db
-                | y <- [0..h-1], x <- [0..w-1]
-                ] / (fromIntegral (w * h * 3))
+      mse =
+        sum
+          [ let PixelRGB8 r1 g1 b1 = pixelAt orig x y
+                PixelRGB8 r2 g2 b2 = pixelAt decoded x y
+                dr = fromIntegral r1 - fromIntegral r2 :: Double
+                dg = fromIntegral g1 - fromIntegral g2 :: Double
+                db = fromIntegral b1 - fromIntegral b2 :: Double
+             in dr * dr + dg * dg + db * db
+          | y <- [0 .. h - 1],
+            x <- [0 .. w - 1]
+          ]
+          / (fromIntegral (w * h * 3))
    in if mse == 0
         then 100.0
-        else 10 * logBase 10 (255*255 / mse)
+        else 10 * logBase 10 (255 * 255 / mse)
