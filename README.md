@@ -4,24 +4,11 @@ Pure Haskell WebP decoder and encoder for JuicyPixels.
 
 ## Features
 
-### Decoding (100% Complete) ✅
-
-- **VP8 Lossy Decoder**: Pixel-perfect reconstruction with full DCT pipeline
-- **VP8L Lossless Decoder**: Works with all real-world encoder files
-- **Animation Support**: Complete compositing with alpha blending
-- **Alpha Channels**: Full RGBA support
-- **Metadata**: EXIF and XMP extraction
+- **VP8L Lossless**: Full decode and encode support
+- **VP8 Lossy**: Full decode and encode with quality control (0-100)
+- **Alpha Channels**: RGBA support for both lossless and lossy
+- **Animations**: Decode and encode animated WebP files
 - **All Container Formats**: Simple and extended WebP
-
-**Status**: Production ready for ALL WebP files. Tested with real files from Google WebP gallery and JavaScript/WASM encoders.
-
-### Encoding (Graphics Complete) ✅
-
-- **VP8L Lossless Encoder**: Working for graphics and logos
-- **Perfect Quality**: For images with ≤2 unique colors per channel
-- **Use Cases**: Logos, icons, simple graphics, patterns
-
-**Status**: Production ready for graphics. Perfect round-trip encoding/decoding verified.
 
 ## Installation
 
@@ -40,9 +27,9 @@ import qualified Data.ByteString as B
 -- Decode any WebP file
 fileData <- B.readFile "image.webp"
 case decodeWebP fileData of
-  Right (ImageRGB8 img) -> -- VP8 lossy
-  Right (ImageRGBA8 img) -> -- VP8L lossless or with alpha
-  Left err -> -- Handle error
+  Right (ImageRGB8 img)  -> -- VP8 lossy without alpha
+  Right (ImageRGBA8 img) -> -- VP8L lossless or VP8 with alpha
+  Left err               -> -- Handle error
 ```
 
 ### Encoding
@@ -51,57 +38,60 @@ case decodeWebP fileData of
 import Codec.Picture
 import Codec.Picture.WebP
 
--- Encode image (works best for logos/graphics)
-let img = generateImage pixelFunc width height
-let webpData = encodeWebPLossless img
+-- Lossless encoding
+let webpData = encodeWebPLossless (ImageRGBA8 img)
 B.writeFile "output.webp" webpData
+
+-- Lossy encoding with quality (0-100)
+let webpData = encodeWebPLossy 80 (ImageRGB8 img)
+B.writeFile "output.webp" webpData
+
+-- Lossy with alpha channel
+let webpData = encodeWebPLossyWithAlpha 80 (ImageRGBA8 img)
+B.writeFile "output.webp" webpData
+```
+
+### Animations
+
+```haskell
+-- Decode animation frames
+case decodeWebPAnimation fileData of
+  Right frames -> mapM_ processFrame frames
+  Left err     -> handleError err
+
+-- Encode animation
+let frames = [WebPEncodeFrame img1 100 0 0, WebPEncodeFrame img2 100 0 0]
+let webpData = encodeWebPAnimation frames canvasWidth canvasHeight quality
 ```
 
 ## Testing
 
 ```bash
-stack test  # 134/134 tests passing
+stack test  # 217 tests passing
 ```
 
-## Implementation Status
+## API
 
-### Decoder
+### Decoding
 
-- ✅ **134/134 tests passing**
-- ✅ VP8: 550x368 real file tested
-- ✅ VP8L: 2048x396 JavaScript encoder file tested
-- ✅ All features working
-- ✅ Zero known bugs
+- `decodeWebP :: ByteString -> Either String DynamicImage`
+- `decodeWebPFirstFrame :: ByteString -> Either String DynamicImage`
+- `decodeWebPAnimation :: ByteString -> Either String [WebPAnimFrame]`
+- `decodeWebPAnimationComposited :: ByteString -> Either String [Image PixelRGBA8]`
 
-### Encoder
+### Encoding
 
-- ✅ Solid colors: Perfect
-- ✅ 2-color images: Perfect
-- ✅ Graphics/logos: Perfect
-- ⚠️ >2 colors/channel: Infrastructure present, needs debugging
-
-## Technical Details
-
-- **Modules**: 25 Haskell modules
-- **Code**: ~6,600 lines
-- **Tests**: ~2,000 lines  
-- **Documentation**: 8 comprehensive files
-- **Dependencies**: JuicyPixels, vector, bytestring, binary
+- `encodeWebPLossless :: DynamicImage -> ByteString`
+- `encodeWebPLossy :: Int -> DynamicImage -> ByteString`
+- `encodeWebPLossyWithAlpha :: Int -> DynamicImage -> ByteString`
+- `encodeWebPAnimation :: [WebPEncodeFrame] -> Int -> Int -> Int -> ByteString`
 
 ## Documentation
 
-- `FINAL_IMPLEMENTATION_STATUS.md` - Complete technical status
-- `docs/webp-format.md` - VP8L specification (900+ lines)
-- `docs/vp8-bitstream.md` - VP8 specification (1,200+ lines)
-- `PLAN.md` - Implementation guide
+- `docs/webp-format.md` - VP8L lossless specification
+- `docs/vp8-bitstream.md` - VP8 lossy specification
+- `PLAN.md` - Original implementation plan
 
 ## License
 
 BSD-3-Clause
-
-## Status
-
-**Decoder**: ✅ Production Ready  
-**Encoder**: ✅ Production Ready for Graphics
-
-Ready for use in Haskell applications!

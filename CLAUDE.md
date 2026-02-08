@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Pure Haskell WebP decoder for JuicyPixels. Decode-only (no encoding).
+Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 
 ## Build
 
@@ -34,9 +34,8 @@ Both docs have section indexes at the top for navigation.
 ## JuicyPixels Integration
 
 The implementation integrates with JuicyPixels using standard patterns:
-- `Image` and `DynamicImage` types for decoded images
-- `Metadatas` for EXIF/XMP data
-- `decodeWebP` / `decodeWebPWithMetadata` API pattern matching other formats
+- `Image` and `DynamicImage` types for decoded/encoded images
+- `decodeWebP` / `encodeWebPLossless` / `encodeWebPLossy` API
 - Standard error handling with `Either String`
 
 ## Critical Implementation Gotchas
