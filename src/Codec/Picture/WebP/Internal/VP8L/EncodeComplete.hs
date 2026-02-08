@@ -8,6 +8,8 @@ where
 
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.BitWriter
+import Codec.Picture.WebP.Internal.VP8L.PredictorEncode
+import Codec.Picture.WebP.Internal.VP8L.SubresolutionEncode
 import Control.Monad.ST
 import Data.Bits
 import qualified Data.ByteString as B
@@ -37,8 +39,19 @@ encodeVP8LComplete img =
             a = pixels VS.! (i * 4 + 3)
          in packARGB a r g b
 
-      -- Build histograms for each channel
-      hists = buildHistograms argbPixels
+      -- Compute predictor transform (sizeBits=4 -> 16x16 blocks)
+      -- Only use predictor transform for images large enough to benefit
+      usePredictorTransform = width >= 8 && height >= 8
+      sizeBits = 4
+
+      (pixelsToEncode, maybePredResult) =
+        if usePredictorTransform
+          then let pr = computePredictorTransform sizeBits width height argbPixels
+               in (prResiduals pr, Just pr)
+          else (argbPixels, Nothing)
+
+      -- Build histograms
+      hists = buildHistograms pixelsToEncode
 
       -- Generate Huffman codes from histograms
       codes = generateHuffmanCodes hists
@@ -51,7 +64,7 @@ encodeVP8LComplete img =
           |> writeBits 14 (fromIntegral $ height - 1)
           |> writeBit True -- alpha_is_used
           |> writeBits 3 0 -- version (must be 0)
-          |> writeBit False -- no transforms
+          |> writeTransformHeader maybePredResult sizeBits
           |> writeBit False -- no color cache
           |> writeBit False -- single prefix code group (no meta prefix)
           |> writeHuffmanCode (cGreen codes) 280 -- Green alphabet: 256 + 24 LZ77 length codes (no cache)
@@ -59,11 +72,27 @@ encodeVP8LComplete img =
           |> writeHuffmanCode (cBlue codes) 256 -- Blue: 256 symbols
           |> writeHuffmanCode (cAlpha codes) 256 -- Alpha: 256 symbols
           |> writeHuffmanCode (cDist codes) 40 -- Distance: 40 symbols (not used, but required)
-          |> encodePixels argbPixels codes
+          |> encodePixels pixelsToEncode codes
           |> finalizeBitWriter
    in bitWriterToByteString w
   where
     (|>) = flip ($)
+
+-- | Write transform header (predictor transform if enabled, otherwise just no-transform marker)
+writeTransformHeader :: Maybe PredictorResult -> Int -> BitWriter -> BitWriter
+writeTransformHeader Nothing _ w =
+  writeBit False w -- no transforms
+writeTransformHeader (Just predResult) sizeBits w =
+  let w1 = writeBit True w -- transform_present = 1
+      w2 = writeBits 2 0 w1 -- transform_type = 0 (predictor)
+      w3 = writeBits 3 (fromIntegral sizeBits) w2 -- size_bits (decoder uses this directly)
+      w4 = encodeSubresolutionImage
+            (prTransformWidth predResult)
+            (prTransformHeight predResult)
+            (prModeImage predResult)
+            w3
+      w5 = writeBit False w4 -- no more transforms
+   in w5
 
 -- | Histogram data for all channels
 data Histograms = Histograms
