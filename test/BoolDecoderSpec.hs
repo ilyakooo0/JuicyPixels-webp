@@ -14,12 +14,13 @@ spec = describe "BoolDecoder" $ do
     it "initializes with valid input" $ do
       let bs = B.pack [0xFF, 0xFF, 0x00, 0x00]
           decoder = initBoolDecoder bs
-      bdRange decoder `shouldBe` 255
+      -- Range is stored as range-1 per libwebp convention (254 = 255-1)
+      bdRange decoder `shouldBe` 254
 
     it "handles minimal input" $ do
       let bs = B.pack [0x00, 0x00]
           decoder = initBoolDecoder bs
-      bdRange decoder `shouldBe` 255
+      bdRange decoder `shouldBe` 254
 
   describe "Boolean Reading" $ do
     it "reads bit with probability 128 (50/50)" $ do
@@ -42,7 +43,8 @@ spec = describe "BoolDecoder" $ do
           (_, d1) = boolRead 128 decoder
           (_, d2) = boolRead 128 d1
           (_, d3) = boolRead 128 d2
-      bdRange d3 `shouldSatisfy` (\r -> r >= 128 && r <= 255)
+      -- Range stored as range-1, valid range is [127..254]
+      bdRange d3 `shouldSatisfy` (\r -> r >= 127 && r <= 254)
 
   describe "Literal Reading" $ do
     it "reads literal bits correctly" $ do
@@ -119,7 +121,7 @@ spec = describe "BoolDecoder" $ do
           decoder = initBoolDecoder bs
           -- Read many bits to test renormalization
           finalDecoder = foldl (\d _ -> snd $ boolRead 128 d) decoder [1 .. 50]
-      bdRange finalDecoder `shouldSatisfy` (\r -> r >= 128 && r <= 255)
+      bdRange finalDecoder `shouldSatisfy` (\r -> r >= 127 && r <= 254)
 
     it "renormalizes correctly" $ do
       let bs = B.pack $ replicate 20 0xFF
@@ -127,7 +129,7 @@ spec = describe "BoolDecoder" $ do
           (_, d1) = boolRead 1 decoder -- Very low probability
           (_, d2) = boolRead 1 d1
           (_, d3) = boolRead 1 d2
-      bdRange d3 `shouldSatisfy` (\r -> r >= 128 && r <= 255)
+      bdRange d3 `shouldSatisfy` (\r -> r >= 127 && r <= 254)
 
   describe "Edge Cases" $ do
     it "handles probability extremes" $ do

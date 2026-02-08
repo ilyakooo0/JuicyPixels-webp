@@ -174,11 +174,11 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbY mbX 
   -- Prediction was already done during mode selection, now encode
   enc3 <- encodeYBlocks yOrig yRecon paddedW mbXpix mbYpix predMode dequantFactors coeffProbs enc2
 
-  -- Step 5: Encode U blocks
+  -- Step 5: Encode U blocks (block type 2 per RFC 6386)
   enc4 <- encodeChromaBlocks uOrig uRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs enc3 2
 
-  -- Step 6: Encode V blocks
-  enc5 <- encodeChromaBlocks vOrig vRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs enc4 2
+  -- Step 6: Encode V blocks (block type 3 per RFC 6386)
+  enc5 <- encodeChromaBlocks vOrig vRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs enc4 3
 
   return enc5
 
@@ -244,6 +244,12 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc = d
   -- ENCODE Y2 FIRST (this is what decoder expects!)
   (enc1, _) <- encodeCoefficients y2DCs coeffProbs 1 0 0 enc
 
+  -- Dequantize Y2 for reconstruction
+  dequantizeBlock dequantFactors 1 y2DCs
+
+  -- Inverse WHT to get reconstructed DC values for each block
+  reconY2DCs <- iwht4x4 y2DCs
+
   -- Now encode 16 Y blocks (AC only, DC is in Y2)
   let encodeYBlock !blockIdx !e
         | blockIdx >= 16 = return e
@@ -272,20 +278,24 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc = d
     let subX = (blockIdx `mod` 4) * 4
         subY = (blockIdx `div` 4) * 4
 
-    -- Get stored residuals
+    -- Get stored residuals (AC only, DC will come from Y2)
     residuals <- VSM.new 16
     forM_ [0 .. 15] $ \i -> do
       r <- VSM.read residualBlocks (blockIdx * 16 + i)
       VSM.write residuals i r
 
-    -- Set DC from Y2 (need to get it from dequantized Y2)
-    -- For reconstruction, use quantized then dequantized values
-    -- This is complex - for now, reconstruct from original residuals
+    -- Clear DC (it's handled by Y2)
+    VSM.write residuals 0 0
 
-    -- Quantize, dequantize, IDCT
-    VSM.write residuals 0 0  -- DC handled by Y2
+    -- Quantize and dequantize AC coefficients
     quantizeBlock dequantFactors 0 residuals
     dequantizeBlock dequantFactors 0 residuals
+
+    -- Add reconstructed DC from Y2 (after dequant, before IDCT)
+    let reconDC = reconY2DCs VS.! blockIdx
+    VSM.write residuals 0 reconDC
+
+    -- IDCT
     idct4x4 residuals
 
     -- Add to prediction
@@ -302,6 +312,8 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc = d
   return enc2
 
 -- | Encode chroma blocks (U or V)
+-- coeffBlockType: 2 for U, 3 for V per RFC 6386 coefficient probability indexing
+-- Dequantization always uses type 2 (UV) for both U and V
 encodeChromaBlocks ::
   VSM.MVector s Word8 -> -- Chroma original (U or V)
   VSM.MVector s Word8 -> -- Chroma reconstruction
@@ -311,9 +323,9 @@ encodeChromaBlocks ::
   DequantFactors ->
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
-  Int -> -- Block type (2 for UV)
+  Int -> -- Coefficient block type (2 for U, 3 for V)
   ST s BoolEncoder
-encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coeffProbs enc blockType = do
+encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coeffProbs enc coeffBlockType = do
   -- Create temporary buffer for prediction
   predBuf <- VSM.clone chromaRecon
 
@@ -344,14 +356,14 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coe
             -- Forward DCT
             fdct4x4 residuals
 
-            -- Quantize
-            quantizeBlock dequantFactors blockType residuals
+            -- Quantize (always use type 2 = UV quant for both U and V)
+            quantizeBlock dequantFactors 2 residuals
 
-            -- Encode coefficients
-            (e', _) <- encodeCoefficients residuals coeffProbs blockType 0 0 e
+            -- Encode coefficients (use coefficient block type for probability lookup)
+            (e', _) <- encodeCoefficients residuals coeffProbs coeffBlockType 0 0 e
 
-            -- Reconstruct
-            dequantizeBlock dequantFactors blockType residuals
+            -- Reconstruct (always use type 2 = UV dequant for both U and V)
+            dequantizeBlock dequantFactors 2 residuals
             idct4x4 residuals
 
             -- Add prediction back and write to reconstruction buffer

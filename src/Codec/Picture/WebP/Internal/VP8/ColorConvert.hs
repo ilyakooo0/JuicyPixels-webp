@@ -46,22 +46,22 @@ rgbToYCbCr img = do
   forM_ [0 .. h - 1] $ \y ->
     forM_ [0 .. w - 1] $ \x -> do
       let PixelRGB8 r g b = pixelAt img x y
-          -- BT.601 RGB to YCbCr conversion
-          -- Y  =  0.257*R + 0.504*G + 0.098*B + 16
-          -- Cb = -0.148*R - 0.291*G + 0.439*B + 128
-          -- Cr =  0.439*R - 0.368*G - 0.071*B + 128
+          -- Full-range YCbCr (JPEG/VP8 style) per RFC 6386
+          -- Y  = 0.299*R + 0.587*G + 0.114*B
+          -- Cb = -0.169*R - 0.331*G + 0.500*B + 128
+          -- Cr = 0.500*R - 0.419*G - 0.081*B + 128
           --
           -- Using fixed-point arithmetic (scaled by 256):
-          -- Y  = (66*R + 129*G + 25*B + 128) >> 8 + 16
-          -- Cb = (-38*R - 74*G + 112*B + 128) >> 8 + 128
-          -- Cr = (112*R - 94*G - 18*B + 128) >> 8 + 128
+          -- Y  = (77*R + 150*G + 29*B + 128) >> 8
+          -- Cb = (-43*R - 85*G + 128*B + 128) >> 8 + 128
+          -- Cr = (128*R - 107*G - 21*B + 128) >> 8 + 128
           r' = fromIntegral r :: Int
           g' = fromIntegral g :: Int
           b' = fromIntegral b :: Int
 
-          y' = clip255 $ ((66 * r' + 129 * g' + 25 * b' + 128) `shiftR` 8) + 16
-          cb = clip255 $ ((-38 * r' - 74 * g' + 112 * b' + 128) `shiftR` 8) + 128
-          cr = clip255 $ ((112 * r' - 94 * g' - 18 * b' + 128) `shiftR` 8) + 128
+          y' = clip255 $ (77 * r' + 150 * g' + 29 * b' + 128) `shiftR` 8
+          cb = clip255 $ ((-43 * r' - 85 * g' + 128 * b' + 128) `shiftR` 8) + 128
+          cr = clip255 $ ((128 * r' - 107 * g' - 21 * b' + 128) `shiftR` 8) + 128
 
       -- Write Y (full resolution)
       VSM.write yBuf (y * paddedW + x) y'

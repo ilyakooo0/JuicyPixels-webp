@@ -66,8 +66,8 @@ decodeVP8 bs = do
                       -- Reconstruct U and V with 8x8 prediction
                       predict8x8 uvMode uBuf (mbWidth * 8) (mbX * 8) (mbY * 8)
                       predict8x8 uvMode vBuf (mbWidth * 8) (mbX * 8) (mbY * 8)
-                      decoderU <- reconstructChroma uBuf mbY mbX mbWidth uvMode decoderBPred coeffProbs (computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0)
-                      decoderV <- reconstructChroma vBuf mbY mbX mbWidth uvMode decoderU coeffProbs (computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0)
+                      decoderU <- reconstructChroma uBuf mbY mbX mbWidth uvMode decoderBPred coeffProbs (computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0) 2  -- U = block type 2
+                      decoderV <- reconstructChroma vBuf mbY mbX mbWidth uvMode decoderU coeffProbs (computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0) 3  -- V = block type 3
 
                       return decoderV
                     else do
@@ -99,8 +99,8 @@ decodeVP8 bs = do
                           decoder5 <- reconstructMB16x16 yBuf mbY mbX mbWidth yMode y2Coeffs decoder4 coeffProbs dequantFact
 
                           -- Reconstruct U and V blocks (4 blocks each)
-                          decoder6 <- reconstructChroma uBuf mbY mbX mbWidth uvMode decoder5 coeffProbs dequantFact
-                          decoder7 <- reconstructChroma vBuf mbY mbX mbWidth uvMode decoder6 coeffProbs dequantFact
+                          decoder6 <- reconstructChroma uBuf mbY mbX mbWidth uvMode decoder5 coeffProbs dequantFact 2  -- U = block type 2
+                          decoder7 <- reconstructChroma vBuf mbY mbX mbWidth uvMode decoder6 coeffProbs dequantFact 3  -- V = block type 3
 
                           return decoder7
 
@@ -176,7 +176,7 @@ reconstructBPred yBuf mbY mbX mbStride decoder coeffProbs header = do
         predict4x4 bMode yBuf (mbStride * 16) blockX blockY
 
         -- Decode coefficients
-        (coeffs, hasNonzero, dec2) <- decodeCoefficients dec1 coeffProbs 3 0 0  -- Block type 3 (Y)
+        (coeffs, hasNonzero, dec2) <- decodeCoefficients dec1 coeffProbs 0 0 0  -- Block type 0 (Y), includes DC for B_PRED
 
         -- Dequantize
         dequantizeBlock dequantFact 3 coeffs  -- Type 3: Y block with DC
@@ -222,7 +222,7 @@ reconstructMB16x16 yBuf mbY mbX mbStride yMode y2Coeffs decoder coeffProbs dequa
             bx = blockIdx `mod` 4
 
         -- Decode coefficients for this 4x4 block
-        (coeffs, hasNonzero, dec') <- decodeCoefficients dec coeffProbs 3 0 1  -- Block type 3 (Y), start at pos 1 (DC is from Y2)
+        (coeffs, hasNonzero, dec') <- decodeCoefficients dec coeffProbs 0 0 1  -- Block type 0 (Y after Y2), start at pos 1 (DC is from Y2)
 
         -- Set DC from Y2 block
         y2dc <- VSM.read y2Coeffs blockIdx
@@ -256,10 +256,13 @@ reconstructMB16x16 yBuf mbY mbX mbStride yMode y2Coeffs decoder coeffProbs dequa
   loopYBlocks 0 decoder
 
 -- | Reconstruct chroma blocks (U or V)
+-- coeffBlockType should be 2 for U, 3 for V per RFC 6386 coefficient probability indexing
+-- Dequantization always uses type 2 (UV) for both U and V
 reconstructChroma :: VSM.MVector s Word8 -> Int -> Int -> Int -> Int
                   -> BoolDecoder -> VU.Vector Word8 -> DequantFactors
+                  -> Int  -- Coefficient block type: 2 for U, 3 for V
                   -> ST s BoolDecoder
-reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact = do
+reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact coeffBlockType = do
   let mbUVY = mbY * 8
       mbUVX = mbX * 8
 
@@ -271,10 +274,10 @@ reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact =
         let by = blockIdx `div` 2
             bx = blockIdx `mod` 2
 
-        -- Decode coefficients
-        (coeffs, hasNonzero, dec') <- decodeCoefficients dec coeffProbs 2 0 0  -- Block type 2 (UV)
+        -- Decode coefficients (use coefficient block type for probability lookup)
+        (coeffs, hasNonzero, dec') <- decodeCoefficients dec coeffProbs coeffBlockType 0 0
 
-        -- Dequantize
+        -- Dequantize (always use type 2 = UV dequant for both U and V)
         dequantizeBlock dequantFact 2 coeffs
 
         -- Apply IDCT

@@ -120,7 +120,8 @@ boolWrite !prob !bit !enc =
               then flush enc'
               else enc'
        else
-         enc { beRange = newRange }
+         -- No renormalization needed, but still update value
+         enc { beRange = newRange, beValue = newValue }
 
 -- | Write one bit with uniform (50/50) probability
 boolWriteUniform :: Bool -> BoolEncoder -> BoolEncoder
@@ -143,7 +144,8 @@ boolWriteUniform !bit !enc =
               then flush enc'
               else enc'
        else
-         enc { beRange = newRange }
+         -- No renormalization needed, but still update value
+         enc { beRange = newRange, beValue = newValue }
 
 -- | Write n bits as a literal value (MSB first, uniform probability)
 boolWriteLiteral :: Int -> Word32 -> BoolEncoder -> BoolEncoder
