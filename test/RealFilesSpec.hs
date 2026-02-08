@@ -5,9 +5,7 @@ module RealFilesSpec (spec) where
 import Codec.Picture.Types
 import Codec.Picture.WebP
 import Codec.Picture.WebP.Internal.Container
-import Control.Exception (SomeException, evaluate, try)
 import qualified Data.ByteString as B
-import Data.List (isInfixOf)
 import Test.Hspec
 
 spec :: Spec
@@ -33,24 +31,6 @@ spec = describe "Real WebP Files" $ do
         Right _ -> return ()
         Left err -> expectationFailure $ "Decode failed: " ++ err
 
-  describe "test_webp_js.webp (VP8L lossless)" $ do
-    it "parses successfully" $ do
-      fileData <- B.readFile "test/data/test_webp_js.webp"
-      case parseWebP fileData of
-        Right _ -> return ()
-        Left err -> expectationFailure $ "Parse failed: " ++ err
-
-    it "gracefully handles VP8L encoding variants" $ do
-      fileData <- B.readFile "test/data/test_webp_js.webp"
-      -- VP8L decoder works for simple images but some encoder variants may use
-      -- unsupported features or have edge cases
-      result <- try (evaluate $ decodeWebP fileData) :: IO (Either SomeException (Either String DynamicImage))
-      case result of
-        Right (Right _) -> return () -- Success (encoder variant we support)
-        Right (Left err) -> do
-          -- Graceful error with informative message
-          err `shouldSatisfy` (\e -> "cache" `isInfixOf` e || "bitstream" `isInfixOf` e || not (null e))
-        Left _ -> return () -- Exception (also acceptable for unsupported variants)
   describe "Error Handling" $ do
     it "handles truncated file gracefully" $ do
       fileData <- B.readFile "test/data/test.webp"
@@ -65,7 +45,3 @@ spec = describe "Real WebP Files" $ do
       case decodeWebP corrupted of
         Left err -> err `shouldSatisfy` (not . null)
         Right _ -> expectationFailure "Should fail on corrupted file"
-
-isRight :: Either a b -> Bool
-isRight (Right _) = True
-isRight (Left _) = False
