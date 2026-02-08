@@ -114,7 +114,10 @@ generateCompressedHeader quantIndices filterLevel filterType =
       enc16 = writeCoeffProbUpdates enc15
 
       -- Macroblock skip mode
-      enc17 = boolWriteLiteral 1 0 enc16 -- mb_no_skip_coeff = 0 (no skip mode)
+      -- mb_no_skip_coeff: 0 = skip mode enabled (must write skip flag per MB)
+      --                   1 = skip mode disabled (no skip flags needed)
+      -- For simple encoder, disable skip mode
+      enc17 = boolWriteLiteral 1 1 enc16 -- mb_no_skip_coeff = 1 (DISABLE skip mode)
 
    in enc17
 

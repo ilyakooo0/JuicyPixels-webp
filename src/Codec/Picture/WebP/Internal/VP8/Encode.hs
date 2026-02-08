@@ -84,14 +84,11 @@ encodeVP8 img quality = runST $ do
   uRecon <- VSM.replicate ((paddedW `div` 2) * (paddedH `div` 2)) 128
   vRecon <- VSM.replicate ((paddedW `div` 2) * (paddedH `div` 2)) 128
 
-  -- Step 4: Generate compressed header
+  -- Step 4: Generate compressed header and continue encoding with same BoolEncoder
   let compressedHeaderEnc = generateCompressedHeader quantIndices (encFilterLevel config) (encFilterType config)
-      compressedHeaderData = finalizeBoolEncoder compressedHeaderEnc
+      -- DO NOT finalize yet! Continue with same encoder for MB data
 
-  -- Step 5: Initialize encoder for macroblock data
-  let mbEncoder = initBoolEncoder
-
-  -- Step 6: Encode all macroblocks
+  -- Step 5: Encode all macroblocks using the SAME encoder (continues arithmetic coding stream)
   finalEncoder <- encodeMacroblocks
     yBuf uBuf vBuf
     yRecon uRecon vRecon
@@ -99,10 +96,10 @@ encodeVP8 img quality = runST $ do
     mbRows mbCols
     dequantFactors
     defaultCoeffProbs
-    mbEncoder
+    compressedHeaderEnc  -- Continue from compressed header encoder!
 
-  let mbData = finalizeBoolEncoder finalEncoder
-      partition0 = compressedHeaderData <> mbData
+  -- Step 6: Finalize the combined stream
+  let partition0 = finalizeBoolEncoder finalEncoder
 
   -- Step 7: Generate uncompressed header
   let uncompHeader = generateUncompressedHeader width height (B.length partition0)
