@@ -152,7 +152,10 @@ parseUncompressedHeader = do
   let width = widthField .&. 0x3FFF
       height = heightField .&. 0x3FFF
 
-  let partitionSize = fromIntegral byte1 `shiftL` 16 .|. fromIntegral byte2 `shiftL` 8 .|. fromIntegral byte0
+  -- Frame tag is 24-bit little-endian: frame_tag = byte0 | (byte1 << 8) | (byte2 << 16)
+  -- first_part_size is bits [23:5] (19 bits): (frame_tag >> 5) & 0x7FFFF
+  let frameTag24 = fromIntegral byte0 .|. (fromIntegral byte1 `shiftL` 8) .|. (fromIntegral byte2 `shiftL` 16) :: Int
+      partitionSize = (frameTag24 `shiftR` 5) .&. 0x7FFFF
 
   return (width, height, hscale, vscale, partitionSize)
 

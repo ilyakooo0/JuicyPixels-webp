@@ -3,7 +3,7 @@ module GoldenFilesSpec (spec) where
 import Codec.Picture
 import Codec.Picture.WebP
 import qualified Data.ByteString as B
-import System.Directory (doesFileExist, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath ((</>), takeExtension)
 import Test.Hspec
 
@@ -52,7 +52,7 @@ spec = do
 
     describe "All Golden Files" $ do
       it "decodes all WebP files in test/data/golden/" $ do
-        exists <- doesFileExist "test/data/golden"
+        exists <- doesDirectoryExist "test/data/golden"
         if not exists
           then pendingWith "test/data/golden directory not found - run DownloadTestImages.hs first"
           else do
