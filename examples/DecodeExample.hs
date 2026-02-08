@@ -2,7 +2,6 @@
 
 module Main where
 
-import Codec.Picture.Metadata (Metadatas, keys)
 import Codec.Picture.Png (encodePng)
 import Codec.Picture.Types
 import Codec.Picture.WebP
@@ -25,14 +24,13 @@ decodeAndShow inputPath maybeOutputPath = do
   webpData <- B.readFile inputPath
 
   putStrLn "Decoding WebP image..."
-  case decodeWebPWithMetadata webpData of
+  case decodeWebP webpData of
     Left err -> do
       putStrLn $ "Error: " ++ err
       exitFailure
-    Right (dynImg, metadata) -> do
+    Right dynImg -> do
       putStrLn "Successfully decoded!"
       showImageInfo dynImg
-      showMetadata metadata
 
       case maybeOutputPath of
         Nothing -> putStrLn "\nNo output path specified, skipping save."
@@ -57,9 +55,3 @@ showImageInfo dynImg = do
       putStrLn $ "Format: RGB8"
       putStrLn $ "Dimensions: " ++ show (imageWidth img) ++ "x" ++ show (imageHeight img)
     _ -> putStrLn "Format: Unknown"
-
-showMetadata :: Metadatas -> IO ()
-showMetadata meta = do
-  if null (keys meta)
-    then putStrLn "No metadata found"
-    else putStrLn $ "Metadata keys: " ++ show (length $ keys meta)

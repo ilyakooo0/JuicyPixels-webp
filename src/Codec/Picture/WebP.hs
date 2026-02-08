@@ -3,7 +3,6 @@
 module Codec.Picture.WebP
   ( -- * Decoding
     decodeWebP,
-    decodeWebPWithMetadata,
     decodeWebPFirstFrame,
     decodeWebPAnimation,
     decodeWebPAnimationComposited,
@@ -18,7 +17,6 @@ module Codec.Picture.WebP
   )
 where
 
-import Codec.Picture.Metadata
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.Alpha (decodeAlpha)
 import Codec.Picture.WebP.Internal.Animation (WebPAnimFrame (..), decodeAnimation, decodeAnimationWithCompositing)
@@ -97,31 +95,6 @@ decodeWebP bs = do
           img <- decodeVP8L vp8lChunk
           return $ ImageRGBA8 img
 
--- | Decode WebP with metadata
-decodeWebPWithMetadata :: B.ByteString -> Either String (DynamicImage, Metadatas)
-decodeWebPWithMetadata bs = do
-  webpFile <- parseWebP bs
-  case webpFile of
-    WebPSimpleLossless vp8lData -> do
-      img <- decodeVP8L vp8lData
-      let meta = extractMetadata webpFile
-      return (ImageRGBA8 img, meta)
-    WebPSimpleLossy vp8Data -> do
-      img <- decodeVP8 vp8Data
-      let meta = extractMetadata webpFile
-      return (ImageRGB8 img, meta)
-    WebPExtended header chunks -> do
-      case findVP8Chunk chunks of
-        Right vp8Data -> do
-          img <- decodeVP8 vp8Data
-          let meta = extractMetadataExtended header chunks
-          return (ImageRGB8 img, meta)
-        Left _ -> do
-          vp8lChunk <- findVP8LChunk chunks
-          img <- decodeVP8L vp8lChunk
-          let meta = extractMetadataExtended header chunks
-          return (ImageRGBA8 img, meta)
-
 -- | Decode first frame only (for animated images)
 decodeWebPFirstFrame :: B.ByteString -> Either String DynamicImage
 decodeWebPFirstFrame = decodeWebP
@@ -180,19 +153,6 @@ combineRGBAlpha rgbImg alphaVec = runST $ do
 
   finalPixels <- VS.unsafeFreeze pixels
   return $ Image width height finalPixels
-
-extractMetadata :: WebPFile -> Metadatas
-extractMetadata _ = mempty
-
-extractMetadataExtended :: VP8XHeader -> [WebPChunk] -> Metadatas
-extractMetadataExtended _header chunks =
-  extractChunkMetadata chunks
-
-extractChunkMetadata :: [WebPChunk] -> Metadatas
-extractChunkMetadata [] = mempty
-extractChunkMetadata (ChunkEXIF _dat : rest) =
-  extractChunkMetadata rest
-extractChunkMetadata (_ : rest) = extractChunkMetadata rest
 
 -- | Decode animation frames with proper canvas compositing
 -- Returns fully composited RGBA8 frames ready for display

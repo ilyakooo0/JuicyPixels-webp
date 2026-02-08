@@ -3,7 +3,6 @@
 -- | Simple example of using JuicyPixels-webp
 module Main where
 
-import Codec.Picture.Metadata (Metadatas, keys)
 import Codec.Picture.Types
 import Codec.Picture.WebP
 import qualified Control.Exception
@@ -18,28 +17,17 @@ main = do
   putStrLn "Example 1: Basic decoding"
   result1 <- exampleDecode "test/data/test.webp"
   case result1 of
-    Right dynImg -> putStrLn $ "✓ Decoded successfully: " ++ describeImage dynImg
-    Left err -> putStrLn $ "✗ Decode failed: " ++ err
+    Right dynImg -> putStrLn $ "Decoded successfully: " ++ describeImage dynImg
+    Left err -> putStrLn $ "Decode failed: " ++ err
 
   putStrLn ""
 
-  -- Example 2: Decode with metadata
-  putStrLn "Example 2: Decoding with metadata"
-  result2 <- exampleDecodeWithMetadata "test/data/test.webp"
+  -- Example 2: Handle errors gracefully
+  putStrLn "Example 2: Error handling"
+  result2 <- exampleDecode "nonexistent.webp"
   case result2 of
-    Right (dynImg, _meta) -> do
-      putStrLn $ "✓ Decoded with metadata"
-      putStrLn $ "  Image: " ++ describeImage dynImg
-    Left err -> putStrLn $ "✗ Decode failed: " ++ err
-
-  putStrLn ""
-
-  -- Example 3: Handle errors gracefully
-  putStrLn "Example 3: Error handling"
-  result3 <- exampleDecode "nonexistent.webp"
-  case result3 of
-    Right _ -> putStrLn "✗ Unexpected success"
-    Left err -> putStrLn $ "✓ Properly handled error: " ++ take 50 err ++ "..."
+    Right _ -> putStrLn "Unexpected success"
+    Left err -> putStrLn $ "Properly handled error: " ++ take 50 err ++ "..."
 
   putStrLn "\nExamples complete!"
 
@@ -51,15 +39,6 @@ exampleDecode path = do
     else do
       webpData <- B.readFile path
       return $ decodeWebP webpData
-
-exampleDecodeWithMetadata :: FilePath -> IO (Either String (DynamicImage, Metadatas))
-exampleDecodeWithMetadata path = do
-  fileExists <- doesFileExist path
-  if not fileExists
-    then return $ Left "File not found"
-    else do
-      webpData <- B.readFile path
-      return $ decodeWebPWithMetadata webpData
 
 describeImage :: DynamicImage -> String
 describeImage dynImg = case dynImg of

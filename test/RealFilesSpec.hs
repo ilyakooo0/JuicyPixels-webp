@@ -25,12 +25,6 @@ spec = describe "Real WebP Files" $ do
         Right _ -> expectationFailure "Expected RGB8 image"
         Left err -> expectationFailure $ "Decode failed: " ++ err
 
-    it "extracts metadata" $ do
-      fileData <- B.readFile "test/data/test.webp"
-      case decodeWebPWithMetadata fileData of
-        Right _ -> return ()
-        Left err -> expectationFailure $ "Decode failed: " ++ err
-
   describe "Error Handling" $ do
     it "handles truncated file gracefully" $ do
       fileData <- B.readFile "test/data/test.webp"

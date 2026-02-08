@@ -32,8 +32,6 @@ data WebPFile
 data VP8XHeader = VP8XHeader
   { vp8xHasICC :: !Bool,
     vp8xHasAlpha :: !Bool,
-    vp8xHasExif :: !Bool,
-    vp8xHasXMP :: !Bool,
     vp8xHasAnimation :: !Bool,
     vp8xCanvasWidth :: !Int,
     vp8xCanvasHeight :: !Int
@@ -67,8 +65,6 @@ data WebPChunk
   | ChunkANIM !AnimHeader
   | ChunkANMF !AnimFrame ![WebPChunk]
   | ChunkICCP !B.ByteString
-  | ChunkEXIF !B.ByteString
-  | ChunkXMP !B.ByteString
   | ChunkUnknown !FourCC !B.ByteString
   deriving (Show, Eq)
 
@@ -118,8 +114,6 @@ getVP8XChunk = do
   flags <- getWord8
   let hasICC = testBit flags 5
       hasAlpha = testBit flags 4
-      hasExif = testBit flags 3
-      hasXMP = testBit flags 2
       hasAnimation = testBit flags 1
 
   _reserved <- getWord8
@@ -133,8 +127,6 @@ getVP8XChunk = do
     VP8XHeader
       { vp8xHasICC = hasICC,
         vp8xHasAlpha = hasAlpha,
-        vp8xHasExif = hasExif,
-        vp8xHasXMP = hasXMP,
         vp8xHasAnimation = hasAnimation,
         vp8xCanvasWidth = fromIntegral canvasWidthMinus1 + 1,
         vp8xCanvasHeight = fromIntegral canvasHeightMinus1 + 1
@@ -171,8 +163,6 @@ getChunk = do
       skipPadding chunkSize
       return chunk
     "ICCP" -> ChunkICCP <$> getByteString size <* skipPadding chunkSize
-    "EXIF" -> ChunkEXIF <$> getByteString size <* skipPadding chunkSize
-    "XMP " -> ChunkXMP <$> getByteString size <* skipPadding chunkSize
     _ -> ChunkUnknown fourCC <$> getByteString size <* skipPadding chunkSize
 
 -- | Get chunk data for simple formats

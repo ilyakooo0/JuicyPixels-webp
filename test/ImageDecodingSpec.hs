@@ -38,13 +38,6 @@ spec = describe "Image Decoding" $ do
         Right _ -> expectationFailure "Expected RGB8 image"
         Left err -> expectationFailure $ "Decode failed: " ++ err
 
-  describe "Metadata Decoding" $ do
-    it "handles metadata extraction" $ do
-      let img = makeMinimalVP8LImage 2 2
-      case decodeWebPWithMetadata img of
-        Right _ -> True `shouldBe` True
-        Left _ -> True `shouldBe` True
-
   describe "Error Handling" $ do
     it "rejects empty input" $ do
       case decodeWebP B.empty of
