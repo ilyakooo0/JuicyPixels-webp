@@ -104,7 +104,6 @@ data WebPChunk
   | ChunkALPH ByteString         -- alpha channel
   | ChunkANIM AnimHeader
   | ChunkANMF AnimFrame [WebPChunk]  -- frame with nested chunks
-  | ChunkICCP ByteString
   | ChunkEXIF ByteString
   | ChunkXMP  ByteString
   | ChunkUnknown FourCC ByteString

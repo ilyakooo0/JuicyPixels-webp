@@ -63,7 +63,6 @@ data WebPChunk
   | ChunkALPH !B.ByteString
   | ChunkANIM !AnimHeader
   | ChunkANMF !AnimFrame ![WebPChunk]
-  | ChunkICCP !B.ByteString
   | ChunkUnknown !FourCC !B.ByteString
   deriving (Show, Eq)
 
@@ -159,7 +158,6 @@ getChunk = do
       chunk <- getANMFChunk size
       skipPadding chunkSize
       return chunk
-    "ICCP" -> ChunkICCP <$> getByteString size <* skipPadding chunkSize
     _ -> ChunkUnknown fourCC <$> getByteString size <* skipPadding chunkSize
 
 -- | Get chunk data for simple formats
