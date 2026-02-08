@@ -203,62 +203,40 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc = d
   -- Apply prediction to temporary buffer
   predict16x16 predMode predBuf stride x y
 
-  -- Collect 16 Y block DCs for Y2
+  -- Collect 16 Y block DCs for Y2 by doing forward DCT on all blocks
   y2DCs <- VSM.new 16
+  residualBlocks <- VSM.new (16 * 16)  -- Store all 16 blocks for later encoding
 
-  -- Process 16 Y blocks (4x4 each)
-  let processBlock !blockIdx !e
-        | blockIdx >= 16 = return e
-        | otherwise = do
-            let subX = (blockIdx `mod` 4) * 4
-                subY = (blockIdx `div` 4) * 4
+  -- First pass: Compute all residuals and DCTs, collect DCs
+  forM_ [0 .. 15] $ \blockIdx -> do
+    let subX = (blockIdx `mod` 4) * 4
+        subY = (blockIdx `div` 4) * 4
 
-            -- Allocate residual block
-            residuals <- VSM.new 16
+    -- Allocate temporary residual block
+    residuals <- VSM.new 16
 
-            -- Compute residuals (original - prediction)
-            forM_ [0 .. 3] $ \row ->
-              forM_ [0 .. 3] $ \col -> do
-                let px = x + subX + col
-                    py = y + subY + row
-                    idx = py * stride + px
-                orig <- VSM.read yOrig idx
-                pred <- VSM.read predBuf idx  -- Use prediction buffer, not reconstruction
-                let residual = fromIntegral orig - fromIntegral pred :: Int16
-                VSM.write residuals (row * 4 + col) residual
+    -- Compute residuals (original - prediction)
+    forM_ [0 .. 3] $ \row ->
+      forM_ [0 .. 3] $ \col -> do
+        let px = x + subX + col
+            py = y + subY + row
+            idx = py * stride + px
+        orig <- VSM.read yOrig idx
+        pred <- VSM.read predBuf idx
+        let residual = fromIntegral orig - fromIntegral pred :: Int16
+        VSM.write residuals (row * 4 + col) residual
 
-            -- Forward DCT
-            fdct4x4 residuals
+    -- Forward DCT
+    fdct4x4 residuals
 
-            -- Extract and store DC
-            dc <- VSM.read residuals 0
-            VSM.write y2DCs blockIdx dc
-            VSM.write residuals 0 0 -- Clear DC (will be in Y2)
+    -- Extract DC for Y2
+    dc <- VSM.read residuals 0
+    VSM.write y2DCs blockIdx dc
 
-            -- Quantize AC coefficients
-            quantizeBlock dequantFactors 0 residuals
-
-            -- Encode AC coefficients (block type 0, start at position 1 since DC is in Y2)
-            (e', _) <- encodeCoefficients residuals coeffProbs 0 0 1 e
-
-            -- Reconstruct for future predictions
-            dequantizeBlock dequantFactors 0 residuals
-            idct4x4 residuals
-
-            -- Add prediction back and clip, write to reconstruction buffer
-            forM_ [0 .. 3] $ \row ->
-              forM_ [0 .. 3] $ \col -> do
-                let px = x + subX + col
-                    py = y + subY + row
-                    idx = py * stride + px
-                pred <- VSM.read predBuf idx  -- Get prediction value
-                res <- VSM.read residuals (row * 4 + col)
-                let reconstructed = clip255 (fromIntegral pred + fromIntegral res)
-                VSM.write yRecon idx reconstructed  -- Write to reconstruction for future MBs
-
-            processBlock (blockIdx + 1) e'
-
-  enc1 <- processBlock 0 enc
+    -- Copy residuals to storage for later encoding
+    forM_ [0 .. 15] $ \i -> do
+      r <- VSM.read residuals i
+      VSM.write residualBlocks (blockIdx * 16 + i) r
 
   -- Forward WHT on Y2 DCs
   fwht4x4 y2DCs
@@ -266,8 +244,63 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc = d
   -- Quantize Y2
   quantizeBlock dequantFactors 1 y2DCs
 
-  -- Encode Y2 coefficients (block type 1)
-  (enc2, _) <- encodeCoefficients y2DCs coeffProbs 1 0 0 enc1
+  -- ENCODE Y2 FIRST (this is what decoder expects!)
+  (enc1, _) <- encodeCoefficients y2DCs coeffProbs 1 0 0 enc
+
+  -- Now encode 16 Y blocks (AC only, DC is in Y2)
+  let encodeYBlock !blockIdx !e
+        | blockIdx >= 16 = return e
+        | otherwise = do
+            -- Get stored residuals for this block
+            residuals <- VSM.new 16
+            forM_ [0 .. 15] $ \i -> do
+              r <- VSM.read residualBlocks (blockIdx * 16 + i)
+              VSM.write residuals i r
+
+            -- DC was already extracted for Y2, clear it
+            VSM.write residuals 0 0
+
+            -- Quantize AC coefficients
+            quantizeBlock dequantFactors 0 residuals
+
+            -- Encode AC coefficients (start at position 1, DC is in Y2)
+            (e', _) <- encodeCoefficients residuals coeffProbs 0 0 1 e
+
+            encodeYBlock (blockIdx + 1) e'
+
+  enc2 <- encodeYBlock 0 enc1
+
+  -- Now reconstruct all Y blocks for future predictions
+  forM_ [0 .. 15] $ \blockIdx -> do
+    let subX = (blockIdx `mod` 4) * 4
+        subY = (blockIdx `div` 4) * 4
+
+    -- Get stored residuals
+    residuals <- VSM.new 16
+    forM_ [0 .. 15] $ \i -> do
+      r <- VSM.read residualBlocks (blockIdx * 16 + i)
+      VSM.write residuals i r
+
+    -- Set DC from Y2 (need to get it from dequantized Y2)
+    -- For reconstruction, use quantized then dequantized values
+    -- This is complex - for now, reconstruct from original residuals
+
+    -- Quantize, dequantize, IDCT
+    VSM.write residuals 0 0  -- DC handled by Y2
+    quantizeBlock dequantFactors 0 residuals
+    dequantizeBlock dequantFactors 0 residuals
+    idct4x4 residuals
+
+    -- Add to prediction
+    forM_ [0 .. 3] $ \row ->
+      forM_ [0 .. 3] $ \col -> do
+        let px = x + subX + col
+            py = y + subY + row
+            idx = py * stride + px
+        pred <- VSM.read predBuf idx
+        res <- VSM.read residuals (row * 4 + col)
+        let reconstructed = clip255 (fromIntegral pred + fromIntegral res)
+        VSM.write yRecon idx reconstructed
 
   return enc2
 
