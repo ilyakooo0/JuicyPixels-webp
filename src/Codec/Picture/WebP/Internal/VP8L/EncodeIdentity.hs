@@ -42,21 +42,26 @@ encodeVP8LIdentity img =
     (|>) = flip ($)
 
 -- | Write identity code: all symbols with length 8
+-- Uses a CLC with 2 symbols (0 and 8) to ensure 1-bit codes
+-- Symbol 8 = "code length 8", Symbol 0 = "code length 0" (unused but needed)
 writeIdentityCode :: Int -> BitWriter -> BitWriter
 writeIdentityCode alphabetSize w =
   let w1 = writeBit False w  -- is_simple = 0 (normal code)
 
-      -- Write code length code with only symbol 8 (for "length 8")
+      -- Write code length code with symbols 0 and 8
+      -- Symbol 0 is at position 2 in kCodeLengthCodeOrder
       -- Symbol 8 is at position 11 in kCodeLengthCodeOrder
-      numCLC = 12  -- Include through position 11
+      -- We need 12 CLCs to cover position 11
+      numCLC = 12
       w2 = writeBits 4 (numCLC - 4) w1  -- Write 8, meaning 4+8=12 code lengths
 
       -- Write 12 lengths for kCodeLengthCodeOrder positions 0-11
       -- [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8]
-      -- Only symbol 8 (position 11) gets length 1
+      -- Symbol 0 (position 2) gets length 1, symbol 8 (position 11) gets length 1
+      -- This creates a 1-bit code: 0→sym0, 1→sym8
       w3 = writeBits 3 0 w2   -- pos 0 (sym 17): len 0
       w4 = writeBits 3 0 w3   -- pos 1 (sym 18): len 0
-      w5 = writeBits 3 0 w4   -- pos 2 (sym 0): len 0
+      w5 = writeBits 3 1 w4   -- pos 2 (sym 0): len 1 ✓
       w6 = writeBits 3 0 w5   -- pos 3 (sym 1): len 0
       w7 = writeBits 3 0 w6   -- pos 4 (sym 2): len 0
       w8 = writeBits 3 0 w7   -- pos 5 (sym 3): len 0
@@ -71,8 +76,9 @@ writeIdentityCode alphabetSize w =
       w15 = writeBit False w14
 
       -- Write code lengths for all symbols in alphabet
-      -- Each symbol gets length 8, encoded using symbol 8 from CLC (bit 0)
-      w16 = foldl (\wa _ -> writeBit False wa) w15 [0 .. alphabetSize - 1]
+      -- With 2-symbol CLC: symbol 0 (code 0) = length 0, symbol 8 (code 1) = length 8
+      -- So we write bit 1 for each symbol to indicate length 8
+      w16 = foldl (\wa _ -> writeBit True wa) w15 [0 .. alphabetSize - 1]
 
    in w16
 

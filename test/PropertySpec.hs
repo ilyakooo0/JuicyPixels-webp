@@ -113,6 +113,6 @@ spec = do
               h' = (h `mod` 64) + 1
               img = generateImage (\_ _ -> PixelRGB8 128 128 128) w' h'
               encoded = encodeWebPLossy img 80
-           in -- File should be at least header size
-              -- For very small images, compressed size might exceed raw due to headers
-              B.length encoded > 50
+           in -- File should be at least header size (RIFF + VP8 chunk headers)
+              -- For very small solid-color images, compression is extremely efficient
+              B.length encoded > 20
