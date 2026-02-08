@@ -39,7 +39,8 @@ buildPrefixCode codeLengths
       let numSymbols = VU.length codeLengths
           nonZeroCount = VU.foldl' (\acc len -> if len > 0 then acc + 1 else acc) 0 codeLengths
        in case nonZeroCount of
-            0 -> Left $ "No symbols with non-zero code length (alphabet size: " ++ show numSymbols ++ ")"
+            0 ->
+              Left $ "No symbols with non-zero code length (alphabet size: " ++ show numSymbols ++ ")"
             1 ->
               let symbol = VU.head $ VU.filter (\i -> codeLengths VU.! i > 0) (VU.enumFromN 0 numSymbols)
                in Right $ PrefixCodeSingle (fromIntegral symbol)
@@ -344,9 +345,9 @@ readCodeLengths alphabetSize reader = do
       let (codeLengthLengths, reader3) = readCodeLengthLengths numCodeLengths reader2
 
       case buildPrefixCode codeLengthLengths of
-        Left err -> Left $ "Failed to build code length code: " ++ err
-        Right codeLengthCode -> do
-          readSymbolCodeLengths alphabetSize codeLengthCode reader3
+          Left err -> Left $ "Failed to build code length code: " ++ err
+          Right codeLengthCode -> do
+            readSymbolCodeLengths alphabetSize codeLengthCode reader3
 
 -- | Read code lengths for the code length alphabet
 readCodeLengthLengths :: Int -> BitReader -> (VU.Vector Int, BitReader)
@@ -365,8 +366,7 @@ readCodeLengthLengths numCodeLengths reader = runST $ do
 
 -- | Read symbol code lengths using the code length code
 readSymbolCodeLengths :: Int -> PrefixCode -> BitReader -> Either String (VU.Vector Int, BitReader)
-readSymbolCodeLengths alphabetSize codeLengthCode reader = runST $ do
-  -- Read max_symbol
+readSymbolCodeLengths alphabetSize codeLengthCode reader =
   let (useMaxSymbol, reader1) = readBit reader
       (maxSymbol, reader2) =
         if not useMaxSymbol
@@ -377,45 +377,45 @@ readSymbolCodeLengths alphabetSize codeLengthCode reader = runST $ do
                 (maxSym1, reader1b) = readBits lengthNbits reader1a
                 maxSym = 2 + fromIntegral maxSym1
              in (min maxSym alphabetSize, reader1b)  -- Clamp to alphabet_size
+   in runST $ do
+        lengths <- VUM.replicate alphabetSize 0
+        prevCodeLen <- VUM.new 1
+        VUM.write prevCodeLen 0 8
 
-  lengths <- VUM.replicate alphabetSize 0
-  prevCodeLen <- VUM.new 1
-  VUM.write prevCodeLen 0 8
+        let loop !i !r
+              | i >= maxSymbol = do
+                  frozen <- VU.unsafeFreeze lengths
+                  return $ Right (frozen, r)
+              | otherwise = do
+                  let (sym, r') = decodeSymbol codeLengthCode r
+                  case sym of
+                    _ | sym < 16 -> do
+                      VUM.write lengths i (fromIntegral sym)
+                      when (sym /= 0) $
+                        VUM.write prevCodeLen 0 (fromIntegral sym)
+                      loop (i + 1) r'
+                    16 -> do
+                      let (extra, r'') = readBits 2 r'
+                          repeatCount = 3 + fromIntegral extra
+                      prev <- VUM.read prevCodeLen 0
+                      let writeRepeats !j !r2
+                            | j >= i + repeatCount = loop (i + repeatCount) r2
+                            | j >= maxSymbol = loop maxSymbol r2
+                            | otherwise = do
+                                VUM.write lengths j prev
+                                writeRepeats (j + 1) r2
+                      writeRepeats i r''
+                    17 -> do
+                      let (extra, r'') = readBits 3 r'
+                          repeatCount = 3 + fromIntegral extra
+                      loop (i + repeatCount) r''
+                    18 -> do
+                      let (extra, r'') = readBits 7 r'
+                          repeatCount = 11 + fromIntegral extra
+                      loop (i + repeatCount) r''
+                    _ -> return $ Left $ "Invalid code length symbol: " ++ show sym
 
-  let loop !i !r
-        | i >= maxSymbol = do
-            frozen <- VU.unsafeFreeze lengths
-            return $ Right (frozen, r)
-        | otherwise = do
-            let (sym, r') = decodeSymbol codeLengthCode r
-            case sym of
-              _ | sym < 16 -> do
-                VUM.write lengths i (fromIntegral sym)
-                when (sym /= 0) $
-                  VUM.write prevCodeLen 0 (fromIntegral sym)
-                loop (i + 1) r'
-              16 -> do
-                let (extra, r'') = readBits 2 r'
-                    repeatCount = 3 + fromIntegral extra
-                prev <- VUM.read prevCodeLen 0
-                let writeRepeats !j !r2
-                      | j >= i + repeatCount = loop (i + repeatCount) r2
-                      | j >= maxSymbol = loop maxSymbol r2
-                      | otherwise = do
-                          VUM.write lengths j prev
-                          writeRepeats (j + 1) r2
-                writeRepeats i r''
-              17 -> do
-                let (extra, r'') = readBits 3 r'
-                    repeatCount = 3 + fromIntegral extra
-                loop (i + repeatCount) r''
-              18 -> do
-                let (extra, r'') = readBits 7 r'
-                    repeatCount = 11 + fromIntegral extra
-                loop (i + repeatCount) r''
-              _ -> return $ Left $ "Invalid code length symbol: " ++ show sym
-
-  loop 0 reader2
+        loop 0 reader2
 
 -- Helper functions
 

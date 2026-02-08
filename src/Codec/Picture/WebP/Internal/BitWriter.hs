@@ -5,6 +5,7 @@ module Codec.Picture.WebP.Internal.BitWriter
     emptyBitWriter,
     writeBit,
     writeBits,
+    writeBitsReversed,
     finalizeBitWriter,
     bitWriterToByteString,
   )
@@ -62,3 +63,19 @@ finalizeBitWriter writer@(BitWriter builder buffer count)
 bitWriterToByteString :: BitWriter -> B.ByteString
 bitWriterToByteString (BitWriter builder _ _) =
   B.toStrict $ BB.toLazyByteString builder
+
+-- | Write bits in reversed order (MSB first)
+-- Used for Huffman codes where the first-read bit is the MSB of the code
+writeBitsReversed :: Int -> Word64 -> BitWriter -> BitWriter
+writeBitsReversed 0 _ writer = writer
+writeBitsReversed numBits value writer =
+  -- Reverse the bits: write MSB first
+  let reversed = reverseBits numBits value
+   in writeBits numBits reversed writer
+
+-- | Reverse the bit order of a value
+reverseBits :: Int -> Word64 -> Word64
+reverseBits numBits value = go numBits value 0
+  where
+    go 0 _ acc = acc
+    go n v acc = go (n - 1) (v `shiftR` 1) ((acc `shiftL` 1) .|. (v .&. 1))

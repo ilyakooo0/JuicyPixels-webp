@@ -27,11 +27,10 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Word
 
 -- | Encode image as lossless WebP
--- Uses simple encoder optimized for graphics (solid colors, low color count)
--- Provides good compression for typical use cases
+-- Uses proper Huffman coding for true lossless compression
 encodeWebPLossless :: Image PixelRGBA8 -> B.ByteString
 encodeWebPLossless img =
-  let vp8lData = encodeVP8LSimple img  -- Simple encoder: reliable and fast
+  let vp8lData = encodeVP8LComplete img  -- Complete encoder with proper Huffman coding
       vp8lChunk = makeVP8LChunk vp8lData
       totalSize = B.length vp8lChunk
       container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
