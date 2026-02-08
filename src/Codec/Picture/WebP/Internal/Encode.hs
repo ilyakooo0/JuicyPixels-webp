@@ -104,12 +104,11 @@ makeVP8XChunk width height hasAlpha hasAnim =
 
       -- Flags byte:
       -- Bit 0: reserved
-      -- Bit 1: has ICC profile
-      -- Bit 2: has alpha
-      -- Bit 3: has EXIF
-      -- Bit 4: has XMP
-      -- Bit 5: has animation
-      -- Bits 6-7: reserved
+      -- Bit 1: has animation
+      -- Bit 2: reserved
+      -- Bit 3: reserved
+      -- Bit 4: has alpha
+      -- Bits 5-7: reserved
       flags =
         (if hasAlpha then bit 4 else 0)
           .|. (if hasAnim then bit 1 else 0)
