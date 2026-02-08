@@ -79,20 +79,29 @@ test-suite JuicyPixels-webp-test
   main-is: Spec.hs
   other-modules:
       AlphaSpec
+      AnimationSpec
       BitReaderSpec
+      BitWriterSpec
       BoolDecoderSpec
+      ColorConvertSpec
       ContainerSpec
+      DCTSpec
       EdgeCasesSpec
       GoldenFilesSpec
       GoldenSpec
       IDCTSpec
       ImageDecodingSpec
+      LoopFilterSpec
+      LZ77Spec
       PrefixCodeSpec
+      PropertyExtendedSpec
       PropertySpec
       QualitySpec
       RealFilesSpec
       RealImageSpec
       RoundtripSpec
+      SpecComplianceSpec
+      StressSpec
       TransformSpec
       VP8EncodeSpec
       Paths_JuicyPixels_webp
