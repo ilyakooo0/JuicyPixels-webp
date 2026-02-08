@@ -13,45 +13,46 @@ where
 
 import Data.Bits
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Builder as BB
-import qualified Data.ByteString.Lazy as BL
 import Data.Int
 import qualified Data.Vector.Unboxed as VU
 import Data.Word
 
--- | Boolean arithmetic encoder (range coder)
--- Maintains range in [128, 255] and encodes bits with given probabilities
+-- | Boolean arithmetic encoder for VP8
+-- Implements range coding matching the VP8 boolean decoder
 data BoolEncoder = BoolEncoder
-  { beBuilder :: !BB.Builder, -- Accumulated output bytes
+  { beBuffer :: ![Word8], -- Output bytes (reversed for efficiency)
     beRange :: !Word32, -- Current range [128..255]
-    beValue :: !Word32, -- Current coded value
-    beCount :: !Int -- Number of bits shifted into current byte (0-7)
+    beValue :: !Word64, -- Current value (using 64-bit to avoid overflow)
+    beCount :: !Int -- Bit count: starts at -24, increments on shift
   }
+  deriving (Show)
 
 -- | Initialize a fresh boolean encoder
--- The first two bytes are reserved for the initial value
 initBoolEncoder :: BoolEncoder
 initBoolEncoder =
   BoolEncoder
-    { beBuilder = BB.word8 0 <> BB.word8 0, -- Reserve space for initial value bytes
+    { beBuffer = [],
       beRange = 255,
       beValue = 0,
-      beCount = 0
+      beCount = -24 -- Will output first byte after 24 shifts
     }
 
 -- | Write a single bit with given probability
--- prob is in [1, 255], represents probability of 0 as prob/256
+-- prob in [1..255] represents P(bit=0) = prob/256
 boolWrite :: Word8 -> Bool -> BoolEncoder -> BoolEncoder
 boolWrite !prob !bit !enc =
   let !split = 1 + (((beRange enc - 1) * fromIntegral prob) `shiftR` 8)
       (!newRange, !newValue) =
         if bit
-          then (beRange enc - split, beValue enc + (split `shiftL` 8))
-          else (split, beValue enc)
+          then
+            -- Encode bit=1: use upper partition
+            (beRange enc - split, beValue enc + fromIntegral split)
+          else
+            -- Encode bit=0: use lower partition
+            (split, beValue enc)
    in renormalize enc {beRange = newRange, beValue = newValue}
 
--- | Renormalize the encoder state
--- Shifts range and value left while range < 128, outputting bytes as needed
+-- | Renormalize: shift range and value, output bytes when needed
 renormalize :: BoolEncoder -> BoolEncoder
 renormalize !enc
   | beRange enc >= 128 = enc
@@ -59,21 +60,61 @@ renormalize !enc
       let !newRange = beRange enc `shiftL` 1
           !newValue = beValue enc `shiftL` 1
           !newCount = beCount enc + 1
-       in if newCount == 8
+       in if newCount >= 0
             then
-              let !byte = fromIntegral ((newValue `shiftR` 8) .&. 0xFF) :: Word8
+              -- Time to output a byte
+              -- Extract bits [31..24] of value (top byte)
+              let !outByte = fromIntegral ((newValue `shiftR` 24) .&. 0xFF) :: Word8
+                  -- Keep only lower 24 bits
+                  !clearedValue = newValue .&. 0xFFFFFF
                   !enc' =
                     enc
-                      { beBuilder = beBuilder enc <> BB.word8 byte,
+                      { beBuffer = outByte : beBuffer enc,
                         beRange = newRange,
-                        beValue = newValue .&. 0xFF,
-                        beCount = 0
+                        beValue = clearedValue,
+                        beCount = newCount - 8
                       }
                in renormalize enc'
-            else renormalize enc {beRange = newRange, beValue = newValue, beCount = newCount}
+            else
+              -- Not ready to output yet, continue shifting
+              renormalize enc {beRange = newRange, beValue = newValue, beCount = newCount}
 
--- | Write an n-bit unsigned literal value (MSB-first)
--- Uses probability 128 (equiprobable) for each bit
+-- | Finalize encoder: flush remaining bits and create output
+finalizeBoolEncoder :: BoolEncoder -> B.ByteString
+finalizeBoolEncoder !enc =
+  let -- First, shift to get count close to a byte boundary
+      shiftToFlush !e
+        | beCount e < 0 =
+            -- Keep shifting until we're ready to output
+            let !newValue = beValue e `shiftL` 1
+                !newCount = beCount e + 1
+             in shiftToFlush e {beValue = newValue, beCount = newCount}
+        | otherwise = e
+
+      !shifted = shiftToFlush enc
+
+      -- Now flush all remaining bytes
+      flushLoop !e !bytesWritten
+        | bytesWritten >= 8 = e -- Prevent infinite loop, max 8 bytes
+        | beValue e == 0 && bytesWritten > 0 = e -- Done if value is zero and we've written something
+        | otherwise =
+            let !byte = fromIntegral ((beValue e `shiftR` 24) .&. 0xFF) :: Word8
+                !e' =
+                  e
+                    { beBuffer = byte : beBuffer e,
+                      beValue = (beValue e `shiftL` 8) .&. 0xFFFFFFFFFFFFFFFF,
+                      beCount = beCount e - 8
+                    }
+             in flushLoop e' (bytesWritten + 1)
+
+      !flushed = flushLoop shifted 0
+      !outputBytes = reverse (beBuffer flushed)
+
+      -- The decoder reads first 2 bytes as initial value
+      -- Write 0, 0 as standard (decoder compensates)
+   in B.pack (0 : 0 : outputBytes)
+
+-- | Write n-bit unsigned literal (MSB-first)
 boolWriteLiteral :: Int -> Word32 -> BoolEncoder -> BoolEncoder
 boolWriteLiteral 0 _ !enc = enc
 boolWriteLiteral !n !value !enc =
@@ -82,7 +123,7 @@ boolWriteLiteral !n !value !enc =
       !enc' = boolWrite 128 bit enc
    in boolWriteLiteral (n - 1) value enc'
 
--- | Write a signed literal value (magnitude + sign bit)
+-- | Write signed value (magnitude + sign)
 boolWriteSigned :: Int -> Int32 -> BoolEncoder -> BoolEncoder
 boolWriteSigned !n !value !enc =
   let !absValue = abs value
@@ -90,78 +131,36 @@ boolWriteSigned !n !value !enc =
       !sign = value < 0
    in boolWrite 128 sign enc'
 
--- | Write a value using a binary tree and probabilities
--- tree contains branch structure, probs contains probability for each node
--- value is the leaf token to encode
---
--- VP8 tree format: The tree is stored as pairs of nodes.
--- Traversal starts at pair (0,1) - read a bit to choose index 0 or 1.
--- If the chosen index contains <=0, it's a leaf with value negate(node).
--- If >0, it's the base index of the next pair: (base, base+1).
+-- | Write a value using a tree
 boolWriteTree :: VU.Vector Int8 -> VU.Vector Word8 -> Int -> BoolEncoder -> BoolEncoder
 boolWriteTree !tree !probs !targetValue !enc =
   case findPathToPair tree targetValue 0 1 [] of
     Just path -> writePath (reverse path) probs 0 enc
-    Nothing -> error $ "VP8 encoder error: value " ++ show targetValue ++ " not found in tree"
+    Nothing -> error $ "VP8 encoder: value " ++ show targetValue ++ " not in tree"
   where
-    -- Find path starting from a pair of indices (leftIdx, rightIdx)
-    -- Returns the sequence of bits (False=left, True=right) to reach the target
     findPathToPair :: VU.Vector Int8 -> Int -> Int -> Int -> [Bool] -> Maybe [Bool]
     findPathToPair t val leftIdx rightIdx path
       | leftIdx >= VU.length t || rightIdx >= VU.length t = Nothing
       | otherwise =
           let leftNode = t VU.! leftIdx
               rightNode = t VU.! rightIdx
-           in -- Try left (bit=0)
-              case checkNode t val leftNode (False : path) of
+           in case checkNode t val leftNode (False : path) of
                 Just p -> Just p
-                Nothing ->
-                  -- Try right (bit=1)
-                  checkNode t val rightNode (True : path)
+                Nothing -> checkNode t val rightNode (True : path)
 
-    -- Check if a node matches or leads to the target
     checkNode :: VU.Vector Int8 -> Int -> Int8 -> [Bool] -> Maybe [Bool]
     checkNode t val node path
-      | node == 0 =
-          -- Special case: 0 represents token 0 (DCT_0)
-          if val == 0
-            then Just path
-            else Nothing
-      | node < 0 =
-          -- Leaf - check if it matches
-          if fromIntegral (negate node) == val
-            then Just path
-            else Nothing
+      | node == 0 = if val == 0 then Just path else Nothing
+      | node < 0 = if fromIntegral (negate node) == val then Just path else Nothing
       | otherwise =
-          -- Branch - continue with next pair
           let baseIdx = fromIntegral node
            in if baseIdx + 1 < VU.length t
                 then findPathToPair t val baseIdx (baseIdx + 1) path
                 else Nothing
 
-    -- Write the path bits using probabilities
     writePath :: [Bool] -> VU.Vector Word8 -> Int -> BoolEncoder -> BoolEncoder
     writePath [] _ _ e = e
     writePath (bit : rest) ps probIdx e =
       let prob = ps VU.! probIdx
           e' = boolWrite prob bit e
        in writePath rest ps (probIdx + 1) e'
-
--- | Finalize the encoder and return the encoded bytestring
--- Flushes any remaining bits and returns the complete encoded data
-finalizeBoolEncoder :: BoolEncoder -> B.ByteString
-finalizeBoolEncoder !enc =
-  -- Flush remaining bits by shifting value to get final bytes
-  let !finalValue = beValue enc
-      -- We need to output remaining bits
-      -- Shift value to align to byte boundary and output
-      !remainingBits = beCount enc
-      !enc' =
-        if remainingBits > 0
-          then
-            let !byte = fromIntegral ((finalValue `shiftR` 8) .&. 0xFF) :: Word8
-             in enc {beBuilder = beBuilder enc <> BB.word8 byte}
-          else enc
-      -- Output final padding if needed
-      !finalBuilder = beBuilder enc'
-   in BL.toStrict $ BB.toLazyByteString finalBuilder

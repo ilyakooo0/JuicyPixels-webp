@@ -58,7 +58,7 @@ decodeVP8 bs = do
                   let (uvMode, decoder2) = boolReadTree kfUVModeTree kfUVModeProbs decoder1
 
                   -- Full coefficient-based reconstruction
-                  decoder3 <- if yMode == 4
+                  decoderAfterMB <- if yMode == 4
                     then do
                       -- B_PRED: 16 4x4 blocks with individual modes
                       decoderBPred <- reconstructBPred yBuf mbY mbX mbWidth decoder2 coeffProbs header
@@ -104,8 +104,8 @@ decodeVP8 bs = do
 
                           return decoder7
 
-                  -- Continue to next macroblock
-                  decodeMacroblocks mbY (mbX + 1) decoder3
+                  -- Continue to next macroblock with CORRECT decoder state!
+                  decodeMacroblocks mbY (mbX + 1) decoderAfterMB
 
         _finalDecoder <- decodeMacroblocks 0 0 decoder
 
