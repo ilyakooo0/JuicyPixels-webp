@@ -30,8 +30,7 @@ data WebPFile
 
 -- | VP8X extended format header
 data VP8XHeader = VP8XHeader
-  { vp8xHasICC :: !Bool,
-    vp8xHasAlpha :: !Bool,
+  { vp8xHasAlpha :: !Bool,
     vp8xHasAnimation :: !Bool,
     vp8xCanvasWidth :: !Int,
     vp8xCanvasHeight :: !Int
@@ -112,8 +111,7 @@ getVP8XChunk = do
     fail "VP8X chunk size must be 10"
 
   flags <- getWord8
-  let hasICC = testBit flags 5
-      hasAlpha = testBit flags 4
+  let hasAlpha = testBit flags 4
       hasAnimation = testBit flags 1
 
   _reserved <- getWord8
@@ -125,8 +123,7 @@ getVP8XChunk = do
 
   return $
     VP8XHeader
-      { vp8xHasICC = hasICC,
-        vp8xHasAlpha = hasAlpha,
+      { vp8xHasAlpha = hasAlpha,
         vp8xHasAnimation = hasAnimation,
         vp8xCanvasWidth = fromIntegral canvasWidthMinus1 + 1,
         vp8xCanvasHeight = fromIntegral canvasHeightMinus1 + 1

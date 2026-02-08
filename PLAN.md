@@ -90,8 +90,7 @@ data WebPFile
   | WebPExtended       VP8XHeader [WebPChunk]
 
 data VP8XHeader = VP8XHeader
-  { vp8xHasICC       :: Bool
-  , vp8xHasAlpha     :: Bool
+  { vp8xHasAlpha     :: Bool
   , vp8xHasExif      :: Bool
   , vp8xHasXMP       :: Bool
   , vp8xHasAnimation :: Bool
