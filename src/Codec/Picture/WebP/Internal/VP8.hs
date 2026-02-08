@@ -104,7 +104,7 @@ decodeVP8 bs = do
 
                           return decoder7
 
-                  -- Continue to next macroblock with CORRECT decoder state!
+                  -- Continue to next macroblock - USE THE UPDATED DECODER!
                   decodeMacroblocks mbY (mbX + 1) decoderAfterMB
 
         _finalDecoder <- decodeMacroblocks 0 0 decoder
@@ -273,6 +273,11 @@ reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact =
 
         -- Decode coefficients
         (coeffs, hasNonzero, dec') <- decodeCoefficients dec coeffProbs 2 0 0  -- Block type 2 (UV)
+
+        -- DEBUG: Check if we got nonzero for our encoded file
+        when (mbY == 0 && mbX == 0 && blockIdx == 0 && hasNonzero) $ do
+          c0 <- VSM.read coeffs 0
+          error $ "DEBUG DECODER: UV has nonzero! hasNonzero=True, coeffs[0]=" ++ show c0
 
         -- Dequantize
         dequantizeBlock dequantFact 2 coeffs

@@ -7,6 +7,7 @@ where
 
 import Codec.Picture.WebP.Internal.VP8.BoolEncoder
 import Codec.Picture.WebP.Internal.VP8.Tables
+import Control.Monad (when)
 import Control.Monad.ST
 import Data.Bits
 import Data.Int
@@ -19,7 +20,7 @@ import Data.Word
 -- | Encode DCT coefficients for a 4x4 block
 -- Returns: (updated encoder, has_nonzero)
 encodeCoefficients ::
-  VSM.MVector s Int16 -> -- Quantized coefficients (in zigzag order already applied)
+  VSM.MVector s Int16 -> -- Quantized coefficients (in raster scan order from FDCT)
   VU.Vector Word8 -> -- Coefficient probabilities
   Int -> -- Block type (0=Y AC, 1=Y2, 2=UV, 3=Y full)
   Int -> -- Initial context (0, 1, or 2)
@@ -42,8 +43,14 @@ encodeCoefficients coeffs coeffProbs blockType initialCtx startPos encoder = do
                 return (enc', True)
               else return (enc, False)
         | otherwise = do
-            -- Read coefficient at position pos (already in zigzag order)
-            coeff <- VSM.read coeffs pos
+            -- Read coefficient in zigzag scan order
+            -- Coefficients from FDCT are in raster order, need to map via zigzag
+            let zigzagIdx = zigzag VU.! pos
+            coeff <- VSM.read coeffs zigzagIdx
+
+            -- DEBUG: For UV block type at pos 0, print the coefficient
+            when (blockType == 2 && pos == 0 && coeff /= 0) $
+              error $ "DEBUG ENCODE: UV coeff[0] = " ++ show coeff ++ " token will be " ++ show (fst $ coeffToToken coeff)
 
             if coeff == 0
               then do
