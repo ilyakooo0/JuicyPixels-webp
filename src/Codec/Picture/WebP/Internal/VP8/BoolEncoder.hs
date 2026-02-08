@@ -122,7 +122,12 @@ boolWriteTree !tree !probs !targetValue !enc =
     -- Check if a node matches or leads to the target
     checkNode :: VU.Vector Int8 -> Int -> Int8 -> [Bool] -> Maybe [Bool]
     checkNode t val node path
-      | node <= 0 =
+      | node == 0 =
+          -- Special case: 0 represents token 0 (DCT_0)
+          if val == 0
+            then Just path
+            else Nothing
+      | node < 0 =
           -- Leaf - check if it matches
           if fromIntegral (negate node) == val
             then Just path

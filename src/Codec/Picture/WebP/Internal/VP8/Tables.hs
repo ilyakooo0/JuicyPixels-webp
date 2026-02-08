@@ -74,32 +74,34 @@ mbSegmentTree :: V.Vector Int8
 mbSegmentTree = V.fromList [-1, 2, -2, 4, -3, -4]
 
 -- | Coefficient token tree (22 elements)
--- Maps to 12 leaf tokens: DCT_0, DCT_1, DCT_2, DCT_3, DCT_4, CAT1..CAT6
+-- From RFC 6386, expanded with token values:
+-- EOB=11, DCT_0=0, DCT_1=1, DCT_2=2, DCT_3=3, DCT_4=4, CAT1=5, ..., CAT6=10
+-- Tree format: negative values are leaves (-token), positive values are child indices
 coeffTree :: V.Vector Int8
 coeffTree =
   V.fromList
-    [ -1,
-      2,
-      -2,
-      4,
-      -3,
-      6,
-      8,
-      10,
-      -4,
-      -5,
-      12,
-      14,
-      16,
-      18,
-      -6,
-      -7,
-      -8,
-      -9,
-      -10,
-      -11,
-      -12,
-      -13
+    [ -11, -- Index 0: EOB (bits "0")
+      2, -- Index 1: branch to index 2
+      0, -- Index 2: DCT_0 (bits "10") - special case, 0 means token 0
+      4, -- Index 3: branch to index 4
+      -1, -- Index 4: DCT_1 (bits "110")
+      6, -- Index 5: branch to index 6
+      8, -- Index 6: branch to index 8
+      12, -- Index 7: branch to index 12
+      -2, -- Index 8: DCT_2 (bits "11100")
+      10, -- Index 9: branch to index 10
+      -3, -- Index 10: DCT_3 (bits "111010")
+      -4, -- Index 11: DCT_4 (bits "111011")
+      14, -- Index 12: branch to index 14
+      16, -- Index 13: branch to index 16
+      -5, -- Index 14: CAT1 (bits "111100")
+      -6, -- Index 15: CAT2 (bits "111101")
+      18, -- Index 16: branch to index 18
+      20, -- Index 17: branch to index 20
+      -7, -- Index 18: CAT3 (bits "1111100")
+      -8, -- Index 19: CAT4 (bits "1111101")
+      -9, -- Index 20: CAT5 (bits "1111110")
+      -10 -- Index 21: CAT6 (bits "1111111")
     ]
 
 -- | Y mode probabilities (4 elements)
