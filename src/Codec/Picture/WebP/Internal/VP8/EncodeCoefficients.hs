@@ -48,10 +48,6 @@ encodeCoefficients coeffs coeffProbs blockType initialCtx startPos encoder = do
             let zigzagIdx = zigzag VU.! pos
             coeff <- VSM.read coeffs zigzagIdx
 
-            -- DEBUG: For UV block type at pos 0, print the coefficient
-            when (blockType == 2 && pos == 0 && coeff /= 0) $
-              error $ "DEBUG ENCODE: UV coeff[0] = " ++ show coeff ++ " token will be " ++ show (fst $ coeffToToken coeff)
-
             if coeff == 0
               then do
                 -- Token 0 (DCT_0)

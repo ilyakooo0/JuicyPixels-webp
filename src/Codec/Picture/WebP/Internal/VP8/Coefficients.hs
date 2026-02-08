@@ -37,10 +37,6 @@ decodeCoefficients decoder coeffProbs blockType initialCtx startPos = do
             let treeStart = if skipEOB then 2 else 0
                 (token, d1) = boolReadTree (V.drop treeStart coeffTree) (getCoeffProbs coeffProbs probIdx treeStart) d
 
-            -- DEBUG: Print token for UV at position 0
-            when (blockType == 2 && pos == 0 && token /= 0 && token /= 11) $
-              error $ "DEBUG DECODE: UV pos=" ++ show pos ++ " token=" ++ show token
-
             case token of
               0 -> loop (pos + 1) 0 d1 hasNonzero True
               11 ->
