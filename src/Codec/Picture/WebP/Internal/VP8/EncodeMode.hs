@@ -11,58 +11,54 @@ import Data.Word
 
 -- | Encode Y mode (0-3) to bitstream
 -- Mode mapping: 0=DC_PRED, 1=V_PRED, 2=H_PRED, 3=TM_PRED
--- Tree values: 1=DC_PRED, 2=V_PRED, 3=H_PRED, 4=TM_PRED (add 1)
+-- Tree from RFC 6386: B_PRED="0", DC_PRED="100", V_PRED="101", H_PRED="110", TM_PRED="111"
+-- Probs: [145, 156, 163, 128] for each decision point
 encodeYMode :: Int -> BoolEncoder -> BoolEncoder
 encodeYMode mode enc =
   case mode of
-    0 -> -- DC_PRED: tree value 1, bits "10"
-         let enc1 = boolWrite 145 True enc   -- First bit: 1
-             enc2 = boolWrite 156 False enc1 -- Second bit: 0
-          in enc2
-    1 -> -- V_PRED: tree value 2, bits "110"
-         let enc1 = boolWrite 145 True enc   -- First bit: 1
-             enc2 = boolWrite 156 True enc1  -- Second bit: 1
-             enc3 = boolWrite 163 False enc2 -- Third bit: 0
+    0 -> -- DC_PRED: bits "100" (True, False, False)
+         let enc1 = boolWrite 145 True enc   -- bit 0: not B_PRED
+             enc2 = boolWrite 156 False enc1 -- bit 1: go left (to DC/V node)
+             enc3 = boolWrite 163 False enc2 -- bit 2: DC_PRED (left)
           in enc3
-    2 -> -- H_PRED: tree value 3, bits "1110"
-         let enc1 = boolWrite 145 True enc   -- 1
-             enc2 = boolWrite 156 True enc1  -- 1
-             enc3 = boolWrite 163 True enc2  -- 1
-             enc4 = boolWrite 128 False enc3 -- 0
-          in enc4
-    3 -> -- TM_PRED: tree value 4, bits "1111"
-         let enc1 = boolWrite 145 True enc   -- 1
-             enc2 = boolWrite 156 True enc1  -- 1
-             enc3 = boolWrite 163 True enc2  -- 1
-             enc4 = boolWrite 128 True enc3  -- 1
-          in enc4
+    1 -> -- V_PRED: bits "101" (True, False, True)
+         let enc1 = boolWrite 145 True enc   -- bit 0: not B_PRED
+             enc2 = boolWrite 156 False enc1 -- bit 1: go left (to DC/V node)
+             enc3 = boolWrite 163 True enc2  -- bit 2: V_PRED (right)
+          in enc3
+    2 -> -- H_PRED: bits "110" (True, True, False)
+         let enc1 = boolWrite 145 True enc   -- bit 0: not B_PRED
+             enc2 = boolWrite 156 True enc1  -- bit 1: go right (to H/TM node)
+             enc3 = boolWrite 128 False enc2 -- bit 2: H_PRED (left)
+          in enc3
+    3 -> -- TM_PRED: bits "111" (True, True, True)
+         let enc1 = boolWrite 145 True enc   -- bit 0: not B_PRED
+             enc2 = boolWrite 156 True enc1  -- bit 1: go right (to H/TM node)
+             enc3 = boolWrite 128 True enc2  -- bit 2: TM_PRED (right)
+          in enc3
     _ -> enc -- Invalid mode, no change
 
 -- | Encode UV mode (0-3) to bitstream
--- Same modes as Y: 0=DC_PRED, 1=V_PRED, 2=H_PRED, 3=TM_PRED
--- Tree values: 1=DC_PRED, 2=V_PRED, 3=H_PRED, 4=TM_PRED
+-- Mode mapping: 0=DC_PRED, 1=V_PRED, 2=H_PRED, 3=TM_PRED
+-- Tree from RFC 6386: DC_PRED="0", V_PRED="10", H_PRED="110", TM_PRED="111"
+-- Probs: [142, 114, 183] for each decision point
 encodeUVMode :: Int -> BoolEncoder -> BoolEncoder
 encodeUVMode mode enc =
   case mode of
-    0 -> -- DC_PRED: tree value 1, bits "10"
-         let enc1 = boolWrite 142 True enc   -- First bit: 1
-             enc2 = boolWrite 114 False enc1 -- Second bit: 0
+    0 -> -- DC_PRED: bits "0" (False)
+         boolWrite 142 False enc
+    1 -> -- V_PRED: bits "10" (True, False)
+         let enc1 = boolWrite 142 True enc   -- bit 0: not DC_PRED
+             enc2 = boolWrite 114 False enc1 -- bit 1: V_PRED (left)
           in enc2
-    1 -> -- V_PRED: tree value 2, bits "110"
-         let enc1 = boolWrite 142 True enc   -- 1
-             enc2 = boolWrite 114 True enc1  -- 1
-             enc3 = boolWrite 183 False enc2 -- 0
+    2 -> -- H_PRED: bits "110" (True, True, False)
+         let enc1 = boolWrite 142 True enc   -- bit 0: not DC_PRED
+             enc2 = boolWrite 114 True enc1  -- bit 1: go right (to H/TM node)
+             enc3 = boolWrite 183 False enc2 -- bit 2: H_PRED (left)
           in enc3
-    2 -> -- H_PRED: tree value 3, bits "1110"
-         let enc1 = boolWrite 142 True enc   -- 1
-             enc2 = boolWrite 114 True enc1  -- 1
-             enc3 = boolWrite 183 True enc2  -- 1
-             enc4 = boolWrite 128 False enc3 -- 0 (using prob 128 for last bit)
-          in enc4
-    3 -> -- TM_PRED: tree value 4, bits "1111"
-         let enc1 = boolWrite 142 True enc   -- 1
-             enc2 = boolWrite 114 True enc1  -- 1
-             enc3 = boolWrite 183 True enc2  -- 1
-             enc4 = boolWrite 128 True enc3  -- 1
-          in enc4
+    3 -> -- TM_PRED: bits "111" (True, True, True)
+         let enc1 = boolWrite 142 True enc   -- bit 0: not DC_PRED
+             enc2 = boolWrite 114 True enc1  -- bit 1: go right (to H/TM node)
+             enc3 = boolWrite 183 True enc2  -- bit 2: TM_PRED (right)
+          in enc3
     _ -> enc

@@ -45,7 +45,8 @@ data VP8FrameHeader = VP8FrameHeader
     vp8SkipEnabled :: !Bool,
     vp8ProbSkipFalse :: !Word8,
     vp8FirstPartition :: !B.ByteString,
-    vp8DCTPartitions :: ![B.ByteString]
+    vp8DCTPartitions :: ![B.ByteString],
+    vp8Decoder :: !BoolDecoder  -- BoolDecoder state after compressed header
   }
   deriving (Show)
 
@@ -82,7 +83,7 @@ parseVP8Header bs = do
 
       let (mbNoSkipCoeff, d12) = boolRead 128 d11
 
-      (skipEnabled, probSkip, _d13) <-
+      (skipEnabled, probSkip, d13) <-
         if mbNoSkipCoeff
           then do
             let (prob, d) = boolLiteral 8 d12
@@ -111,7 +112,8 @@ parseVP8Header bs = do
             vp8SkipEnabled = skipEnabled,
             vp8ProbSkipFalse = probSkip,
             vp8FirstPartition = partitionBytes,
-            vp8DCTPartitions = dctPartitions
+            vp8DCTPartitions = dctPartitions,
+            vp8Decoder = d13  -- Pass the decoder state after compressed header
           }
   where
     fromStrict = B.fromStrict

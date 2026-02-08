@@ -114,21 +114,28 @@ generateCompressedHeader quantIndices filterLevel filterType =
       enc16 = writeCoeffProbUpdates enc15
 
       -- Macroblock skip mode
-      -- mb_no_skip_coeff: 0 = skip mode enabled (must write skip flag per MB)
-      --                   1 = skip mode disabled (no skip flags needed)
-      -- For simple encoder, disable skip mode
-      enc17 = boolWriteLiteral 1 1 enc16 -- mb_no_skip_coeff = 1 (DISABLE skip mode)
+      -- mb_no_skip_coeff: 0 = skip mode disabled (all MBs have coefficients)
+      --                   1 = skip mode enabled (must read prob_skip_false byte)
+      -- For simple encoder, disable skip mode (don't read per-MB skip flags)
+      enc17 = boolWriteLiteral 1 0 enc16 -- mb_no_skip_coeff = 0 (skip mode disabled)
 
    in enc17
 
 -- | Write coefficient probability updates (all zeros for simple encoder)
+-- IMPORTANT: Must use the same probabilities as the decoder (coeffUpdateProbs)
 writeCoeffProbUpdates :: BoolEncoder -> BoolEncoder
 writeCoeffProbUpdates enc =
   -- 4 block types × 8 bands × 3 contexts × 11 tokens = 1056 update flags
-  -- For simple encoder, write 0 for all (don't update, use defaults)
-  let loop !i !e
-        | i >= 1056 = e
+  -- For simple encoder, write False (0) for all (don't update, use defaults)
+  -- The decoder reads each flag using coeffUpdateProbs[idx], so we must write with the same probabilities
+  let loop !i !j !k !l !e
+        | i >= 4 = e
+        | j >= 8 = loop (i + 1) 0 k l e
+        | k >= 3 = loop i (j + 1) 0 l e
+        | l >= 11 = loop i j (k + 1) 0 e
         | otherwise =
-            let e' = boolWriteLiteral 1 0 e -- update_flag = 0
-             in loop (i + 1) e'
-   in loop 0 enc
+            let idx = i * 264 + j * 33 + k * 11 + l
+                updateProb = coeffUpdateProbs VU.! idx
+                e' = boolWrite updateProb False e  -- write False (no update)
+             in loop i j k (l + 1) e'
+   in loop 0 0 0 0 enc

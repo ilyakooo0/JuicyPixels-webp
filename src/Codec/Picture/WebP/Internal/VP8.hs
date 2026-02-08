@@ -42,8 +42,8 @@ decodeVP8 bs = do
         uBuf <- VSM.replicate (mbWidth * 8 * mbHeight * 8) (128 :: Word8)
         vBuf <- VSM.replicate (mbWidth * 8 * mbHeight * 8) (128 :: Word8)
 
-        -- Initialize decoder
-        let decoder = initBoolDecoder (vp8FirstPartition header)
+        -- Use decoder state from header (already positioned after compressed header)
+        let decoder = vp8Decoder header
             coeffProbs = vp8CoeffProbs header
 
         -- Decode all macroblocks with mode reading and coefficient decoding
@@ -331,26 +331,31 @@ clamp x
   | otherwise = x
 
 -- Keyframe Y mode tree (from RFC 6386)
+-- Tree structure: indices are pairs (left, right). Negative = leaf returning -value, 0 = leaf returning 0
+-- B_PRED=4, DC_PRED=0, V_PRED=1, H_PRED=2, TM_PRED=3
+-- Bit patterns: B_PRED="0", DC_PRED="100", V_PRED="101", H_PRED="110", TM_PRED="111"
 kfYModeTree :: V.Vector Int8
 kfYModeTree = V.fromList
-  [ -4,  2,   -- B_PRED at index 0 (code "0")
-     -1,  4,   -- DC_PRED at index 2
-     -2,  6,   -- V_PRED at index 4
-     -3,  8    -- H_PRED at index 6, TM_PRED at index 8
+  [ -4,  2,   -- B_PRED (4) at code "0", else go to index 2
+     4,  6,   -- go to index 4 at code "10", go to index 6 at code "11"
+     0, -1,   -- DC_PRED (0) at code "100", V_PRED (1) at code "101"
+    -2, -3    -- H_PRED (2) at code "110", TM_PRED (3) at code "111"
   ]
 
--- Keyframe Y mode probabilities
+-- Keyframe Y mode probabilities (4 probabilities for 4 decision points)
 kfYModeProbs :: V.Vector Word8
 kfYModeProbs = V.fromList [145, 156, 163, 128]
 
--- Keyframe UV mode tree
+-- Keyframe UV mode tree (from RFC 6386)
+-- UV mode doesn't have B_PRED, only DC/V/H/TM (0-3)
+-- Bit patterns: DC_PRED="0", V_PRED="10", H_PRED="110", TM_PRED="111"
 kfUVModeTree :: V.Vector Int8
 kfUVModeTree = V.fromList
-  [ -1,  2,   -- DC_PRED
-     -2,  4,   -- V_PRED
-     -3, -4    -- H_PRED, TM_PRED
+  [ 0,   2,   -- DC_PRED (0) at code "0", else go to index 2
+    -1,  4,   -- V_PRED (1) at code "10", else go to index 4
+    -2, -3    -- H_PRED (2) at code "110", TM_PRED (3) at code "111"
   ]
 
--- Keyframe UV mode probabilities
+-- Keyframe UV mode probabilities (3 probabilities for 3 decision points)
 kfUVModeProbs :: V.Vector Word8
 kfUVModeProbs = V.fromList [142, 114, 183]

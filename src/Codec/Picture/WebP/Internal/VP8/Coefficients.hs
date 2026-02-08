@@ -34,8 +34,12 @@ decodeCoefficients decoder coeffProbs blockType initialCtx startPos = do
             let band = coeffBands VU.! pos
                 probIdx = blockType * 264 + band * 33 + ctx * 11
 
-            let treeStart = if skipEOB then 2 else 0
-                (token, d1) = boolReadTree (V.drop treeStart coeffTree) (getCoeffProbs coeffProbs probIdx treeStart) d
+            -- When skipEOB is True, we skip the first bit (EOB decision) and start
+            -- at the subtree for non-EOB tokens. The tree structure after EOB is
+            -- at index 2, and we skip the first probability.
+            let (token, d1) = if skipEOB
+                  then boolReadTreeAt coeffTree 2 (getCoeffProbs coeffProbs probIdx 1) d
+                  else boolReadTree coeffTree (getCoeffProbs coeffProbs probIdx 0) d
 
             case token of
               0 -> loop (pos + 1) 0 d1 hasNonzero True
@@ -49,6 +53,26 @@ decodeCoefficients decoder coeffProbs blockType initialCtx startPos = do
                 loop (pos + 1) newCtx d2 True False
 
   loop startPos initialCtx decoder False False
+
+-- | Read tree starting at a specific node index (for skipEOB)
+boolReadTreeAt :: V.Vector Int8 -> Int -> V.Vector Word8 -> BoolDecoder -> (Int, BoolDecoder)
+boolReadTreeAt tree startIdx probs decoder = go startIdx 0 decoder
+  where
+    go !i !probIdx !d
+      | probIdx >= V.length probs =
+          -- No more probabilities, take left branch by default
+          let node = tree V.! i
+          in if node <= 0
+               then (if node == 0 then 0 else fromIntegral (negate node), d)
+               else go (fromIntegral node) probIdx d
+      | otherwise =
+          let prob = probs V.! probIdx
+              (bit, d') = boolRead prob d
+              idx = i + if bit then 1 else 0
+              node = tree V.! idx
+          in if node <= 0
+               then (if node == 0 then 0 else fromIntegral (negate node), d')
+               else go (fromIntegral node) (probIdx + 1) d'
 
 -- | Decode coefficient value from token
 decodeCoeffValue :: Int -> BoolDecoder -> (Int16, BoolDecoder)
