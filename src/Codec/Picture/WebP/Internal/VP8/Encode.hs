@@ -45,8 +45,10 @@ defaultEncodeConfig :: Int -> EncodeConfig
 defaultEncodeConfig quality =
   EncodeConfig
     { encQuality = quality,
-      encFilterLevel = 0, -- No loop filter for simplicity
-      encFilterType = 1, -- Simple (unused if level=0)
+      -- Filter level derived from quality: lower quality = more blocking = higher filter
+      -- quality 100 → level 0, quality 50 → level 31, quality 0 → level 63
+      encFilterLevel = min 63 $ max 0 $ (100 - quality) * 63 `div` 100,
+      encFilterType = 1, -- Simple filter (faster, good enough for most cases)
       encUseSegmentation = False -- Disable segmentation
     }
 
