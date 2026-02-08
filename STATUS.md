@@ -114,7 +114,6 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - **Meta prefix codes** - entropy image support for better Huffman efficiency
 
 ### VP8 Encoding Optimizations
-- **Loop filter** - implemented but disabled (filter level = 0)
 - **Coefficient probability updates** - currently uses fixed defaults
 - **Segmentation** - decoder supports it, encoder doesn't use it
 - **Advanced mode selection** - currently uses simple heuristics
@@ -131,7 +130,6 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - No transforms in VP8L encoding: encodes pixels directly (larger files, correct output)
 - Fixed coefficient probabilities in VP8 encoder
 - Simple linear quality→qi mapping
-- Loop filter disabled in VP8 encoder
 
 ### Error Handling
 - Reserved fields read but not rejected (per RFC)
