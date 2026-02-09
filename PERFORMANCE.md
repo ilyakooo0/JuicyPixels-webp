@@ -13,12 +13,21 @@ This document describes actionable performance improvements for the JuicyPixels-
 | ~~Transform INLINE pragmas~~ | Transform.hs | 12-18% | Medium | HIGH | **DONE** |
 | ~~Transform Int arithmetic~~ | Transform.hs | 8-12% | Medium | HIGH | **DONE** |
 | ~~Integer → Int arithmetic~~ | LZ77.hs, Transform.hs | 5-10% | Low | HIGH | **DONE** |
+| **BoolDecoder INLINE pragmas** | BoolDecoder.hs | 5-10% | Low | HIGH | |
+| **Alpha filtering fast paths** | Alpha.hs | 10-15% | Medium | HIGH | |
+| **Quantize/Dequant loop optimization** | Quantize.hs, Dequant.hs | 5-10% | Low | HIGH | |
+| Integer div → shiftR | BoolDecoder.hs, Coefficients.hs | 2-5% | Low | HIGH | |
 | Prefix code specialization | PrefixCode.hs | 6-10% | Medium | MEDIUM | |
 | Mode selection batching | ModeSelection.hs | 15-25% | Medium | MEDIUM | |
 | Huffman sort optimization | EncodeComplete.hs | 5-10% | Low | MEDIUM | |
 | Predictor mode early exit | PredictorEncode.hs | 10-15% | Low | MEDIUM | |
-| IDCT/DCT optimization | IDCT.hs, DCT.hs | 3-5% | Low | LOW | |
+| Animation loop optimization | Animation.hs | 8-12% | Low | MEDIUM | |
+| BitWriter optimization | BitWriter.hs | 5-8% | Medium | MEDIUM | |
+| AlphaEncode row-base | AlphaEncode.hs | 3-5% | Low | MEDIUM | |
+| IDCT/DCT batch conversions | IDCT.hs, DCT.hs | 3-5% | Low | MEDIUM | |
+| ColorConvert shiftR | ColorConvert.hs | 1-2% | Low | LOW | |
 | Huffman table build | PrefixCode.hs | 8-12% | High | LOW | |
+| Predict.hs INLINE pragmas | Predict.hs | 2-3% | Low | LOW | |
 
 **Estimated gains from completed optimizations:**
 - VP8L decoding: 50-80% faster
@@ -26,7 +35,8 @@ This document describes actionable performance improvements for the JuicyPixels-
 
 **Remaining potential gains:**
 - VP8L encoding: 30-50% faster (with MEDIUM priority fixes)
-- VP8 lossy encoding: 15-25% faster (with mode selection batching)
+- VP8 lossy encoding: 30-45% faster (with BoolDecoder + mode selection fixes)
+- Alpha channel: 13-20% faster (with Alpha.hs fast paths)
 
 ---
 
@@ -179,9 +189,133 @@ Index calculations now use pre-computed row bases and simple addition.
 
 ---
 
+## HIGH Priority (Remaining)
+
+### 7. BoolDecoder INLINE Pragmas
+
+**File:** `src/Codec/Picture/WebP/Internal/VP8/BoolDecoder.hs`
+
+**Issue:** The VP8 arithmetic decoder functions are called on every bit/symbol decode but lack INLINE pragmas:
+
+```haskell
+-- Missing INLINE on these hot functions:
+boolRead :: BoolDecoder -> Word8 -> (Bool, BoolDecoder)  -- line ~39
+boolLiteral :: Int -> BoolDecoder -> (Word32, BoolDecoder)  -- line ~63
+boolSigned :: Int -> BoolDecoder -> (Int32, BoolDecoder)  -- line ~74
+boolReadTree :: VU.Vector Int8 -> VU.Vector Word8 -> BoolDecoder -> (Int, BoolDecoder)  -- line ~84
+loadNewBytes :: BoolDecoder -> BoolDecoder  -- line ~25
+```
+
+These are called millions of times per VP8 lossy decode.
+
+**Solution:** Add `{-# INLINE #-}` pragmas to all hot-path functions.
+
+**Impact:** 5-10% speedup on VP8 lossy decoding.
+
+---
+
+### 8. Alpha Filtering Fast Paths
+
+**File:** `src/Codec/Picture/WebP/Internal/Alpha.hs`
+
+**Issue:** Alpha filtering performs boundary checks on every pixel:
+
+```haskell
+forM_ [0 .. height - 1] $ \y ->
+  forM_ [0 .. width - 1] $ \x -> do
+    let idx = y * width + x
+    left <- if x > 0 then VSM.read ... else return 0
+    top <- if y > 0 then VSM.read ... else return 0
+    ...
+```
+
+For a 1024×768 image, this does 786,432 boundary checks that could be avoided for interior pixels.
+
+**Solution:** Create separate loops for:
+1. First row (no top neighbor)
+2. First column (no left neighbor)
+3. Interior pixels (no boundary checks needed)
+
+```haskell
+-- Interior pixels: no bounds checks
+forM_ [1 .. height - 1] $ \y -> do
+  let rowBase = y * width
+      prevRowBase = (y - 1) * width
+  forM_ [1 .. width - 1] $ \x -> do
+    let idx = rowBase + x
+    left <- VSM.unsafeRead output (idx - 1)
+    top <- VSM.unsafeRead output (prevRowBase + x)
+    ...
+```
+
+**Impact:** 10-15% speedup on alpha channel decoding.
+
+---
+
+### 9. Quantize/Dequant Loop Optimization
+
+**Files:** `src/Codec/Picture/WebP/Internal/VP8/Quantize.hs`, `Dequant.hs`
+
+**Issue:** Coefficient loops recreate a list on every block:
+
+```haskell
+-- Called per 4x4 block (thousands of times per frame)
+mapM_
+  ( \i -> do
+      c <- VSM.read coeffs i
+      VSM.write coeffs i (quantizeCoeff c quant)
+  )
+  [1 .. 15]  -- List recreated and GC'd each block!
+```
+
+**Solution:** Use manual unrolling or strict indexing:
+
+```haskell
+-- Option 1: Manual unrolling for fixed-size loops
+let go !i
+      | i > 15 = return ()
+      | otherwise = do
+          c <- VSM.unsafeRead coeffs i
+          VSM.unsafeWrite coeffs i (quantizeCoeff c quant)
+          go (i + 1)
+go 1
+
+-- Option 2: Add INLINE pragma and use unsafeRead/unsafeWrite
+{-# INLINE quantizeBlock #-}
+quantizeBlock coeffs quant =
+  forM_ [1..15] $ \i -> do
+    c <- VSM.unsafeRead coeffs i
+    VSM.unsafeWrite coeffs i (quantizeCoeff c quant)
+```
+
+**Impact:** 5-10% speedup on VP8 lossy encoding/decoding (coefficient processing is a hot path).
+
+---
+
+### 10. Integer Division to Bit Shift
+
+**Files:** `src/Codec/Picture/WebP/Internal/VP8/BoolDecoder.hs`, `Coefficients.hs`
+
+**Issue:** Tree traversal uses integer division in tight loops:
+
+```haskell
+-- In boolReadTree (called per symbol decode):
+let probIdx = i `div` 2  -- Slow division
+```
+
+**Solution:** Replace with bit shift:
+
+```haskell
+let probIdx = i `shiftR` 1  -- Much faster
+```
+
+**Impact:** 2-5% speedup on VP8 lossy decoding (cumulative across all tree reads).
+
+---
+
 ## MEDIUM Priority (Remaining)
 
-### 7. Prefix Code Specialization
+### 11. Prefix Code Specialization
 
 **File:** `src/Codec/Picture/WebP/Internal/VP8L/PrefixCode.hs`
 
@@ -201,7 +335,7 @@ Index calculations now use pre-computed row bases and simple addition.
 
 ---
 
-### 8. Mode Selection Batching
+### 12. Mode Selection Batching
 
 **File:** `src/Codec/Picture/WebP/Internal/VP8/ModeSelection.hs`
 
@@ -222,7 +356,7 @@ Index calculations now use pre-computed row bases and simple addition.
 
 ---
 
-### 9. Huffman Sort Optimization
+### 13. Huffman Sort Optimization
 
 **File:** `src/Codec/Picture/WebP/Internal/VP8L/EncodeComplete.hs:196, 218`
 
@@ -249,7 +383,7 @@ sortedSymFreqs <- do
 
 ---
 
-### 10. Predictor Mode Early Exit
+### 14. Predictor Mode Early Exit
 
 **File:** `src/Codec/Picture/WebP/Internal/VP8L/PredictorEncode.hs:89-90`
 
@@ -282,25 +416,162 @@ go !bestMode !bestSAD !mode
 
 ---
 
-## LOW Priority (Remaining)
+### 15. Animation Loop Optimization
 
-### 11. IDCT/DCT Optimization
+**File:** `src/Codec/Picture/WebP/Internal/Animation.hs:217, 239`
 
-**Files:** `src/Codec/Picture/WebP/Internal/VP8/IDCT.hs`, `DCT.hs`
+**Issue:** Frame compositing recalculates row bases on every pixel:
 
-**Issue:** 8 separate read/write calls per 4x4 block.
+```haskell
+mapM_ (\fy -> mapM_ (composePixel fy) [0 .. frameWidth - 1]) [0 .. frameHeight - 1]
 
-**Improvements:**
+-- Inside composePixel:
+let canvasIdx = (canvasY * canvasWidth + canvasX) * 4  -- Recalculated per pixel!
+    frameIdx = (fy * frameWidth + fx) * 4
+```
 
-1. **Load-operate-store batching:** Load all 16 coefficients, operate, store back.
+**Solution:** Pre-compute row base before inner loop:
 
-2. **Inline constants:** Pre-compute common products.
+```haskell
+forM_ [0 .. frameHeight - 1] $ \fy -> do
+  let !frameRowBase = fy * frameWidth * 4
+      !canvasRowBase = ((frameY + fy) * canvasWidth + frameX) * 4
+  forM_ [0 .. frameWidth - 1] $ \fx -> do
+    let !frameIdx = frameRowBase + fx * 4
+        !canvasIdx = canvasRowBase + fx * 4
+    -- compose pixel...
+```
 
-**Impact:** 3-5% for VP8 lossy.
+**Impact:** 8-12% speedup on animation frame compositing.
 
 ---
 
-### 12. Huffman Table Construction
+### 16. BitWriter Optimization
+
+**File:** `src/Codec/Picture/WebP/Internal/BitWriter.hs:45-51`
+
+**Issue:** Recursive bit-by-bit writing:
+
+```haskell
+writeBits :: Int -> Word64 -> BitWriter -> BitWriter
+writeBits 0 _ writer = writer
+writeBits numBits value writer =
+  let bit = (value .&. 1) /= 0
+      value' = value `shiftR` 1
+      writer' = writeBit bit writer  -- Intermediate BitWriter created
+   in writeBits (numBits - 1) value' writer'
+```
+
+This creates numBits intermediate BitWriter values.
+
+**Solution:** Write bits in batches when possible:
+
+```haskell
+{-# INLINE writeBits #-}
+writeBits :: Int -> Word64 -> BitWriter -> BitWriter
+writeBits !n !value !writer
+  | n <= 0 = writer
+  | n <= remaining = -- Fast path: fits in current byte
+      let newBits = bits .|. (value `shiftL` bitPos)
+          newPos = bitPos + n
+      in if newPos >= 8
+           then flushByte ...
+           else writer { bwBits = newBits, bwBitPos = newPos }
+  | otherwise = -- Slow path: spans bytes
+      writeBitsSlow n value writer
+```
+
+**Impact:** 5-8% speedup on VP8L encoding (bitstream writing).
+
+---
+
+### 17. AlphaEncode Row-Base Pre-computation
+
+**File:** `src/Codec/Picture/WebP/Internal/AlphaEncode.hs:34-39`
+
+**Issue:** Index calculation repeated per pixel:
+
+```haskell
+forM_ [0 .. height - 1] $ \y ->
+  forM_ [0 .. width - 1] $ \x -> do
+    let pixelIdx = (y * width + x) * 4  -- Multiplication per pixel
+        alphaIdx = y * width + x
+    ...
+```
+
+**Solution:** Pre-compute row base:
+
+```haskell
+forM_ [0 .. height - 1] $ \y -> do
+  let !rowBase = y * width
+  forM_ [0 .. width - 1] $ \x -> do
+    let !pixelIdx = (rowBase + x) * 4
+        !alphaIdx = rowBase + x
+    ...
+```
+
+**Impact:** 3-5% speedup on alpha encoding.
+
+---
+
+### 18. IDCT/DCT Batch Read Conversions
+
+**Files:** `src/Codec/Picture/WebP/Internal/VP8/IDCT.hs`, `DCT.hs`
+
+**Issue:** Multiple separate fromIntegral conversions:
+
+```haskell
+-- Each read and convert is separate:
+c0 <- fromIntegral <$> VSM.read coeffs (0 * 4 + col)
+c1 <- fromIntegral <$> VSM.read coeffs (1 * 4 + col)
+c2 <- fromIntegral <$> VSM.read coeffs (2 * 4 + col)
+c3 <- fromIntegral <$> VSM.read coeffs (3 * 4 + col)
+```
+
+**Solution:** Batch reads then convert:
+
+```haskell
+-- Read all raw values first
+c0raw <- VSM.unsafeRead coeffs (col)
+c1raw <- VSM.unsafeRead coeffs (4 + col)
+c2raw <- VSM.unsafeRead coeffs (8 + col)
+c3raw <- VSM.unsafeRead coeffs (12 + col)
+-- Convert in batch with strictness
+let !c0 = fromIntegral c0raw :: Int
+    !c1 = fromIntegral c1raw :: Int
+    !c2 = fromIntegral c2raw :: Int
+    !c3 = fromIntegral c3raw :: Int
+```
+
+**Impact:** 3-5% speedup on IDCT/DCT operations.
+
+---
+
+## LOW Priority (Remaining)
+
+### 19. ColorConvert Bit Shifts
+
+**File:** `src/Codec/Picture/WebP/Internal/VP8/ColorConvert.hs:72-73`
+
+**Issue:** Integer division in tight loop:
+
+```haskell
+let chromaX = x `div` 2
+    chromaY = y `div` 2
+```
+
+**Solution:** Use bit shifts:
+
+```haskell
+let chromaX = x `shiftR` 1
+    chromaY = y `shiftR` 1
+```
+
+**Impact:** 1-2% speedup on RGB to YCbCr conversion.
+
+---
+
+### 20. Huffman Table Construction
 
 **File:** `src/Codec/Picture/WebP/Internal/VP8L/PrefixCode.hs`
 
@@ -313,6 +584,28 @@ go !bestMode !bestSAD !mode
 2. **Flatten loops:** Use work queue instead of 3-level nesting.
 
 **Impact:** 8-12% speedup on lossless encode.
+
+---
+
+### 21. VP8 Predict INLINE Pragmas
+
+**File:** `src/Codec/Picture/WebP/Internal/VP8/Predict.hs`
+
+**Issue:** `readPixel` and `writePixel` helper functions lack INLINE pragmas:
+
+```haskell
+readPixel :: VSM.MVector s Word8 -> Int -> (Int, Int) -> ST s Word8
+readPixel plane stride (x, y) = VSM.read plane (y * stride + x)
+
+writePixel :: VSM.MVector s Word8 -> Int -> (Int, Int) -> Word8 -> ST s ()
+writePixel plane stride (x, y) val = VSM.write plane (y * stride + x) val
+```
+
+These are called in tight loops for intra prediction (predict16x16V, predict16x16H, etc.).
+
+**Solution:** Add `{-# INLINE #-}` pragmas.
+
+**Impact:** 2-3% speedup on VP8 intra prediction.
 
 ---
 
