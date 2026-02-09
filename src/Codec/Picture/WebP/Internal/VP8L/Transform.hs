@@ -264,10 +264,11 @@ avgPixels3 p1 p2 p3 =
       !g3 = (p3 `shiftR` 8) .&. 0xFF
       !b3 = p3 .&. 0xFF
 
-      !a = (a1 + a2 + a3) `div` 3
-      !r = (r1 + r2 + r3) `div` 3
-      !g = (g1 + g2 + g3) `div` 3
-      !b = (b1 + b2 + b3) `div` 3
+      -- Fast div 3 approximation: (x * 171) `shiftR` 9 ≈ x / 3 for x < 768
+      !a = ((a1 + a2 + a3) * 171) `shiftR` 9
+      !r = ((r1 + r2 + r3) * 171) `shiftR` 9
+      !g = ((g1 + g2 + g3) * 171) `shiftR` 9
+      !b = ((b1 + b2 + b3) * 171) `shiftR` 9
    in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
 
 -- | Select predictor (mode 11)

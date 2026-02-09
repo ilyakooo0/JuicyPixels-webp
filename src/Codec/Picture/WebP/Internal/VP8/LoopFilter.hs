@@ -63,7 +63,7 @@ applyNormalLoopFilter header yPlane width height = do
 
   forM_ [0, 16 .. height - 1] $ \y ->
     forM_ [4, 8 .. width - 1] $ \x ->
-      when (x `mod` 16 /= 0) $
+      when ((x .&. 15) /= 0) $  -- x `mod` 16 /= 0
         filterNormalVEdgeSub yPlane width (x, y) subEdgeLimit hevThresh
 
   forM_ [16, 32 .. height - 1] $ \y ->
@@ -72,7 +72,7 @@ applyNormalLoopFilter header yPlane width height = do
 
   forM_ [4, 8 .. height - 1] $ \y ->
     forM_ [0, 16 .. width - 1] $ \x ->
-      when (y `mod` 16 /= 0) $
+      when ((y .&. 15) /= 0) $  -- y `mod` 16 /= 0
         filterNormalHEdgeSub yPlane width (x, y) subEdgeLimit hevThresh
 
 -- Simple filter functions

@@ -391,7 +391,7 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
                         color <- VSM.unsafeRead out (pos + i)
                         insertColorM color cache
                       -- Always insert the last pixel to ensure cache coherency
-                      when (actualLen > 0 && (actualLen - 1) `mod` 8 /= 0) $ do
+                      when (actualLen > 0 && ((actualLen - 1) .&. 7) /= 0) $ do
                         lastColor <- VSM.unsafeRead out (pos + actualLen - 1)
                         insertColorM lastColor cache
                     loop (pos + actualLen) r
