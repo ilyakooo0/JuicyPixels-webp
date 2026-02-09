@@ -16,8 +16,8 @@ import Data.Word
 -- | Apply loop filter to reconstructed frame
 applyLoopFilter :: VP8FrameHeader -> VSM.MVector s Word8 -> Int -> Int -> ST s ()
 applyLoopFilter header yPlane width height = do
-  let filterLevel = vp8FilterLevel header
-      filterType = vp8FilterType header
+  let !filterLevel = vp8FilterLevel header
+      !filterType = vp8FilterType header
 
   when (filterLevel > 0) $ do
     if filterType == 1
@@ -27,16 +27,17 @@ applyLoopFilter header yPlane width height = do
 -- | Apply simple loop filter (Y plane only)
 applySimpleLoopFilter :: VSM.MVector s Word8 -> Int -> Int -> Int -> ST s ()
 applySimpleLoopFilter yPlane width height filterLevel = do
-  let limit = filterLevel * 2 + filterLevel
-      hevThresh = if filterLevel >= 40 then 2 else if filterLevel >= 15 then 1 else 0
+  let !limit = filterLevel * 2 + filterLevel
+      !hevThresh = if filterLevel >= 40 then 2 else if filterLevel >= 15 then 1 else 0
+      !planeLen = VSM.length yPlane
 
   forM_ [0, 16 .. height - 1] $ \y ->
     forM_ [16, 32 .. width - 1] $ \x ->
-      filterSimpleVEdge yPlane width (x, y) limit hevThresh
+      filterSimpleVEdgeFast yPlane width planeLen (x, y) limit hevThresh
 
   forM_ [16, 32 .. height - 1] $ \y ->
     forM_ [0, 16 .. width - 1] $ \x ->
-      filterSimpleHEdge yPlane width (x, y) limit hevThresh
+      filterSimpleHEdgeFast yPlane width planeLen (x, y) limit hevThresh
 
 -- | Apply normal loop filter (Y, U, V planes)
 applyNormalLoopFilter :: VP8FrameHeader -> VSM.MVector s Word8 -> Int -> Int -> ST s ()
@@ -76,6 +77,47 @@ applyNormalLoopFilter header yPlane width height = do
 
 -- Simple filter functions
 
+-- | Fast vertical edge filter for interior pixels (skips bounds checks)
+{-# INLINE filterSimpleVEdgeFast #-}
+filterSimpleVEdgeFast :: VSM.MVector s Word8 -> Int -> Int -> (Int, Int) -> Int -> Int -> ST s ()
+filterSimpleVEdgeFast plane stride planeLen (x, y) limit _hevThresh = do
+  forM_ [0 .. 15] $ \i -> do
+    let !py = y + i
+        !baseIdx = py * stride + x
+    -- Check if all indices are in bounds
+    when (baseIdx - 2 >= 0 && baseIdx + 1 < planeLen) $ do
+      p1 <- VSM.unsafeRead plane (baseIdx - 2)
+      p0 <- VSM.unsafeRead plane (baseIdx - 1)
+      q0 <- VSM.unsafeRead plane baseIdx
+      q1 <- VSM.unsafeRead plane (baseIdx + 1)
+
+      when (needsFiltering p1 p0 q0 q1 limit) $ do
+        let (!p0', !q0') = simpleFilter p0 q0 p1 q1
+        VSM.unsafeWrite plane (baseIdx - 1) p0'
+        VSM.unsafeWrite plane baseIdx q0'
+
+-- | Fast horizontal edge filter for interior pixels (skips bounds checks)
+{-# INLINE filterSimpleHEdgeFast #-}
+filterSimpleHEdgeFast :: VSM.MVector s Word8 -> Int -> Int -> (Int, Int) -> Int -> Int -> ST s ()
+filterSimpleHEdgeFast plane stride planeLen (x, y) limit _hevThresh = do
+  forM_ [0 .. 15] $ \i -> do
+    let !px = x + i
+        !baseIdx = y * stride + px
+        !idx_m2 = (y - 2) * stride + px
+        !idx_m1 = (y - 1) * stride + px
+        !idx_p1 = (y + 1) * stride + px
+    -- Check if all indices are in bounds
+    when (idx_m2 >= 0 && idx_p1 < planeLen) $ do
+      p1 <- VSM.unsafeRead plane idx_m2
+      p0 <- VSM.unsafeRead plane idx_m1
+      q0 <- VSM.unsafeRead plane baseIdx
+      q1 <- VSM.unsafeRead plane idx_p1
+
+      when (needsFiltering p1 p0 q0 q1 limit) $ do
+        let (!p0', !q0') = simpleFilter p0 q0 p1 q1
+        VSM.unsafeWrite plane idx_m1 p0'
+        VSM.unsafeWrite plane baseIdx q0'
+
 filterSimpleVEdge :: VSM.MVector s Word8 -> Int -> (Int, Int) -> Int -> Int -> ST s ()
 filterSimpleVEdge plane stride (x, y) limit _hevThresh = do
   forM_ [0 .. 15] $ \i -> do
@@ -104,22 +146,26 @@ filterSimpleHEdge plane stride (x, y) limit _hevThresh = do
       writePlane plane stride (px, y - 1) p0'
       writePlane plane stride (px, y + 0) q0'
 
+{-# INLINE needsFiltering #-}
 needsFiltering :: Word8 -> Word8 -> Word8 -> Word8 -> Int -> Bool
 needsFiltering p1 p0 q0 q1 limit =
-  let test1 = abs (fromIntegral q0 - fromIntegral p0 :: Int) * 2 + (abs (fromIntegral p1 - fromIntegral q1 :: Int) `shiftR` 1)
+  let !test1 = abs (fromIntegral q0 - fromIntegral p0 :: Int) * 2 + (abs (fromIntegral p1 - fromIntegral q1 :: Int) `shiftR` 1)
    in test1 <= limit
 
+{-# INLINE simpleFilter #-}
 simpleFilter :: Word8 -> Word8 -> Word8 -> Word8 -> (Word8, Word8)
 simpleFilter p0 q0 p1 q1 =
-  let a = (fromIntegral p1 - fromIntegral q1) :: Int
-      w = clip (3 * (fromIntegral q0 - fromIntegral p0) + a)
-      filter1 = clip ((w + 4) `shiftR` 3)
-      filter2 = clip ((w + 3) `shiftR` 3)
-      p0' = clip255 (fromIntegral p0 + filter2)
-      q0' = clip255 (fromIntegral q0 - filter1)
+  let !a = (fromIntegral p1 - fromIntegral q1) :: Int
+      !w = clipFilter (3 * (fromIntegral q0 - fromIntegral p0) + a)
+      !filter1 = clipFilter ((w + 4) `shiftR` 3)
+      !filter2 = clipFilter ((w + 3) `shiftR` 3)
+      !p0' = clip255 (fromIntegral p0 + filter2)
+      !q0' = clip255 (fromIntegral q0 - filter1)
    in (p0', q0')
-  where
-    clip x = max (-128) (min 127 x)
+
+{-# INLINE clipFilter #-}
+clipFilter :: Int -> Int
+clipFilter x = max (-128) (min 127 x)
 
 -- Normal filter functions
 
@@ -235,69 +281,72 @@ filterNormalHEdgeSub plane stride (x, y) limit hevThresh = do
           writePlane plane stride (px, y + 0) q0'
           writePlane plane stride (px, y + 1) q1'
 
+{-# INLINE needsFilteringNormal #-}
 needsFilteringNormal :: Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Int -> Bool
 needsFilteringNormal p3 p2 p1 p0 q0 q1 q2 q3 limit =
-  let test1 = abs (fromIntegral p0 - fromIntegral q0 :: Int) * 2 + (abs (fromIntegral p1 - fromIntegral q1 :: Int) `shiftR` 1)
-      test2 = abs (fromIntegral p3 - fromIntegral p2 :: Int) <= limit
-      test3 = abs (fromIntegral p2 - fromIntegral p1 :: Int) <= limit
-      test4 = abs (fromIntegral p1 - fromIntegral p0 :: Int) <= limit
-      test5 = abs (fromIntegral q3 - fromIntegral q2 :: Int) <= limit
-      test6 = abs (fromIntegral q2 - fromIntegral q1 :: Int) <= limit
-      test7 = abs (fromIntegral q1 - fromIntegral q0 :: Int) <= limit
-   in test1 <= limit && test2 && test3 && test4 && test5 && test6 && test7
+  let !test1 = abs (fromIntegral p0 - fromIntegral q0 :: Int) * 2 + (abs (fromIntegral p1 - fromIntegral q1 :: Int) `shiftR` 1)
+   in test1 <= limit
+        && abs (fromIntegral p3 - fromIntegral p2 :: Int) <= limit
+        && abs (fromIntegral p2 - fromIntegral p1 :: Int) <= limit
+        && abs (fromIntegral p1 - fromIntegral p0 :: Int) <= limit
+        && abs (fromIntegral q3 - fromIntegral q2 :: Int) <= limit
+        && abs (fromIntegral q2 - fromIntegral q1 :: Int) <= limit
+        && abs (fromIntegral q1 - fromIntegral q0 :: Int) <= limit
 
+{-# INLINE isHighEdgeVariance #-}
 isHighEdgeVariance :: Word8 -> Word8 -> Word8 -> Word8 -> Int -> Bool
 isHighEdgeVariance p1 p0 q0 q1 thresh =
   abs (fromIntegral p1 - fromIntegral p0 :: Int) > thresh || abs (fromIntegral q1 - fromIntegral q0 :: Int) > thresh
 
+{-# INLINE subblockFilter #-}
 subblockFilter :: Word8 -> Word8 -> Word8 -> Word8 -> (Word8, Word8, Word8, Word8)
 subblockFilter p1 p0 q0 q1 =
-  let a = (fromIntegral p1 - fromIntegral q1) :: Int
-      w = clip (3 * (fromIntegral q0 - fromIntegral p0) + a)
-      filter1 = clip ((w + 4) `shiftR` 3)
-      filter2 = clip ((w + 3) `shiftR` 3)
-      p0' = clip255 (fromIntegral p0 + filter2)
-      q0' = clip255 (fromIntegral q0 - filter1)
+  let !a = (fromIntegral p1 - fromIntegral q1) :: Int
+      !w = clipFilter (3 * (fromIntegral q0 - fromIntegral p0) + a)
+      !filter1 = clipFilter ((w + 4) `shiftR` 3)
+      !filter2 = clipFilter ((w + 3) `shiftR` 3)
+      !p0' = clip255 (fromIntegral p0 + filter2)
+      !q0' = clip255 (fromIntegral q0 - filter1)
 
-      a1 = (filter1 + 1) `shiftR` 1
-      p1' = clip255 (fromIntegral p1 + a1)
-      q1' = clip255 (fromIntegral q1 - a1)
+      !a1 = (filter1 + 1) `shiftR` 1
+      !p1' = clip255 (fromIntegral p1 + a1)
+      !q1' = clip255 (fromIntegral q1 - a1)
    in (p1', p0', q0', q1')
-  where
-    clip x = max (-128) (min 127 x)
 
+{-# INLINE mbFilter #-}
 mbFilter :: Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> (Word8, Word8, Word8, Word8, Word8, Word8)
 mbFilter p2 p1 p0 q0 q1 q2 =
-  let w = clip (3 * (fromIntegral q0 - fromIntegral p0 :: Int))
-      a = (27 * w + 63) `shiftR` 7
+  let !w = clipFilter (3 * (fromIntegral q0 - fromIntegral p0 :: Int))
+      !a = (27 * w + 63) `shiftR` 7
 
-      p2' = clip255 (fromIntegral p2 + ((9 * w + 63) `shiftR` 7))
-      p1' = clip255 (fromIntegral p1 + ((18 * w + 63) `shiftR` 7))
-      p0' = clip255 (fromIntegral p0 + a)
-      q0' = clip255 (fromIntegral q0 - a)
-      q1' = clip255 (fromIntegral q1 - ((18 * w + 63) `shiftR` 7))
-      q2' = clip255 (fromIntegral q2 - ((9 * w + 63) `shiftR` 7))
+      !p2' = clip255 (fromIntegral p2 + ((9 * w + 63) `shiftR` 7))
+      !p1' = clip255 (fromIntegral p1 + ((18 * w + 63) `shiftR` 7))
+      !p0' = clip255 (fromIntegral p0 + a)
+      !q0' = clip255 (fromIntegral q0 - a)
+      !q1' = clip255 (fromIntegral q1 - ((18 * w + 63) `shiftR` 7))
+      !q2' = clip255 (fromIntegral q2 - ((9 * w + 63) `shiftR` 7))
    in (p2', p1', p0', q0', q1', q2')
-  where
-    clip x = max (-128) (min 127 x)
 
 -- Helper functions
 
+{-# INLINE readPlane #-}
 readPlane :: VSM.MVector s Word8 -> Int -> (Int, Int) -> ST s Word8
 readPlane plane stride (x, y)
   | x < 0 || y < 0 = return 0
   | otherwise = do
-      let idx = y * stride + x
+      let !idx = y * stride + x
       if idx >= 0 && idx < VSM.length plane
-        then VSM.read plane idx
+        then VSM.unsafeRead plane idx
         else return 0
 
+{-# INLINE writePlane #-}
 writePlane :: VSM.MVector s Word8 -> Int -> (Int, Int) -> Word8 -> ST s ()
 writePlane plane stride (x, y) val = do
-  let idx = y * stride + x
+  let !idx = y * stride + x
   when (idx >= 0 && idx < VSM.length plane) $
-    VSM.write plane idx val
+    VSM.unsafeWrite plane idx val
 
+{-# INLINE clip255 #-}
 clip255 :: Int -> Word8
 clip255 x
   | x < 0 = 0
