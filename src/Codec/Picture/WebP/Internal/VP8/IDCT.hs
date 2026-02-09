@@ -41,10 +41,11 @@ idct4x4 coeffs = do
 {-# INLINE idctColumn #-}
 idctColumn :: VSM.MVector s Int16 -> Int -> ST s ()
 idctColumn coeffs col = do
-  i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (0 * 4 + col)
-  i1 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (1 * 4 + col)
-  i2 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (2 * 4 + col)
-  i3 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (3 * 4 + col)
+  -- Indices 0-15 are always valid for 4x4 block, use unsafeRead
+  i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (0 * 4 + col)
+  i1 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (1 * 4 + col)
+  i2 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (2 * 4 + col)
+  i3 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (3 * 4 + col)
 
   let a1 = i0 + i2
       b1 = i0 - i2
@@ -62,19 +63,20 @@ idctColumn coeffs col = do
       o2 = b1 - c1
       o3 = a1 - d1
 
-  VSM.write coeffs (0 * 4 + col) (fromIntegral o0)
-  VSM.write coeffs (1 * 4 + col) (fromIntegral o1)
-  VSM.write coeffs (2 * 4 + col) (fromIntegral o2)
-  VSM.write coeffs (3 * 4 + col) (fromIntegral o3)
+  VSM.unsafeWrite coeffs (0 * 4 + col) (fromIntegral o0)
+  VSM.unsafeWrite coeffs (1 * 4 + col) (fromIntegral o1)
+  VSM.unsafeWrite coeffs (2 * 4 + col) (fromIntegral o2)
+  VSM.unsafeWrite coeffs (3 * 4 + col) (fromIntegral o3)
 
 -- | IDCT row transformation (with rounding)
 {-# INLINE idctRow #-}
 idctRow :: VSM.MVector s Int16 -> Int -> ST s ()
 idctRow coeffs row = do
-  i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (row * 4 + 0)
-  i1 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (row * 4 + 1)
-  i2 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (row * 4 + 2)
-  i3 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (row * 4 + 3)
+  -- Indices 0-15 are always valid for 4x4 block, use unsafeRead
+  i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (row * 4 + 0)
+  i1 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (row * 4 + 1)
+  i2 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (row * 4 + 2)
+  i3 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (row * 4 + 3)
 
   let a1 = i0 + i2
       b1 = i0 - i2
@@ -92,10 +94,10 @@ idctRow coeffs row = do
       o2 = (b1 - c1 + 4) `shiftR` 3
       o3 = (a1 - d1 + 4) `shiftR` 3
 
-  VSM.write coeffs (row * 4 + 0) (fromIntegral o0)
-  VSM.write coeffs (row * 4 + 1) (fromIntegral o1)
-  VSM.write coeffs (row * 4 + 2) (fromIntegral o2)
-  VSM.write coeffs (row * 4 + 3) (fromIntegral o3)
+  VSM.unsafeWrite coeffs (row * 4 + 0) (fromIntegral o0)
+  VSM.unsafeWrite coeffs (row * 4 + 1) (fromIntegral o1)
+  VSM.unsafeWrite coeffs (row * 4 + 2) (fromIntegral o2)
+  VSM.unsafeWrite coeffs (row * 4 + 3) (fromIntegral o3)
 
 -- | Walsh-Hadamard Transform for Y2 DC block
 -- Returns 16 DC values to be distributed to Y subblocks
@@ -121,10 +123,10 @@ iwht4x4 coeffs = do
 {-# INLINE whtRow #-}
 whtRow :: VSM.MVector s Int16 -> Int -> ST s ()
 whtRow coeffs row = do
-  i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (row * 4 + 0)
-  i1 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (row * 4 + 1)
-  i2 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (row * 4 + 2)
-  i3 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (row * 4 + 3)
+  i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (row * 4 + 0)
+  i1 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (row * 4 + 1)
+  i2 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (row * 4 + 2)
+  i3 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (row * 4 + 3)
 
   let a = i0 + i3
       b = i1 + i2
@@ -137,19 +139,19 @@ whtRow coeffs row = do
       o2 = a - b
       o3 = d - c
 
-  VSM.write coeffs (row * 4 + 0) (fromIntegral o0)
-  VSM.write coeffs (row * 4 + 1) (fromIntegral o1)
-  VSM.write coeffs (row * 4 + 2) (fromIntegral o2)
-  VSM.write coeffs (row * 4 + 3) (fromIntegral o3)
+  VSM.unsafeWrite coeffs (row * 4 + 0) (fromIntegral o0)
+  VSM.unsafeWrite coeffs (row * 4 + 1) (fromIntegral o1)
+  VSM.unsafeWrite coeffs (row * 4 + 2) (fromIntegral o2)
+  VSM.unsafeWrite coeffs (row * 4 + 3) (fromIntegral o3)
 
 -- | WHT column transformation (divide by 8 per RFC 6386 - second pass)
 {-# INLINE whtColumn #-}
 whtColumn :: VSM.MVector s Int16 -> Int -> ST s ()
 whtColumn coeffs col = do
-  i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (0 * 4 + col)
-  i1 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (1 * 4 + col)
-  i2 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (2 * 4 + col)
-  i3 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (3 * 4 + col)
+  i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (0 * 4 + col)
+  i1 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (1 * 4 + col)
+  i2 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (2 * 4 + col)
+  i3 <- (fromIntegral :: Int16 -> Int) <$> VSM.unsafeRead coeffs (3 * 4 + col)
 
   let a = i0 + i3
       b = i1 + i2
@@ -162,7 +164,7 @@ whtColumn coeffs col = do
       o2 = (a - b + 3) `shiftR` 3
       o3 = (d - c + 3) `shiftR` 3
 
-  VSM.write coeffs (0 * 4 + col) (fromIntegral o0)
-  VSM.write coeffs (1 * 4 + col) (fromIntegral o1)
-  VSM.write coeffs (2 * 4 + col) (fromIntegral o2)
-  VSM.write coeffs (3 * 4 + col) (fromIntegral o3)
+  VSM.unsafeWrite coeffs (0 * 4 + col) (fromIntegral o0)
+  VSM.unsafeWrite coeffs (1 * 4 + col) (fromIntegral o1)
+  VSM.unsafeWrite coeffs (2 * 4 + col) (fromIntegral o2)
+  VSM.unsafeWrite coeffs (3 * 4 + col) (fromIntegral o3)

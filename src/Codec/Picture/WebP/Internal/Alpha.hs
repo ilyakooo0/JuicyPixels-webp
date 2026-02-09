@@ -81,7 +81,7 @@ applyHorizontalFilter width height alphaData output = do
       let !idx = rowBase + x
           !encoded = alphaData `VS.unsafeIndex` idx
       !left <- VSM.unsafeRead output (idx - 1)
-      let !decoded = fromIntegral ((fromIntegral encoded + fromIntegral left) `mod` (256 :: Int) :: Int) :: Word8
+      let !decoded = fromIntegral ((fromIntegral encoded + fromIntegral left) .&. 0xFF :: Int) :: Word8
       VSM.unsafeWrite output idx decoded
 
 -- | Vertical filter: above prediction (filter method 2)
@@ -102,7 +102,7 @@ applyVerticalFilter width height alphaData output = do
       let !idx = rowBase + x
           !encoded = alphaData `VS.unsafeIndex` idx
       !above <- VSM.unsafeRead output (prevRowBase + x)
-      let !decoded = fromIntegral ((fromIntegral encoded + fromIntegral above) `mod` (256 :: Int) :: Int) :: Word8
+      let !decoded = fromIntegral ((fromIntegral encoded + fromIntegral above) .&. 0xFF :: Int) :: Word8
       VSM.unsafeWrite output idx decoded
 
 -- | Gradient filter: left + above - above_left prediction (filter method 3)
@@ -117,7 +117,7 @@ applyGradientFilter width height alphaData output = do
   forM_ [1 .. width - 1] $ \x -> do
     let !encoded = alphaData `VS.unsafeIndex` x
     !left <- VSM.unsafeRead output (x - 1)
-    let !decoded = fromIntegral ((fromIntegral encoded + fromIntegral left) `mod` (256 :: Int) :: Int) :: Word8
+    let !decoded = fromIntegral ((fromIntegral encoded + fromIntegral left) .&. 0xFF :: Int) :: Word8
     VSM.unsafeWrite output x decoded
 
   -- First column (except first pixel): only above neighbor
@@ -125,7 +125,7 @@ applyGradientFilter width height alphaData output = do
     let !idx = y * width
         !encoded = alphaData `VS.unsafeIndex` idx
     !above <- VSM.unsafeRead output ((y - 1) * width)
-    let !decoded = fromIntegral ((fromIntegral encoded + fromIntegral above) `mod` (256 :: Int) :: Int) :: Word8
+    let !decoded = fromIntegral ((fromIntegral encoded + fromIntegral above) .&. 0xFF :: Int) :: Word8
     VSM.unsafeWrite output idx decoded
 
   -- Interior pixels: all neighbors available (no boundary checks!)
@@ -140,7 +140,7 @@ applyGradientFilter width height alphaData output = do
         !above <- VSM.unsafeRead output (prevRowBase + x)
         !aboveLeft <- VSM.unsafeRead output (prevRowBase + x - 1)
         let !pred = clip255Int (fromIntegral left + fromIntegral above - fromIntegral aboveLeft)
-            !decoded = fromIntegral ((fromIntegral encoded + pred) `mod` (256 :: Int) :: Int) :: Word8
+            !decoded = fromIntegral ((fromIntegral encoded + pred) .&. 0xFF :: Int) :: Word8
         VSM.unsafeWrite output idx decoded
 
 {-# INLINE clip255Int #-}

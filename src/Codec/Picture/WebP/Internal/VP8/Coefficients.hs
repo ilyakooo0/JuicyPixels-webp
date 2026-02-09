@@ -17,6 +17,8 @@ import qualified Data.Vector.Unboxed as VU
 import Data.Word
 
 -- Performance: INLINE pragmas on hot-path functions
+-- Optimized: boolReadTreeDirect reads probabilities directly from unboxed vector
+-- to eliminate V.generate allocation per token
 
 -- | Decode DCT coefficients for a 4x4 block
 -- Returns: (coefficients, has_nonzero, updated decoder)
@@ -34,50 +36,56 @@ decodeCoefficients decoder coeffProbs blockType initialCtx startPos = do
         | pos >= 16 = do
             return (coeffs, hasNonzero, d)
         | otherwise = do
-            let band = coeffBands VU.! pos
-                probIdx = blockType * 264 + band * 33 + ctx * 11
+            let !band = coeffBands `VU.unsafeIndex` pos
+                !probIdx = blockType * 264 + band * 33 + ctx * 11
 
             -- When skipEOB is True, we skip the first bit (EOB decision) and start
             -- at the subtree for non-EOB tokens. The tree structure after EOB is
             -- at index 2, and we skip the first probability.
-            let (token, d1) =
+            let (!token, !d1) =
                   if skipEOB
-                    then boolReadTreeAt coeffTree 2 (getCoeffProbs coeffProbs probIdx 1) d
-                    else boolReadTree coeffTree (getCoeffProbs coeffProbs probIdx 0) d
+                    then boolReadTreeDirect coeffTreeU coeffProbs 2 (probIdx + 1) 10 d
+                    else boolReadTreeDirect coeffTreeU coeffProbs 0 probIdx 11 d
 
             case token of
               0 -> loop (pos + 1) 0 d1 hasNonzero True
               11 ->
                 return (coeffs, hasNonzero, d1)
               _ -> do
-                let (value, d2) = decodeCoeffValue token d1
-                    zigzagPos = zigzag VU.! pos
-                VSM.write coeffs zigzagPos value
-                let newCtx = if abs value == 1 then 1 else 2
+                let (!value, !d2) = decodeCoeffValue token d1
+                    !zigzagPos = zigzag `VU.unsafeIndex` pos
+                VSM.unsafeWrite coeffs zigzagPos value
+                let !newCtx = if abs value == 1 then 1 else 2
                 loop (pos + 1) newCtx d2 True False
 
   loop startPos initialCtx decoder False False
 
--- | Read tree starting at a specific node index (for skipEOB)
-{-# INLINE boolReadTreeAt #-}
-boolReadTreeAt :: V.Vector Int8 -> Int -> V.Vector Word8 -> BoolDecoder -> (Int, BoolDecoder)
-boolReadTreeAt tree startIdx probs decoder = go startIdx 0 decoder
+-- | Unboxed version of coeffTree for faster access
+{-# NOINLINE coeffTreeU #-}
+coeffTreeU :: VU.Vector Int8
+coeffTreeU = VU.fromList $ V.toList coeffTree
+
+-- | Read tree directly from unboxed probability vector (eliminates V.generate allocation)
+-- Takes: tree, probs vector, tree start index, prob base index, max probs to read, decoder
+{-# INLINE boolReadTreeDirect #-}
+boolReadTreeDirect :: VU.Vector Int8 -> VU.Vector Word8 -> Int -> Int -> Int -> BoolDecoder -> (Int, BoolDecoder)
+boolReadTreeDirect tree probs startIdx probBase maxProbs decoder = go startIdx 0 decoder
   where
-    go !i !probIdx !d
-      | probIdx >= V.length probs =
+    go !i !probOffset !d
+      | probOffset >= maxProbs =
           -- No more probabilities, take left branch by default
-          let node = tree V.! i
+          let !node = tree `VU.unsafeIndex` i
            in if node <= 0
                 then (if node == 0 then 0 else fromIntegral (negate node), d)
-                else go (fromIntegral node) probIdx d
+                else go (fromIntegral node) probOffset d
       | otherwise =
-          let prob = probs V.! probIdx
-              (bit, d') = boolRead prob d
-              idx = i + if bit then 1 else 0
-              node = tree V.! idx
+          let !prob = probs `VU.unsafeIndex` (probBase + probOffset)
+              (!bit, !d') = boolRead prob d
+              !idx = i + if bit then 1 else 0
+              !node = tree `VU.unsafeIndex` idx
            in if node <= 0
                 then (if node == 0 then 0 else fromIntegral (negate node), d')
-                else go (fromIntegral node) (probIdx + 1) d'
+                else go (fromIntegral node) (probOffset + 1) d'
 
 -- | Decode coefficient value from token
 {-# INLINE decodeCoeffValue #-}
@@ -96,90 +104,90 @@ decodeCoeffValue token decoder
   | otherwise = (0, decoder)
 
 -- | Decode CAT1 (5-6)
+{-# INLINE decodeCat1 #-}
 decodeCat1 :: BoolDecoder -> (Int16, BoolDecoder)
 decodeCat1 decoder =
-  let probs = pcatProbs V.! 0
-      (bit0, d1) = boolRead (probs VU.! 0) decoder
-      value = 5 + if bit0 then 1 else 0
-      (sign, d2) = boolRead 128 d1
+  let (!bit0, !d1) = boolRead (pcatProbs1 `VU.unsafeIndex` 0) decoder
+      !value = 5 + if bit0 then 1 else 0
+      (!sign, !d2) = boolRead 128 d1
    in (if sign then -value else value, d2)
 
 -- | Decode CAT2 (7-10)
+{-# INLINE decodeCat2 #-}
 decodeCat2 :: BoolDecoder -> (Int16, BoolDecoder)
 decodeCat2 decoder =
-  let probs = pcatProbs V.! 1
-      (bit0, d1) = boolRead (probs VU.! 0) decoder
-      (bit1, d2) = boolRead (probs VU.! 1) d1
-      value = 7 + (if bit0 then 2 else 0) + (if bit1 then 1 else 0)
-      (sign, d3) = boolRead 128 d2
+  let (!bit0, !d1) = boolRead (pcatProbs2 `VU.unsafeIndex` 0) decoder
+      (!bit1, !d2) = boolRead (pcatProbs2 `VU.unsafeIndex` 1) d1
+      !value = 7 + (if bit0 then 2 else 0) + (if bit1 then 1 else 0)
+      (!sign, !d3) = boolRead 128 d2
    in (if sign then -value else value, d3)
 
 -- | Decode CAT3 (11-18)
+{-# INLINE decodeCat3 #-}
 decodeCat3 :: BoolDecoder -> (Int16, BoolDecoder)
 decodeCat3 decoder =
-  let probs = pcatProbs V.! 2
-      (bit0, d1) = boolRead (probs VU.! 0) decoder
-      (bit1, d2) = boolRead (probs VU.! 1) d1
-      (bit2, d3) = boolRead (probs VU.! 2) d2
-      value = 11 + (if bit0 then 4 else 0) + (if bit1 then 2 else 0) + (if bit2 then 1 else 0)
-      (sign, d4) = boolRead 128 d3
+  let (!bit0, !d1) = boolRead (pcatProbs3 `VU.unsafeIndex` 0) decoder
+      (!bit1, !d2) = boolRead (pcatProbs3 `VU.unsafeIndex` 1) d1
+      (!bit2, !d3) = boolRead (pcatProbs3 `VU.unsafeIndex` 2) d2
+      !value = 11 + (if bit0 then 4 else 0) + (if bit1 then 2 else 0) + (if bit2 then 1 else 0)
+      (!sign, !d4) = boolRead 128 d3
    in (if sign then -value else value, d4)
 
 -- | Decode CAT4 (19-34)
+{-# INLINE decodeCat4 #-}
 decodeCat4 :: BoolDecoder -> (Int16, BoolDecoder)
 decodeCat4 decoder =
-  let probs = pcatProbs V.! 3
-      (bit0, d1) = boolRead (probs VU.! 0) decoder
-      (bit1, d2) = boolRead (probs VU.! 1) d1
-      (bit2, d3) = boolRead (probs VU.! 2) d2
-      (bit3, d4) = boolRead (probs VU.! 3) d3
-      value =
+  let (!bit0, !d1) = boolRead (pcatProbs4 `VU.unsafeIndex` 0) decoder
+      (!bit1, !d2) = boolRead (pcatProbs4 `VU.unsafeIndex` 1) d1
+      (!bit2, !d3) = boolRead (pcatProbs4 `VU.unsafeIndex` 2) d2
+      (!bit3, !d4) = boolRead (pcatProbs4 `VU.unsafeIndex` 3) d3
+      !value =
         19
           + (if bit0 then 8 else 0)
           + (if bit1 then 4 else 0)
           + (if bit2 then 2 else 0)
           + (if bit3 then 1 else 0)
-      (sign, d5) = boolRead 128 d4
+      (!sign, !d5) = boolRead 128 d4
    in (if sign then -value else value, d5)
 
 -- | Decode CAT5 (35-66)
+{-# INLINE decodeCat5 #-}
 decodeCat5 :: BoolDecoder -> (Int16, BoolDecoder)
 decodeCat5 decoder =
-  let probs = pcatProbs V.! 4
-      (bit0, d1) = boolRead (probs VU.! 0) decoder
-      (bit1, d2) = boolRead (probs VU.! 1) d1
-      (bit2, d3) = boolRead (probs VU.! 2) d2
-      (bit3, d4) = boolRead (probs VU.! 3) d3
-      (bit4, d5) = boolRead (probs VU.! 4) d4
-      value =
+  let (!bit0, !d1) = boolRead (pcatProbs5 `VU.unsafeIndex` 0) decoder
+      (!bit1, !d2) = boolRead (pcatProbs5 `VU.unsafeIndex` 1) d1
+      (!bit2, !d3) = boolRead (pcatProbs5 `VU.unsafeIndex` 2) d2
+      (!bit3, !d4) = boolRead (pcatProbs5 `VU.unsafeIndex` 3) d3
+      (!bit4, !d5) = boolRead (pcatProbs5 `VU.unsafeIndex` 4) d4
+      !value =
         35
           + (if bit0 then 16 else 0)
           + (if bit1 then 8 else 0)
           + (if bit2 then 4 else 0)
           + (if bit3 then 2 else 0)
           + (if bit4 then 1 else 0)
-      (sign, d6) = boolRead 128 d5
+      (!sign, !d6) = boolRead 128 d5
    in (if sign then -value else value, d6)
 
 -- | Decode CAT6 (67-2048)
 decodeCat6 :: BoolDecoder -> (Int16, BoolDecoder)
 decodeCat6 decoder =
-  let probs = pcatProbs V.! 5
-      readBit i d = boolRead (probs VU.! i) d
+  let !probs = pcatProbs6
+      readBit i d = boolRead (probs `VU.unsafeIndex` i) d
 
-      (bit0, d1) = readBit 0 decoder
-      (bit1, d2) = readBit 1 d1
-      (bit2, d3) = readBit 2 d2
-      (bit3, d4) = readBit 3 d3
-      (bit4, d5) = readBit 4 d4
-      (bit5, d6) = readBit 5 d5
-      (bit6, d7) = readBit 6 d6
-      (bit7, d8) = readBit 7 d7
-      (bit8, d9) = readBit 8 d8
-      (bit9, d10) = readBit 9 d9
-      (bit10, d11) = readBit 10 d10
+      (!bit0, !d1) = readBit 0 decoder
+      (!bit1, !d2) = readBit 1 d1
+      (!bit2, !d3) = readBit 2 d2
+      (!bit3, !d4) = readBit 3 d3
+      (!bit4, !d5) = readBit 4 d4
+      (!bit5, !d6) = readBit 5 d5
+      (!bit6, !d7) = readBit 6 d6
+      (!bit7, !d8) = readBit 7 d7
+      (!bit8, !d9) = readBit 8 d8
+      (!bit9, !d10) = readBit 9 d9
+      (!bit10, !d11) = readBit 10 d10
 
-      value =
+      !value =
         67
           + (if bit0 then 1024 else 0)
           + (if bit1 then 512 else 0)
@@ -193,11 +201,5 @@ decodeCat6 decoder =
           + (if bit9 then 2 else 0)
           + (if bit10 then 1 else 0)
 
-      (sign, d12) = boolRead 128 d11
+      (!sign, !d12) = boolRead 128 d11
    in (if sign then -value else value, d12)
-
--- | Get coefficient probabilities for a position
-{-# INLINE getCoeffProbs #-}
-getCoeffProbs :: VU.Vector Word8 -> Int -> Int -> V.Vector Word8
-getCoeffProbs probs baseIdx offset =
-  V.generate (11 - offset) $ \i -> probs `VU.unsafeIndex` (baseIdx + offset + i)

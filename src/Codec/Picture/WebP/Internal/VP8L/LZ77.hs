@@ -409,20 +409,21 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
   loop 0 reader
 
 -- | Get entropy group index for a pixel
+{-# INLINE getEntropyGroup #-}
 getEntropyGroup :: Int -> Int -> Maybe (VS.Vector Word32, Int) -> Int -> Int
 getEntropyGroup _x _y Nothing _width = 0
 getEntropyGroup x y (Just (entropyImage, prefixBits)) width =
-  let entropyWidth = (width + (1 `shiftL` prefixBits) - 1) `shiftR` prefixBits
-      entropyX = x `shiftR` prefixBits
-      entropyY = y `shiftR` prefixBits
-      -- Use Integer to avoid overflow
-      entropyIdxInteger = (fromIntegral entropyY :: Integer) * (fromIntegral entropyWidth :: Integer) + (fromIntegral entropyX :: Integer)
-      entropyIdx = fromIntegral entropyIdxInteger :: Int
-   in if entropyIdx < 0 || entropyIdx >= VS.length entropyImage
-        then error $ "Entropy index out of bounds: " ++ show entropyIdx ++ " (entropyImage length: " ++ show (VS.length entropyImage) ++ ")"
+  let !entropyWidth = (width + (1 `shiftL` prefixBits) - 1) `shiftR` prefixBits
+      !entropyX = x `shiftR` prefixBits
+      !entropyY = y `shiftR` prefixBits
+      -- Int is safe: max image 16384x16384, max entropyWidth = 16384, max product = 268M < 2^31
+      !entropyIdx = entropyY * entropyWidth + entropyX
+      !entropyLen = VS.length entropyImage
+   in if entropyIdx < 0 || entropyIdx >= entropyLen
+        then error $ "Entropy index out of bounds: " ++ show entropyIdx ++ " (entropyImage length: " ++ show entropyLen ++ ")"
         else
-          let pixel = entropyImage VS.! entropyIdx
-              green = (pixel `shiftR` 8) .&. 0xFF
+          let !pixel = entropyImage `VS.unsafeIndex` entropyIdx
+              !green = (pixel `shiftR` 8) .&. 0xFF
            in fromIntegral green
 
 -- | Pack ARGB components into a Word32

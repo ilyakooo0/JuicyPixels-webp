@@ -29,6 +29,12 @@ module Codec.Picture.WebP.Internal.VP8.Tables
 
     -- * Category probabilities
     pcatProbs,
+    pcatProbs1,
+    pcatProbs2,
+    pcatProbs3,
+    pcatProbs4,
+    pcatProbs5,
+    pcatProbs6,
   )
 where
 
@@ -1528,3 +1534,28 @@ pcatProbs =
       VU.fromList [180, 157, 141, 134, 130, 0], -- CAT5
       VU.fromList [254, 254, 243, 230, 196, 177, 153, 140, 133, 130, 129, 0] -- CAT6
     ]
+
+-- | Category probabilities as direct unboxed vectors (avoids boxed vector lookup in hot path)
+{-# NOINLINE pcatProbs1 #-}
+pcatProbs1 :: VU.Vector Word8
+pcatProbs1 = VU.fromList [159, 0]
+
+{-# NOINLINE pcatProbs2 #-}
+pcatProbs2 :: VU.Vector Word8
+pcatProbs2 = VU.fromList [165, 145, 0]
+
+{-# NOINLINE pcatProbs3 #-}
+pcatProbs3 :: VU.Vector Word8
+pcatProbs3 = VU.fromList [173, 148, 140, 0]
+
+{-# NOINLINE pcatProbs4 #-}
+pcatProbs4 :: VU.Vector Word8
+pcatProbs4 = VU.fromList [176, 155, 140, 135, 0]
+
+{-# NOINLINE pcatProbs5 #-}
+pcatProbs5 :: VU.Vector Word8
+pcatProbs5 = VU.fromList [180, 157, 141, 134, 130, 0]
+
+{-# NOINLINE pcatProbs6 #-}
+pcatProbs6 :: VU.Vector Word8
+pcatProbs6 = VU.fromList [254, 254, 243, 230, 196, 177, 153, 140, 133, 130, 129, 0]

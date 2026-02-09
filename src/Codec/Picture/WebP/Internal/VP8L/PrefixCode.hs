@@ -49,6 +49,7 @@ buildPrefixCode codeLengths
 
 -- | Build a two-level lookup table for prefix code decoding
 -- This implementation closely follows libwebp's BuildHuffmanTable algorithm
+{-# INLINE buildPrefixCodeTable #-}
 buildPrefixCodeTable :: VU.Vector Int -> Either String PrefixCode
 buildPrefixCodeTable codeLengths = runST $ do
   let numSymbols = VU.length codeLengths
