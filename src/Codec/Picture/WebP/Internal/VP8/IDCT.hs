@@ -13,6 +13,8 @@ import Data.Int
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
 
+-- Performance: INLINE pragmas on all transform functions
+
 -- IDCT constants
 cospi8sqrt2minus1 :: Int
 cospi8sqrt2minus1 = 20091
@@ -22,6 +24,7 @@ sinpi8sqrt2 = 35468
 
 -- | 4x4 inverse DCT (in-place)
 -- Column pass first, then row pass
+{-# INLINE idct4x4 #-}
 idct4x4 :: VSM.MVector s Int16 -> ST s ()
 idct4x4 coeffs = do
   idctColumn coeffs 0
@@ -35,6 +38,7 @@ idct4x4 coeffs = do
   idctRow coeffs 3
 
 -- | IDCT column transformation
+{-# INLINE idctColumn #-}
 idctColumn :: VSM.MVector s Int16 -> Int -> ST s ()
 idctColumn coeffs col = do
   i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (0 * 4 + col)
@@ -64,6 +68,7 @@ idctColumn coeffs col = do
   VSM.write coeffs (3 * 4 + col) (fromIntegral o3)
 
 -- | IDCT row transformation (with rounding)
+{-# INLINE idctRow #-}
 idctRow :: VSM.MVector s Int16 -> Int -> ST s ()
 idctRow coeffs row = do
   i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (row * 4 + 0)
@@ -95,6 +100,7 @@ idctRow coeffs row = do
 -- | Walsh-Hadamard Transform for Y2 DC block
 -- Returns 16 DC values to be distributed to Y subblocks
 -- Per RFC 6386: rows first (no scaling), then columns (divide by 8)
+{-# INLINE iwht4x4 #-}
 iwht4x4 :: VSM.MVector s Int16 -> ST s (VS.Vector Int16)
 iwht4x4 coeffs = do
   -- Row pass first (no scaling)
@@ -112,6 +118,7 @@ iwht4x4 coeffs = do
   VS.unsafeFreeze coeffs
 
 -- | WHT row transformation (no scaling per RFC 6386 - first pass)
+{-# INLINE whtRow #-}
 whtRow :: VSM.MVector s Int16 -> Int -> ST s ()
 whtRow coeffs row = do
   i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (row * 4 + 0)
@@ -136,6 +143,7 @@ whtRow coeffs row = do
   VSM.write coeffs (row * 4 + 3) (fromIntegral o3)
 
 -- | WHT column transformation (divide by 8 per RFC 6386 - second pass)
+{-# INLINE whtColumn #-}
 whtColumn :: VSM.MVector s Int16 -> Int -> ST s ()
 whtColumn coeffs col = do
   i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read coeffs (0 * 4 + col)

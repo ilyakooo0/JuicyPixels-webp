@@ -77,26 +77,39 @@ computePredictorTransform sizeBits width height pixels =
         }
 
 -- | Select the best prediction mode for a block using SAD (Sum of Absolute Differences)
+-- Optimized with early exit when SAD = 0 (perfect match)
+{-# INLINE selectBestMode #-}
 selectBestMode :: Int -> Int -> Int -> Int -> Int -> VS.Vector Word32 -> Int
 selectBestMode sizeBits bx by width height pixels =
-  let blockSize = 1 `shiftL` sizeBits
-      startX = bx * blockSize
-      startY = by * blockSize
-      endX = min (startX + blockSize) width
-      endY = min (startY + blockSize) height
+  let !blockSize = 1 `shiftL` sizeBits
+      !startX = bx * blockSize
+      !startY = by * blockSize
+      !endX = min (startX + blockSize) width
+      !endY = min (startY + blockSize) height
 
-      -- Compute SAD for each mode and pick the best
-      sads = map (computeBlockSAD startX startY endX endY width height pixels) [0 .. 13]
-      (bestMode, _) = foldl1 (\a@(_, sa) b@(_, sb) -> if sb < sa then b else a) (zip [0 ..] sads)
-   in bestMode
+      -- Strict fold with early exit when SAD = 0
+      go !bestMode !bestSAD !mode
+        | mode > 13 = bestMode
+        | bestSAD == 0 = bestMode  -- Can't improve on 0, exit early
+        | otherwise =
+            let !sad = computeBlockSAD startX startY endX endY width height pixels mode
+             in if sad < bestSAD
+                  then go mode sad (mode + 1)
+                  else go bestMode bestSAD (mode + 1)
+
+      -- Start with mode 0
+      !initialSAD = computeBlockSAD startX startY endX endY width height pixels 0
+   in go 0 initialSAD 1
 
 -- | Compute SAD for a block with a given mode
+{-# INLINE computeBlockSAD #-}
 computeBlockSAD :: Int -> Int -> Int -> Int -> Int -> Int -> VS.Vector Word32 -> Int -> Int
 computeBlockSAD startX startY endX endY width height pixels mode =
   let coords = [(x, y) | y <- [startY .. endY - 1], x <- [startX .. endX - 1]]
    in sum $ map (pixelSAD width height pixels mode) coords
 
 -- | Compute SAD for a single pixel with a given mode
+{-# INLINE pixelSAD #-}
 pixelSAD :: Int -> Int -> VS.Vector Word32 -> Int -> (Int, Int) -> Int
 pixelSAD width _height pixels mode (x, y) =
   let i = y * width + x
@@ -129,6 +142,7 @@ pixelSAD width _height pixels mode (x, y) =
    in signedAbs a + signedAbs r + signedAbs g + signedAbs b
 
 -- | Predictor modes (same as Transform.hs)
+{-# INLINE predictor #-}
 predictor :: Int -> Word32 -> Word32 -> Word32 -> Word32 -> Word32
 predictor 0 _left _top _topLeft _topRight = 0xFF000000
 predictor 1 left _top _topLeft _topRight = left
@@ -148,6 +162,7 @@ predictor 13 left top topLeft _topRight = clampAddSubtractHalf left top topLeft
 predictor _ _left _top _topLeft _topRight = 0xFF000000
 
 -- | Add two pixels component-wise (mod 256)
+{-# INLINE addPixels #-}
 addPixels :: Word32 -> Word32 -> Word32
 addPixels p1 p2 =
   let a1 = (p1 `shiftR` 24) .&. 0xFF
@@ -167,6 +182,7 @@ addPixels p1 p2 =
    in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
 
 -- | Subtract two pixels component-wise (mod 256)
+{-# INLINE subPixels #-}
 subPixels :: Word32 -> Word32 -> Word32
 subPixels p1 p2 =
   let a1 = (p1 `shiftR` 24) .&. 0xFF
@@ -186,6 +202,7 @@ subPixels p1 p2 =
    in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
 
 -- | Average of two pixels
+{-# INLINE avgPixels2 #-}
 avgPixels2 :: Word32 -> Word32 -> Word32
 avgPixels2 p1 p2 =
   let a1 = (p1 `shiftR` 24) .&. 0xFF
@@ -205,6 +222,7 @@ avgPixels2 p1 p2 =
    in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
 
 -- | Average of three pixels
+{-# INLINE avgPixels3 #-}
 avgPixels3 :: Word32 -> Word32 -> Word32 -> Word32
 avgPixels3 p1 p2 p3 =
   let a1 = (p1 `shiftR` 24) .&. 0xFF

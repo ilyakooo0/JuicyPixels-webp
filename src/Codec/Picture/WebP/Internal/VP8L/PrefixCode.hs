@@ -280,6 +280,7 @@ calculateSecondaryTableBits blCount currentLen primaryBits maxCodeLength = do
   return tableBits
 
 -- | Decode a single symbol from the bitstream using a prefix code
+{-# INLINE decodeSymbol #-}
 decodeSymbol :: PrefixCode -> BitReader -> (Word16, BitReader)
 decodeSymbol (PrefixCodeSingle sym) reader = (sym, reader)
 decodeSymbol (PrefixCodeTable table primaryBits) reader =
@@ -426,12 +427,14 @@ readSymbolCodeLengths alphabetSize codeLengthCode reader =
 
 -- Helper functions
 
+{-# INLINE packEntry #-}
 packEntry :: Word16 -> Int -> Word32
 packEntry symbol len = (fromIntegral symbol `shiftL` 16) .|. fromIntegral len
 
 invalidEntry :: Word32
 invalidEntry = 0xFFFFFFFF
 
+{-# INLINE reverseBits #-}
 reverseBits :: Int -> Int -> Int
 reverseBits value numBits = go 0 value numBits
   where

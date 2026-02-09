@@ -21,22 +21,25 @@ import Data.Word
 -- | Encode alpha channel from RGBA image
 -- Returns raw alpha data (to be wrapped in ALPH chunk)
 -- For simplicity, uses uncompressed format (compression method 0)
+-- Optimized with row-base pre-computation
 encodeAlpha :: Image PixelRGBA8 -> B.ByteString
 encodeAlpha img =
   let width = imageWidth img
       height = imageHeight img
       pixels = imageData img
 
-      -- Extract raw alpha bytes
+      -- Extract raw alpha bytes with row-base optimization
       alphaBytes = runST $ do
         alphaBuf <- VSM.new (width * height)
 
-        forM_ [0 .. height - 1] $ \y ->
+        forM_ [0 .. height - 1] $ \y -> do
+          let !rowBase = y * width
+              !pixelRowBase = rowBase * 4
           forM_ [0 .. width - 1] $ \x -> do
-            let pixelIdx = (y * width + x) * 4
-                a = pixels VS.! (pixelIdx + 3)
-                alphaIdx = y * width + x
-            VSM.write alphaBuf alphaIdx a
+            let !pixelIdx = pixelRowBase + x * 4 + 3
+                !alphaIdx = rowBase + x
+                !a = pixels `VS.unsafeIndex` pixelIdx
+            VSM.unsafeWrite alphaBuf alphaIdx a
 
         VS.unsafeFreeze alphaBuf
    in B.pack $ VS.toList alphaBytes

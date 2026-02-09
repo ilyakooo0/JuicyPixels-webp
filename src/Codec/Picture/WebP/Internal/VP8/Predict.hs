@@ -411,6 +411,7 @@ predict4x4HU output stride x y = do
 
 -- Helper functions
 
+{-# INLINE readPixel #-}
 readPixel :: VSM.MVector s Word8 -> Int -> (Int, Int) -> ST s Word8
 readPixel buf stride (px, py) = do
   let idx = py * stride + px
@@ -418,6 +419,7 @@ readPixel buf stride (px, py) = do
     then VSM.read buf idx
     else return 128
 
+{-# INLINE writePixel #-}
 writePixel :: VSM.MVector s Word8 -> Int -> (Int, Int) -> Word8 -> ST s ()
 writePixel buf stride (px, py) val = do
   let idx = py * stride + px
@@ -425,34 +427,40 @@ writePixel buf stride (px, py) val = do
     then VSM.write buf idx val
     else return ()
 
+{-# INLINE sumRow #-}
 sumRow :: VSM.MVector s Word8 -> Int -> (Int, Int) -> Int -> ST s Int
 sumRow buf stride (startX, startY) len = do
   vals <- mapM (\i -> fromIntegral <$> readPixel buf stride (startX + i, startY)) [0 .. len - 1]
   return $ sum vals
 
+{-# INLINE sumCol #-}
 sumCol :: VSM.MVector s Word8 -> Int -> (Int, Int) -> Int -> ST s Int
 sumCol buf stride (startX, startY) len = do
   vals <- mapM (\i -> fromIntegral <$> readPixel buf stride (startX, startY + i)) [0 .. len - 1]
   return $ sum vals
 
+{-# INLINE fillBlock #-}
 fillBlock :: VSM.MVector s Word8 -> Int -> (Int, Int) -> Int -> Int -> Int -> ST s ()
 fillBlock buf stride (startX, startY) w h val =
   forM_ [0 .. h - 1] $ \row ->
     forM_ [0 .. w - 1] $ \col ->
       writePixel buf stride (startX + col, startY + row) (fromIntegral val)
 
+{-# INLINE clip255 #-}
 clip255 :: Int -> Word8
-clip255 x
+clip255 !x
   | x < 0 = 0
   | x > 255 = 255
   | otherwise = fromIntegral x
 
+{-# INLINE avg2 #-}
 avg2 :: Word8 -> Word8 -> Word8
-avg2 a b = fromIntegral ((fromIntegral a + fromIntegral b + 1) `shiftR` 1 :: Int)
+avg2 !a !b = fromIntegral ((fromIntegral a + fromIntegral b + 1) `shiftR` 1 :: Int)
 
+{-# INLINE avg3 #-}
 avg3 :: Word8 -> Word8 -> Word8 -> Word8
-avg3 a b c =
-  let ia = fromIntegral a :: Int
-      ib = fromIntegral b :: Int
-      ic = fromIntegral c :: Int
+avg3 !a !b !c =
+  let !ia = fromIntegral a :: Int
+      !ib = fromIntegral b :: Int
+      !ic = fromIntegral c :: Int
    in fromIntegral ((ia + 2 * ib + ic + 2) `shiftR` 2)

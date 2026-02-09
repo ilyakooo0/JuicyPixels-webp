@@ -13,7 +13,10 @@ import Data.Bits
 import qualified Data.Vector.Storable.Mutable as VSM
 import Data.Word
 
+-- Performance: INLINE pragmas and shiftR instead of div
+
 -- | Clip value to [0, 255] range
+{-# INLINE clip255 #-}
 clip255 :: Int -> Word8
 clip255 !x
   | x < 0 = 0
@@ -32,10 +35,11 @@ rgbToYCbCr img = do
   let w = imageWidth img
       h = imageHeight img
       -- Pad dimensions to multiple of 16 (macroblock size)
-      paddedW = ((w + 15) `div` 16) * 16
-      paddedH = ((h + 15) `div` 16) * 16
-      chromaW = paddedW `div` 2
-      chromaH = paddedH `div` 2
+      -- Use shiftR instead of div for speed
+      !paddedW = ((w + 15) `shiftR` 4) `shiftL` 4
+      !paddedH = ((h + 15) `shiftR` 4) `shiftL` 4
+      !chromaW = paddedW `shiftR` 1
+      !chromaH = paddedH `shiftR` 1
 
   -- Allocate buffers (padded)
   yBuf <- VSM.replicate (paddedW * paddedH) 128
@@ -68,9 +72,10 @@ rgbToYCbCr img = do
 
       -- Subsample chroma (simple decimation: take every other pixel)
       -- In a production encoder, you'd use a better filter (e.g., box filter or bilinear)
+      -- Use shiftR instead of div for speed
       when (even x && even y) $ do
-        let chromaX = x `div` 2
-            chromaY = y `div` 2
+        let !chromaX = x `shiftR` 1
+            !chromaY = y `shiftR` 1
         VSM.write uBuf (chromaY * chromaW + chromaX) cb
         VSM.write vBuf (chromaY * chromaW + chromaX) cr
 

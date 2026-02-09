@@ -11,6 +11,8 @@ import Data.Bits
 import Data.Int
 import qualified Data.Vector.Storable.Mutable as VSM
 
+-- Performance: INLINE pragmas on all transform functions
+
 -- Forward DCT constants (from libwebp's FTransform)
 -- These differ from inverse DCT constants for numerical precision
 kC1 :: Int
@@ -30,6 +32,7 @@ fdctC2 = 5352 -- sin(pi/8) * sqrt(2) * 8192 ≈ 5352
 -- Input: spatial domain residuals (original - prediction)
 -- Output: frequency domain coefficients
 -- Row pass first, then column pass (opposite order from inverse)
+{-# INLINE fdct4x4 #-}
 fdct4x4 :: VSM.MVector s Int16 -> ST s ()
 fdct4x4 residuals = do
   -- Forward DCT: rows first, then columns
@@ -44,6 +47,7 @@ fdct4x4 residuals = do
   fdctColumn residuals 3
 
 -- | Forward DCT row transformation (based on libwebp's FTransform)
+{-# INLINE fdctRow #-}
 fdctRow :: VSM.MVector s Int16 -> Int -> ST s ()
 fdctRow residuals row = do
   d0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read residuals (row * 4 + 0)
@@ -70,6 +74,7 @@ fdctRow residuals row = do
   VSM.write residuals (row * 4 + 3) (fromIntegral o3)
 
 -- | Forward DCT column transformation (based on libwebp's FTransform)
+{-# INLINE fdctColumn #-}
 fdctColumn :: VSM.MVector s Int16 -> Int -> ST s ()
 fdctColumn residuals col = do
   t0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read residuals (0 * 4 + col)
@@ -101,6 +106,7 @@ fdctColumn residuals col = do
 -- Output: Transformed Y2 coefficients
 -- Based on libwebp's FTransformWHT: columns first (scale by 1/2), then rows (no scale)
 -- This is the transpose of the inverse (which does rows then columns)
+{-# INLINE fwht4x4 #-}
 fwht4x4 :: VSM.MVector s Int16 -> ST s ()
 fwht4x4 dcs = do
   -- Forward WHT: columns first (with 1/2 scale), then rows
@@ -116,6 +122,7 @@ fwht4x4 dcs = do
 
 -- | Forward WHT column transformation (with 1/2 scaling)
 -- First pass - matches libwebp's FTransformWHT column loop
+{-# INLINE fwhtColumn #-}
 fwhtColumn :: VSM.MVector s Int16 -> Int -> ST s ()
 fwhtColumn dcs col = do
   i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read dcs (0 * 4 + col)
@@ -142,6 +149,7 @@ fwhtColumn dcs col = do
 
 -- | Forward WHT row transformation (no scaling)
 -- Second pass - matches libwebp's FTransformWHT row loop
+{-# INLINE fwhtRow #-}
 fwhtRow :: VSM.MVector s Int16 -> Int -> ST s ()
 fwhtRow dcs row = do
   i0 <- (fromIntegral :: Int16 -> Int) <$> VSM.read dcs (row * 4 + 0)

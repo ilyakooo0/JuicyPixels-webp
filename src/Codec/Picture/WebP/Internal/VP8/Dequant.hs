@@ -18,6 +18,8 @@ import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as VU
 import Data.Word
 
+-- Performance: INLINE pragmas and manual loops with unsafeRead/unsafeWrite
+
 -- | Quantization indices from frame header
 data QuantIndices = QuantIndices
   { qiYacQi :: !Int,
@@ -106,6 +108,7 @@ computeQuantizer baseQi delta lookupTable =
 
 -- | Dequantize a 4x4 block in place
 -- blockType: 0 = Y (AC only), 1 = Y2, 2 = UV, 3 = Y (full)
+{-# INLINE dequantizeBlock #-}
 dequantizeBlock :: DequantFactors -> Int -> VSM.MVector s Int16 -> ST s ()
 dequantizeBlock factors blockType coeffs = do
   case blockType of
@@ -116,47 +119,62 @@ dequantizeBlock factors blockType coeffs = do
     _ -> return ()
 
 -- | Dequantize Y block (AC only, position 0 already has DC from Y2)
+{-# INLINE dequantYAC #-}
 dequantYAC :: DequantFactors -> VSM.MVector s Int16 -> ST s ()
 dequantYAC factors coeffs = do
-  mapM_
-    ( \i -> do
-        c <- VSM.read coeffs i
-        VSM.write coeffs i (c * dqYAC factors)
-    )
-    [1 .. 15]
+  let !factor = dqYAC factors
+  let go !i
+        | i > 15 = return ()
+        | otherwise = do
+            !c <- VSM.unsafeRead coeffs i
+            VSM.unsafeWrite coeffs i (c * factor)
+            go (i + 1)
+  go 1
 
 -- | Dequantize Y2 DC block
+{-# INLINE dequantY2 #-}
 dequantY2 :: DequantFactors -> VSM.MVector s Int16 -> ST s ()
 dequantY2 factors coeffs = do
-  c0 <- VSM.read coeffs 0
-  VSM.write coeffs 0 (c0 * dqY2DC factors)
-  mapM_
-    ( \i -> do
-        c <- VSM.read coeffs i
-        VSM.write coeffs i (c * dqY2AC factors)
-    )
-    [1 .. 15]
+  !c0 <- VSM.unsafeRead coeffs 0
+  let !dcFactor = dqY2DC factors
+  VSM.unsafeWrite coeffs 0 (c0 * dcFactor)
+  let !acFactor = dqY2AC factors
+  let go !i
+        | i > 15 = return ()
+        | otherwise = do
+            !c <- VSM.unsafeRead coeffs i
+            VSM.unsafeWrite coeffs i (c * acFactor)
+            go (i + 1)
+  go 1
 
 -- | Dequantize UV block
+{-# INLINE dequantUV #-}
 dequantUV :: DequantFactors -> VSM.MVector s Int16 -> ST s ()
 dequantUV factors coeffs = do
-  c0 <- VSM.read coeffs 0
-  VSM.write coeffs 0 (c0 * dqUVDC factors)
-  mapM_
-    ( \i -> do
-        c <- VSM.read coeffs i
-        VSM.write coeffs i (c * dqUVAC factors)
-    )
-    [1 .. 15]
+  !c0 <- VSM.unsafeRead coeffs 0
+  let !dcFactor = dqUVDC factors
+  VSM.unsafeWrite coeffs 0 (c0 * dcFactor)
+  let !acFactor = dqUVAC factors
+  let go !i
+        | i > 15 = return ()
+        | otherwise = do
+            !c <- VSM.unsafeRead coeffs i
+            VSM.unsafeWrite coeffs i (c * acFactor)
+            go (i + 1)
+  go 1
 
 -- | Dequantize Y block (full, including DC at position 0)
+{-# INLINE dequantYFull #-}
 dequantYFull :: DequantFactors -> VSM.MVector s Int16 -> ST s ()
 dequantYFull factors coeffs = do
-  c0 <- VSM.read coeffs 0
-  VSM.write coeffs 0 (c0 * dqYDC factors)
-  mapM_
-    ( \i -> do
-        c <- VSM.read coeffs i
-        VSM.write coeffs i (c * dqYAC factors)
-    )
-    [1 .. 15]
+  !c0 <- VSM.unsafeRead coeffs 0
+  let !dcFactor = dqYDC factors
+  VSM.unsafeWrite coeffs 0 (c0 * dcFactor)
+  let !acFactor = dqYAC factors
+  let go !i
+        | i > 15 = return ()
+        | otherwise = do
+            !c <- VSM.unsafeRead coeffs i
+            VSM.unsafeWrite coeffs i (c * acFactor)
+            go (i + 1)
+  go 1

@@ -12,7 +12,7 @@ import Codec.Picture.WebP.Internal.Alpha
 import Codec.Picture.WebP.Internal.Container
 import Codec.Picture.WebP.Internal.VP8
 import Codec.Picture.WebP.Internal.VP8L
-import Control.Monad (mapM_, when)
+import Control.Monad (forM_, mapM_, when)
 import Control.Monad.ST
 import Data.Bits
 import qualified Data.ByteString as B
@@ -179,66 +179,69 @@ compositeFrame canvas canvasWidth _canvasHeight frameImg frameX frameY useBlend 
     _ -> return () -- Unsupported format, skip
 
 -- | Composite RGBA8 image onto canvas
+-- Optimized with pre-computed row bases to avoid repeated multiplication
+{-# INLINE compositeRGBA8 #-}
 compositeRGBA8 :: VSM.MVector s Word8 -> Int -> Image PixelRGBA8 -> Int -> Int -> Bool -> ST s ()
 compositeRGBA8 canvas canvasWidth (Image frameWidth frameHeight frameData) frameX frameY useBlend = do
-  let composePixel fy fx = do
-        let canvasY = frameY + fy
-            canvasX = frameX + fx
-            canvasIdx = (canvasY * canvasWidth + canvasX) * 4
-            frameIdx = (fy * frameWidth + fx) * 4
+  forM_ [0 .. frameHeight - 1] $ \fy -> do
+    let !frameRowBase = fy * frameWidth * 4
+        !canvasRowBase = ((frameY + fy) * canvasWidth + frameX) * 4
+    forM_ [0 .. frameWidth - 1] $ \fx -> do
+      let !frameIdx = frameRowBase + fx * 4
+          !canvasIdx = canvasRowBase + fx * 4
 
-        -- Read source pixel
-        srcR <- pure $ frameData VS.! frameIdx
-        srcG <- pure $ frameData VS.! (frameIdx + 1)
-        srcB <- pure $ frameData VS.! (frameIdx + 2)
-        srcA <- pure $ frameData VS.! (frameIdx + 3)
+          -- Read source pixel using unsafeIndex for speed
+          !srcR = frameData `VS.unsafeIndex` frameIdx
+          !srcG = frameData `VS.unsafeIndex` (frameIdx + 1)
+          !srcB = frameData `VS.unsafeIndex` (frameIdx + 2)
+          !srcA = frameData `VS.unsafeIndex` (frameIdx + 3)
 
-        if useBlend && srcA < 255
-          then do
-            -- Alpha blend
-            dstR <- VSM.read canvas canvasIdx
-            dstG <- VSM.read canvas (canvasIdx + 1)
-            dstB <- VSM.read canvas (canvasIdx + 2)
-            dstA <- VSM.read canvas (canvasIdx + 3)
+      if useBlend && srcA < 255
+        then do
+          -- Alpha blend
+          !dstR <- VSM.unsafeRead canvas canvasIdx
+          !dstG <- VSM.unsafeRead canvas (canvasIdx + 1)
+          !dstB <- VSM.unsafeRead canvas (canvasIdx + 2)
+          !dstA <- VSM.unsafeRead canvas (canvasIdx + 3)
 
-            let (blendR, blendG, blendB, blendA) = alphaBlend srcR srcG srcB srcA dstR dstG dstB dstA
+          let (!blendR, !blendG, !blendB, !blendA) = alphaBlend srcR srcG srcB srcA dstR dstG dstB dstA
 
-            VSM.write canvas canvasIdx blendR
-            VSM.write canvas (canvasIdx + 1) blendG
-            VSM.write canvas (canvasIdx + 2) blendB
-            VSM.write canvas (canvasIdx + 3) blendA
-          else do
-            -- Direct copy (no blend)
-            VSM.write canvas canvasIdx srcR
-            VSM.write canvas (canvasIdx + 1) srcG
-            VSM.write canvas (canvasIdx + 2) srcB
-            VSM.write canvas (canvasIdx + 3) srcA
-
-  mapM_ (\fy -> mapM_ (composePixel fy) [0 .. frameWidth - 1]) [0 .. frameHeight - 1]
+          VSM.unsafeWrite canvas canvasIdx blendR
+          VSM.unsafeWrite canvas (canvasIdx + 1) blendG
+          VSM.unsafeWrite canvas (canvasIdx + 2) blendB
+          VSM.unsafeWrite canvas (canvasIdx + 3) blendA
+        else do
+          -- Direct copy (no blend)
+          VSM.unsafeWrite canvas canvasIdx srcR
+          VSM.unsafeWrite canvas (canvasIdx + 1) srcG
+          VSM.unsafeWrite canvas (canvasIdx + 2) srcB
+          VSM.unsafeWrite canvas (canvasIdx + 3) srcA
 
 -- | Composite RGB8 image onto canvas (assume alpha=255)
+-- Optimized with pre-computed row bases
+{-# INLINE compositeRGB8 #-}
 compositeRGB8 :: VSM.MVector s Word8 -> Int -> Image PixelRGB8 -> Int -> Int -> Bool -> ST s ()
 compositeRGB8 canvas canvasWidth (Image frameWidth frameHeight frameData) frameX frameY _useBlend = do
-  let composePixel fy fx = do
-        let canvasY = frameY + fy
-            canvasX = frameX + fx
-            canvasIdx = (canvasY * canvasWidth + canvasX) * 4
-            frameIdx = (fy * frameWidth + fx) * 3
+  forM_ [0 .. frameHeight - 1] $ \fy -> do
+    let !frameRowBase = fy * frameWidth * 3
+        !canvasRowBase = ((frameY + fy) * canvasWidth + frameX) * 4
+    forM_ [0 .. frameWidth - 1] $ \fx -> do
+      let !frameIdx = frameRowBase + fx * 3
+          !canvasIdx = canvasRowBase + fx * 4
 
-        -- Read source pixel (RGB, assume A=255)
-        srcR <- pure $ frameData VS.! frameIdx
-        srcG <- pure $ frameData VS.! (frameIdx + 1)
-        srcB <- pure $ frameData VS.! (frameIdx + 2)
+          -- Read source pixel (RGB, assume A=255)
+          !srcR = frameData `VS.unsafeIndex` frameIdx
+          !srcG = frameData `VS.unsafeIndex` (frameIdx + 1)
+          !srcB = frameData `VS.unsafeIndex` (frameIdx + 2)
 
-        -- Direct copy (opaque pixels)
-        VSM.write canvas canvasIdx srcR
-        VSM.write canvas (canvasIdx + 1) srcG
-        VSM.write canvas (canvasIdx + 2) srcB
-        VSM.write canvas (canvasIdx + 3) 255
-
-  mapM_ (\fy -> mapM_ (composePixel fy) [0 .. frameWidth - 1]) [0 .. frameHeight - 1]
+      -- Direct copy (opaque pixels)
+      VSM.unsafeWrite canvas canvasIdx srcR
+      VSM.unsafeWrite canvas (canvasIdx + 1) srcG
+      VSM.unsafeWrite canvas (canvasIdx + 2) srcB
+      VSM.unsafeWrite canvas (canvasIdx + 3) 255
 
 -- | Alpha blending per WebP spec
+{-# INLINE alphaBlend #-}
 alphaBlend :: Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> (Word8, Word8, Word8, Word8)
 alphaBlend srcR srcG srcB srcA dstR dstG dstB dstA =
   let srcA' = fromIntegral srcA :: Int
