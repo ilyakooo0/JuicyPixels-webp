@@ -264,8 +264,8 @@ pixelsToImage width height pixels alphaIsUsed =
   let totalComponents = width * height * 4
       !pixelsLen = VS.length pixels
       pixelData = VS.generate totalComponents $ \i ->
-        let !pixelIdx = i `shiftR` 2  -- i `div` 4
-            !component = i .&. 3       -- i `mod` 4
+        let !pixelIdx = i `shiftR` 2 -- i `div` 4
+            !component = i .&. 3 -- i `mod` 4
          in if pixelIdx < 0 || pixelIdx >= pixelsLen
               then error $ "Pixel index out of bounds: " ++ show pixelIdx ++ " (pixels length: " ++ show pixelsLen ++ ", i=" ++ show i ++ ")"
               else
