@@ -9,11 +9,14 @@ import Codec.Picture.WebP.Internal.VP8.BoolDecoder
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad (when)
 import Control.Monad.ST
+import Data.Bits (shiftR)
 import Data.Int
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as VU
 import Data.Word
+
+-- Performance: INLINE pragmas on hot-path functions
 
 -- | Decode DCT coefficients for a 4x4 block
 -- Returns: (coefficients, has_nonzero, updated decoder)
@@ -56,6 +59,7 @@ decodeCoefficients decoder coeffProbs blockType initialCtx startPos = do
   loop startPos initialCtx decoder False False
 
 -- | Read tree starting at a specific node index (for skipEOB)
+{-# INLINE boolReadTreeAt #-}
 boolReadTreeAt :: V.Vector Int8 -> Int -> V.Vector Word8 -> BoolDecoder -> (Int, BoolDecoder)
 boolReadTreeAt tree startIdx probs decoder = go startIdx 0 decoder
   where
@@ -76,6 +80,7 @@ boolReadTreeAt tree startIdx probs decoder = go startIdx 0 decoder
                 else go (fromIntegral node) (probIdx + 1) d'
 
 -- | Decode coefficient value from token
+{-# INLINE decodeCoeffValue #-}
 decodeCoeffValue :: Int -> BoolDecoder -> (Int16, BoolDecoder)
 decodeCoeffValue token decoder
   | token >= 1 && token <= 4 =

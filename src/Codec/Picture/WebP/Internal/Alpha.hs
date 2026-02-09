@@ -7,13 +7,15 @@ where
 
 import Codec.Picture.WebP.Internal.BitReader
 import Codec.Picture.WebP.Internal.VP8L
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Control.Monad.ST
 import Data.Bits
 import qualified Data.ByteString as B
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
 import Data.Word
+
+-- Performance: Fast paths for interior pixels eliminate boundary checks
 
 -- | Decode ALPH chunk to produce alpha plane
 decodeAlpha :: Int -> Int -> B.ByteString -> Either String (VS.Vector Word8)
