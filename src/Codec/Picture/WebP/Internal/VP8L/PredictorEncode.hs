@@ -65,7 +65,6 @@ computePredictorTransform sizeBits width height pixels =
               if x < width - 1 && y > 0
                 then pixels VS.! (i - width + 1)
                 else top -- Same as decoder line 161
-
             predicted = predictor mode left top topLeft topRight
          in subPixels pixel predicted
    in PredictorResult
@@ -90,7 +89,7 @@ selectBestMode sizeBits bx by width height pixels =
       -- Strict fold with early exit when SAD = 0
       go !bestMode !bestSAD !mode
         | mode > 13 = bestMode
-        | bestSAD == 0 = bestMode  -- Can't improve on 0, exit early
+        | bestSAD == 0 = bestMode -- Can't improve on 0, exit early
         | otherwise =
             let !sad = computeBlockSAD startX startY endX endY width height pixels mode
              in if sad < bestSAD

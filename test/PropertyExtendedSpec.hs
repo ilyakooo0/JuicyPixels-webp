@@ -144,7 +144,6 @@ spec = describe "Extended Property-Based Tests" $ do
               low = encodeWebPLossy img 10
               high = encodeWebPLossy img 90
            in B.length high >= B.length low - 100 -- Allow some tolerance
-
     it "quality 0-100 all produce valid output" $
       property $
         \(Positive q) ->

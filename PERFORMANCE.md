@@ -388,7 +388,7 @@ return $! min 7 (maxCodeLength - primaryBits)
 
 ---
 
-### 18. IDCT/DCT INLINE Pragmas ✓
+### 16. IDCT/DCT INLINE Pragmas ✓
 
 **Files:** `src/Codec/Picture/WebP/Internal/VP8/IDCT.hs`, `DCT.hs`
 
@@ -400,9 +400,9 @@ return $! min 7 (maxCodeLength - primaryBits)
 
 ---
 
-## LOW Priority
+## LOW Priority (All Completed ✓)
 
-### 19. ColorConvert Bit Shifts ✓
+### 17. ColorConvert Bit Shifts ✓
 
 **File:** `src/Codec/Picture/WebP/Internal/VP8/ColorConvert.hs`
 
@@ -415,31 +415,7 @@ return $! min 7 (maxCodeLength - primaryBits)
 
 ---
 
-### 20. Huffman Table Build (Remaining)
-    chromaY = y `shiftR` 1
-```
-
-**Impact:** 1-2% speedup on RGB to YCbCr conversion.
-
----
-
-### 20. Huffman Table Construction
-
-**File:** `src/Codec/Picture/WebP/Internal/VP8L/PrefixCode.hs`
-
-**Issue:** Many small mutations during table build (66 operations across nested loops).
-
-**Improvements:**
-
-1. **Pre-allocate work arrays:** Single allocation for all temporary arrays.
-
-2. **Flatten loops:** Use work queue instead of 3-level nesting.
-
-**Impact:** 8-12% speedup on lossless encode.
-
----
-
-### 21. VP8 Predict INLINE Pragmas ✓
+### 18. VP8 Predict INLINE Pragmas ✓
 
 **File:** `src/Codec/Picture/WebP/Internal/VP8/Predict.hs`
 

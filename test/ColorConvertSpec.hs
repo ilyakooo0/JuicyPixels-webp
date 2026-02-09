@@ -79,7 +79,6 @@ spec = describe "ColorConvert" $ do
       VS.head yBuf `shouldSatisfy` (\y -> y >= 70 && y <= 85)
       VS.head uBuf `shouldSatisfy` (< 128) -- Blue-yellow axis
       VS.head vBuf `shouldSatisfy` (> 128) -- Red-cyan axis
-
     it "converts solid green image" $ do
       let img = generateImage (\_ _ -> PixelRGB8 0 255 0) 16 16
           (yBuf, uBuf, vBuf) = runST $ do
@@ -177,7 +176,6 @@ spec = describe "ColorConvert" $ do
             y1 = getY img1
             y2 = getY img2
          in y1 >= y2 -- Brighter image should have >= luma
-
     it "output values are always in valid range [0,255]" $
       property $ \(r :: Word8, g :: Word8, b :: Word8) ->
         let img = generateImage (\_ _ -> PixelRGB8 r g b) 16 16

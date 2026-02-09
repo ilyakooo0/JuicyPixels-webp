@@ -15,8 +15,8 @@ import qualified GoldenFilesSpec
 import qualified GoldenSpec
 import qualified IDCTSpec
 import qualified ImageDecodingSpec
-import qualified LoopFilterSpec
 import qualified LZ77Spec
+import qualified LoopFilterSpec
 import qualified PrefixCodeSpec
 import qualified PropertyExtendedSpec
 import qualified PropertySpec

@@ -52,7 +52,7 @@ writeBits !n !value (BitWriter builder buffer count)
   | n <= 0 = BitWriter builder buffer count
   | otherwise =
       -- Calculate how many bits we can fit in current buffer before needing to flush
-      let !remaining = 64 - count  -- bits remaining in buffer
+      let !remaining = 64 - count -- bits remaining in buffer
        in if n <= remaining
             then
               -- Fast path: all bits fit without flushing

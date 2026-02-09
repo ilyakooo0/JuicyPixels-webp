@@ -17,12 +17,10 @@ spec = describe "Spec Compliance" $ do
       let img = generateImage (\_ _ -> PixelRGB8 128 128 128) 16 16
           encoded = encodeWebPLossy img 80
       B.take 4 encoded `shouldBe` B.pack [0x52, 0x49, 0x46, 0x46] -- "RIFF"
-
     it "encoded files have WEBP form type" $ do
       let img = generateImage (\_ _ -> PixelRGB8 128 128 128) 16 16
           encoded = encodeWebPLossy img 80
       B.take 4 (B.drop 8 encoded) `shouldBe` B.pack [0x57, 0x45, 0x42, 0x50] -- "WEBP"
-
     it "file size field is correct (little-endian)" $ do
       let img = generateImage (\_ _ -> PixelRGB8 128 128 128) 16 16
           encoded = encodeWebPLossy img 80
@@ -42,7 +40,6 @@ spec = describe "Spec Compliance" $ do
           encoded = encodeWebPLossless img
       -- After RIFF header (12 bytes), should be VP8L chunk
       B.take 4 (B.drop 12 encoded) `shouldBe` B.pack [0x56, 0x50, 0x38, 0x4C] -- "VP8L"
-
     it "VP8L data starts with signature byte 0x2F" $ do
       let img = generateImage (\_ _ -> PixelRGBA8 128 128 128 255) 16 16
           encoded = encodeWebPLossless img
@@ -55,7 +52,6 @@ spec = describe "Spec Compliance" $ do
           encoded = encodeWebPLossy img 80
       -- After RIFF header, should be VP8 chunk
       B.take 4 (B.drop 12 encoded) `shouldBe` B.pack [0x56, 0x50, 0x38, 0x20] -- "VP8 "
-
     it "VP8 frame tag indicates key frame" $ do
       let img = generateImage (\_ _ -> PixelRGB8 128 128 128) 16 16
           encoded = encodeWebPLossy img 80

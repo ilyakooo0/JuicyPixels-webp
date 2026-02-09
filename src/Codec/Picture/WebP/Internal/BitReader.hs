@@ -116,13 +116,14 @@ refillBuffer reader@(BitReader bytes offset bits count)
       let !bytesAvailable = B.length bytes - offset
           -- Calculate how many bytes we can add without exceeding 64 bits total
           !maxBitsToAdd = 64 - count
-          !maxBytesToAdd = maxBitsToAdd `shiftR` 3  -- div 8
+          !maxBytesToAdd = maxBitsToAdd `shiftR` 3 -- div 8
           !bytesToRead = min maxBytesToAdd (min 8 bytesAvailable)
        in if bytesToRead > 0
             then
               let !newBytes = readBytesLEFast bytes offset bytesToRead
                   !newBits = bits .|. (newBytes `shiftL` count)
-                  !newCount = count + (bytesToRead `shiftL` 3)  -- * 8
+                  !newCount = count + (bytesToRead `shiftL` 3)
+                  -- \* 8
                   !newOffset = offset + bytesToRead
                in BitReader bytes newOffset newBits newCount
             else reader
@@ -161,5 +162,5 @@ readBytesLEFast bytes offset n = go 0 0
       | i >= n = acc
       | otherwise =
           let !byte = fromIntegral (BU.unsafeIndex bytes (offset + i))
-              !acc' = acc .|. (byte `shiftL` (i `shiftL` 3))  -- i * 8
+              !acc' = acc .|. (byte `shiftL` (i `shiftL` 3)) -- i * 8
            in go acc' (i + 1)

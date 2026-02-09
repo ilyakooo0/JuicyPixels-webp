@@ -103,7 +103,6 @@ spec = describe "BitWriter" $ do
           bs = bitWriterToByteString $ finalizeBitWriter writer
       B.length bs `shouldBe` 1
       B.index bs 0 `shouldBe` 0x05 -- Padded with zeros
-
     it "is idempotent when already aligned" $ do
       let writer = writeBits 8 0xFF emptyBitWriter
           bs1 = bitWriterToByteString $ finalizeBitWriter writer

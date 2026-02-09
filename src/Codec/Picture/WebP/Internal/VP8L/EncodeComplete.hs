@@ -47,8 +47,9 @@ encodeVP8LComplete img =
 
       (pixelsToEncode, maybePredResult) =
         if usePredictorTransform
-          then let pr = computePredictorTransform sizeBits width height argbPixels
-               in (prResiduals pr, Just pr)
+          then
+            let pr = computePredictorTransform sizeBits width height argbPixels
+             in (prResiduals pr, Just pr)
           else (argbPixels, Nothing)
 
       -- Build histograms
@@ -87,11 +88,12 @@ writeTransformHeader (Just predResult) sizeBits w =
   let w1 = writeBit True w -- transform_present = 1
       w2 = writeBits 2 0 w1 -- transform_type = 0 (predictor)
       w3 = writeBits 3 (fromIntegral sizeBits) w2 -- size_bits (decoder uses this directly)
-      w4 = encodeSubresolutionImage
-            (prTransformWidth predResult)
-            (prTransformHeight predResult)
-            (prModeImage predResult)
-            w3
+      w4 =
+        encodeSubresolutionImage
+          (prTransformWidth predResult)
+          (prTransformHeight predResult)
+          (prModeImage predResult)
+          w3
       w5 = writeBit False w4 -- no more transforms
    in w5
 

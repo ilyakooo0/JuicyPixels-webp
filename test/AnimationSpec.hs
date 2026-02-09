@@ -233,14 +233,12 @@ spec = describe "Animation" $ do
 
       B.take 4 encoded `shouldBe` B.pack [82, 73, 70, 70] -- "RIFF"
       B.take 4 (B.drop 8 encoded) `shouldBe` B.pack [87, 69, 66, 80] -- "WEBP"
-
     it "file size is reasonable" $ do
       let frame = WebPEncodeFrame (ImageRGB8 $ generateImage (\_ _ -> PixelRGB8 128 128 128) 16 16) 100 0 0
           encoded = encodeWebPAnimation [frame] 16 16 80
 
       B.length encoded `shouldSatisfy` (> 50) -- At least header size
       B.length encoded `shouldSatisfy` (< 10000) -- Not unreasonably large
-
   describe "Edge Cases" $ do
     it "handles 1x1 frames" $ do
       let frame = WebPEncodeFrame (ImageRGB8 $ generateImage (\_ _ -> PixelRGB8 255 255 255) 1 1) 100 0 0
@@ -281,5 +279,5 @@ dynamicImageHeight (ImageRGB8 img) = imageHeight img
 dynamicImageHeight (ImageRGBA8 img) = imageHeight img
 dynamicImageHeight _ = 0
 
-zipWithM_ :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m ()
+zipWithM_ :: (Monad m) => (a -> b -> m c) -> [a] -> [b] -> m ()
 zipWithM_ f xs ys = sequence_ $ zipWith f xs ys

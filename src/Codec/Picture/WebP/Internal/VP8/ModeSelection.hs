@@ -9,7 +9,7 @@ where
 
 import Codec.Picture.WebP.Internal.VP8.Predict
 import Control.Monad.ST
-import Data.Bits ((.&.), shiftR)
+import Data.Bits (shiftR, (.&.))
 import qualified Data.Vector.Storable.Mutable as VSM
 import Data.Word
 
@@ -21,15 +21,15 @@ import Data.Word
 -- | Early exit threshold - if SAD is below this, stop searching
 -- This represents a "good enough" match that's unlikely to be beaten
 earlyExitThreshold16x16 :: Int
-earlyExitThreshold16x16 = 128  -- ~0.5 per pixel on average
+earlyExitThreshold16x16 = 128 -- ~0.5 per pixel on average
 {-# INLINE earlyExitThreshold16x16 #-}
 
 earlyExitThreshold8x8 :: Int
-earlyExitThreshold8x8 = 32  -- ~0.5 per pixel on average
+earlyExitThreshold8x8 = 32 -- ~0.5 per pixel on average
 {-# INLINE earlyExitThreshold8x8 #-}
 
 earlyExitThreshold4x4 :: Int
-earlyExitThreshold4x4 = 8  -- ~0.5 per pixel on average
+earlyExitThreshold4x4 = 8 -- ~0.5 per pixel on average
 {-# INLINE earlyExitThreshold4x4 #-}
 
 -- | Select best 16x16 intra prediction mode using SAD
@@ -94,8 +94,8 @@ selectIntra4x4Mode ::
   Int -> -- Sub-block index (0-15)
   ST s (Int, Int)
 selectIntra4x4Mode yOrig yRecon stride mbX mbY subBlock = do
-  let !subX = mbX + (subBlock .&. 3) * 4  -- subBlock `mod` 4 as bit op
-      !subY = mbY + (subBlock `shiftR` 2) * 4  -- subBlock `div` 4 as shift
+  let !subX = mbX + (subBlock .&. 3) * 4 -- subBlock `mod` 4 as bit op
+      !subY = mbY + (subBlock `shiftR` 2) * 4 -- subBlock `div` 4 as shift
 
   -- Allocate single temporary prediction buffer
   predBuf <- VSM.clone yRecon
@@ -103,14 +103,15 @@ selectIntra4x4Mode yOrig yRecon stride mbX mbY subBlock = do
   -- Try all 10 modes with early exit
   let go !mode !bestMode !bestSAD
         | mode > 9 = return (bestMode, bestSAD)
-        | bestSAD == 0 = return (bestMode, bestSAD)  -- Can't do better than 0
+        | bestSAD == 0 = return (bestMode, bestSAD) -- Can't do better than 0
         | otherwise = do
             predict4x4 mode predBuf stride subX subY
             !sad <- computeSAD4x4Fast yOrig predBuf stride subX subY
             if sad < bestSAD
-              then if sad < earlyExitThreshold4x4
-                     then return (mode, sad)  -- Early exit
-                     else go (mode + 1) mode sad
+              then
+                if sad < earlyExitThreshold4x4
+                  then return (mode, sad) -- Early exit
+                  else go (mode + 1) mode sad
               else go (mode + 1) bestMode bestSAD
 
   -- Start with mode 0

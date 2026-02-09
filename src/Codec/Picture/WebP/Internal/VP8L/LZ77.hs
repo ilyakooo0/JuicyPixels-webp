@@ -332,9 +332,10 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
 
                           -- Use Int64 instead of Integer for better performance
                           let (extra2, _) = readBits extraBits2 r3
-                              !base = if distCode < 4
-                                        then distCode + 1
-                                        else 5 + ((distCode - 2) .&. complement 1) `shiftL` extraBits2
+                              !base =
+                                if distCode < 4
+                                  then distCode + 1
+                                  else 5 + ((distCode - 2) .&. complement 1) `shiftL` extraBits2
                               !dist' = base + fromIntegral extra2 + 1
                           return dist'
 
@@ -376,33 +377,34 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
                 -- Only need to insert once for the color cache (it's the same color)
                 when doCache $ insertColorM color cache
                 loop (pos + actualLen) r
-              else if dist >= actualLen
-                then do
-                  -- Non-overlapping: can use bulk copy
-                  -- Copy in one batch using slice operations
-                  forM_ [0 .. actualLen - 1] $ \i -> do
-                    color <- VSM.unsafeRead out (srcPos + i)
-                    VSM.unsafeWrite out (pos + i) color
-                  -- Sample cache insertions (every 8th pixel to reduce overhead)
-                  when doCache $ do
-                    forM_ [0, 8 .. actualLen - 1] $ \i -> do
-                      color <- VSM.unsafeRead out (pos + i)
-                      insertColorM color cache
-                    -- Always insert the last pixel to ensure cache coherency
-                    when (actualLen > 0 && (actualLen - 1) `mod` 8 /= 0) $ do
-                      lastColor <- VSM.unsafeRead out (pos + actualLen - 1)
-                      insertColorM lastColor cache
-                  loop (pos + actualLen) r
-                else do
-                  -- Overlapping case: must copy pixel-by-pixel but still use mutable cache
-                  let copyOverlapping !i
-                        | i >= actualLen = loop (pos + actualLen) r
-                        | otherwise = do
-                            color <- VSM.unsafeRead out (srcPos + i)
-                            VSM.unsafeWrite out (pos + i) color
-                            when doCache $ insertColorM color cache
-                            copyOverlapping (i + 1)
-                  copyOverlapping 0
+              else
+                if dist >= actualLen
+                  then do
+                    -- Non-overlapping: can use bulk copy
+                    -- Copy in one batch using slice operations
+                    forM_ [0 .. actualLen - 1] $ \i -> do
+                      color <- VSM.unsafeRead out (srcPos + i)
+                      VSM.unsafeWrite out (pos + i) color
+                    -- Sample cache insertions (every 8th pixel to reduce overhead)
+                    when doCache $ do
+                      forM_ [0, 8 .. actualLen - 1] $ \i -> do
+                        color <- VSM.unsafeRead out (pos + i)
+                        insertColorM color cache
+                      -- Always insert the last pixel to ensure cache coherency
+                      when (actualLen > 0 && (actualLen - 1) `mod` 8 /= 0) $ do
+                        lastColor <- VSM.unsafeRead out (pos + actualLen - 1)
+                        insertColorM lastColor cache
+                    loop (pos + actualLen) r
+                  else do
+                    -- Overlapping case: must copy pixel-by-pixel but still use mutable cache
+                    let copyOverlapping !i
+                          | i >= actualLen = loop (pos + actualLen) r
+                          | otherwise = do
+                              color <- VSM.unsafeRead out (srcPos + i)
+                              VSM.unsafeWrite out (pos + i) color
+                              when doCache $ insertColorM color cache
+                              copyOverlapping (i + 1)
+                    copyOverlapping 0
 
   loop 0 reader
 

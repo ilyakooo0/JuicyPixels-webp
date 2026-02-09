@@ -12,7 +12,6 @@ import Test.QuickCheck
 -- The loop filter is an internal component that smooths block boundaries
 -- after VP8 lossy decoding. We test its effects indirectly through
 -- encode/decode cycles.
-
 spec :: Spec
 spec = describe "LoopFilter" $ do
   describe "Loop Filter Effects" $ do
@@ -167,7 +166,7 @@ spec = describe "LoopFilter" $ do
         Right (ImageRGB8 dec) -> do
           let PixelRGB8 rL _ _ = pixelAt dec 16 32 -- Left of edge
               PixelRGB8 rR _ _ = pixelAt dec 48 32 -- Right of edge
-          -- Edge should still be visible
+              -- Edge should still be visible
           (fromIntegral rR - fromIntegral rL :: Int) `shouldSatisfy` (> 100)
         _ -> expectationFailure "Decoding failed"
 
@@ -228,5 +227,5 @@ spec = describe "LoopFilter" $ do
         _ -> expectationFailure "Decoding failed"
 
 -- Helper
-forM_ :: Monad m => [a] -> (a -> m b) -> m ()
+forM_ :: (Monad m) => [a] -> (a -> m b) -> m ()
 forM_ xs f = sequence_ (map f xs)

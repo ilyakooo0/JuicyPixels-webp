@@ -309,5 +309,5 @@ mandelbrotIter cx cy maxIter = go 0 0 0
       | otherwise = go (x * x - y * y + cx) (2 * x * y + cy) (i + 1)
 
 -- forM_ for testing
-forM_ :: Monad m => [a] -> (a -> m b) -> m ()
+forM_ :: (Monad m) => [a] -> (a -> m b) -> m ()
 forM_ xs f = sequence_ (map f xs)

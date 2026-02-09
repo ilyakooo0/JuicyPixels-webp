@@ -56,9 +56,10 @@ applyAlphaFiltering width height filterMethod alphaData
         1 -> applyHorizontalFilter width height alphaData output
         2 -> applyVerticalFilter width height alphaData output
         3 -> applyGradientFilter width height alphaData output
-        _ -> -- Just copy the data unchanged
-             forM_ [0 .. width * height - 1] $ \i ->
-               VSM.unsafeWrite output i (alphaData `VS.unsafeIndex` i)
+        _ ->
+          -- Just copy the data unchanged
+          forM_ [0 .. width * height - 1] $ \i ->
+            VSM.unsafeWrite output i (alphaData `VS.unsafeIndex` i)
 
       VS.unsafeFreeze output
 
