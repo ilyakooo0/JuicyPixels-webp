@@ -32,12 +32,13 @@ encodeVP8LComplete img =
       height = imageHeight img
 
       -- Convert to ARGB pixels
+      !imgPixels = imageData img
       argbPixels = VS.generate (width * height) $ \i ->
-        let pixels = imageData img
-            r = pixels VS.! (i * 4)
-            g = pixels VS.! (i * 4 + 1)
-            b = pixels VS.! (i * 4 + 2)
-            a = pixels VS.! (i * 4 + 3)
+        let !base = i * 4
+            !r = imgPixels `VS.unsafeIndex` base
+            !g = imgPixels `VS.unsafeIndex` (base + 1)
+            !b = imgPixels `VS.unsafeIndex` (base + 2)
+            !a = imgPixels `VS.unsafeIndex` (base + 3)
          in packARGB a r g b
 
       -- Compute predictor transform (sizeBits=4 -> 16x16 blocks)
@@ -162,6 +163,7 @@ generateHuffmanCodes hists =
         }
 
 -- | Build lookup table from codes for fast encoding
+{-# INLINE buildLookup #-}
 buildLookup :: VU.Vector (Int, Word32, Int) -> VU.Vector (Word32, Int)
 buildLookup codes = runST $ do
   lookup <- VUM.replicate 256 (0, 0)
@@ -172,10 +174,11 @@ buildLookup codes = runST $ do
 
 -- | Generate Huffman codes from a histogram
 -- Returns vector of (symbol, codeValue, codeLength)
+{-# INLINE huffmanFromHistogram #-}
 huffmanFromHistogram :: VU.Vector Int -> VU.Vector (Int, Word32, Int)
 huffmanFromHistogram hist =
   let -- Find symbols with non-zero frequency
-      nonZeroSymbols = VU.ifilter (\i _ -> hist VU.! i > 0) (VU.enumFromN 0 (VU.length hist))
+      nonZeroSymbols = VU.findIndices (> 0) hist
       numSymbols = VU.length nonZeroSymbols
    in case numSymbols of
         0 -> VU.singleton (0, 0, 0) -- Empty: default to symbol 0, 0 bits needed
@@ -347,6 +350,7 @@ writeHuffmanCode codes alphabetSize w
       writeNormalCode codes alphabetSize w
 
 -- | Write simple code for 1 symbol
+{-# INLINE writeSimpleCode1 #-}
 writeSimpleCode1 :: Int -> BitWriter -> BitWriter
 writeSimpleCode1 sym w =
   let isFirst8Bits = sym > 1
@@ -360,6 +364,7 @@ writeSimpleCode1 sym w =
     (|>) = flip ($)
 
 -- | Write simple code for 2 symbols
+{-# INLINE writeSimpleCode2 #-}
 writeSimpleCode2 :: Int -> Int -> BitWriter -> BitWriter
 writeSimpleCode2 s1 s2 w =
   let isFirst8Bits = s1 > 1
@@ -440,6 +445,7 @@ writeNormalCode codes alphabetSize w =
    in w7
 
 -- | Build code length array from codes
+{-# INLINE buildCodeLengthArray #-}
 buildCodeLengthArray :: VU.Vector (Int, Word32, Int) -> Int -> VU.Vector Int
 buildCodeLengthArray codes size = runST $ do
   arr <- VUM.replicate size 0
@@ -449,6 +455,7 @@ buildCodeLengthArray codes size = runST $ do
   VU.unsafeFreeze arr
 
 -- | Find maximum symbol in codes
+{-# INLINE findMaxSymbol #-}
 findMaxSymbol :: VU.Vector (Int, Word32, Int) -> Int
 findMaxSymbol codes = VU.maximum $ VU.map (\(sym, _, _) -> sym) codes
 
@@ -554,34 +561,39 @@ writeCodeLengthsWithCLC _codeLengths _numSymbols rleSymbols clcCodes w =
     rleSymbols
 
 -- | Encode pixels using Huffman codes
+{-# INLINE encodePixels #-}
 encodePixels :: VS.Vector Word32 -> HuffmanCodes -> BitWriter -> BitWriter
 encodePixels pixels codes w =
-  VS.foldl'
-    ( \wa px ->
-        let g = fromIntegral ((px `shiftR` 8) .&. 0xFF) :: Int
-            r = fromIntegral ((px `shiftR` 16) .&. 0xFF) :: Int
-            b = fromIntegral (px .&. 0xFF) :: Int
-            a = fromIntegral ((px `shiftR` 24) .&. 0xFF) :: Int
+  let !greenLookup = lGreen codes
+      !redLookup = lRed codes
+      !blueLookup = lBlue codes
+      !alphaLookup = lAlpha codes
+   in VS.foldl'
+        ( \wa px ->
+            let !g = fromIntegral ((px `shiftR` 8) .&. 0xFF) :: Int
+                !r = fromIntegral ((px `shiftR` 16) .&. 0xFF) :: Int
+                !b = fromIntegral (px .&. 0xFF) :: Int
+                !a = fromIntegral ((px `shiftR` 24) .&. 0xFF) :: Int
 
-            -- For single-symbol codes, the lookup returns (0, 0) for unused entries
-            -- We need to handle the case where the lookup is empty
-            gEntry = lGreen codes VU.! g
-            rEntry = lRed codes VU.! r
-            bEntry = lBlue codes VU.! b
-            aEntry = lAlpha codes VU.! a
+                -- Use unsafe indexing - indices are guaranteed valid (0-255 from 8-bit components)
+                !gEntry = greenLookup `VU.unsafeIndex` g
+                !rEntry = redLookup `VU.unsafeIndex` r
+                !bEntry = blueLookup `VU.unsafeIndex` b
+                !aEntry = alphaLookup `VU.unsafeIndex` a
 
-            -- Only write bits if length > 0
-            wa1 = if snd gEntry > 0 then writeBitsReversed (snd gEntry) (fromIntegral (fst gEntry)) wa else wa
-            wa2 = if snd rEntry > 0 then writeBitsReversed (snd rEntry) (fromIntegral (fst rEntry)) wa1 else wa1
-            wa3 = if snd bEntry > 0 then writeBitsReversed (snd bEntry) (fromIntegral (fst bEntry)) wa2 else wa2
-            wa4 = if snd aEntry > 0 then writeBitsReversed (snd aEntry) (fromIntegral (fst aEntry)) wa3 else wa3
-         in wa4
-    )
-    w
-    pixels
+                -- Only write bits if length > 0
+                !wa1 = if snd gEntry > 0 then writeBitsReversed (snd gEntry) (fromIntegral (fst gEntry)) wa else wa
+                !wa2 = if snd rEntry > 0 then writeBitsReversed (snd rEntry) (fromIntegral (fst rEntry)) wa1 else wa1
+                !wa3 = if snd bEntry > 0 then writeBitsReversed (snd bEntry) (fromIntegral (fst bEntry)) wa2 else wa2
+                !wa4 = if snd aEntry > 0 then writeBitsReversed (snd aEntry) (fromIntegral (fst aEntry)) wa3 else wa3
+             in wa4
+        )
+        w
+        pixels
 
 -- Helper functions
 
+{-# INLINE packARGB #-}
 packARGB :: Word8 -> Word8 -> Word8 -> Word8 -> Word32
 packARGB a r g b =
   (fromIntegral a `shiftL` 24)
@@ -589,6 +601,7 @@ packARGB a r g b =
     .|. (fromIntegral g `shiftL` 8)
     .|. fromIntegral b
 
+{-# INLINE ceilLog2 #-}
 ceilLog2 :: Int -> Int
 ceilLog2 n
   | n <= 1 = 0

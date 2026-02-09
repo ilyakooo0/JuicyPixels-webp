@@ -197,6 +197,7 @@ decodeCat6 decoder =
    in (if sign then -value else value, d12)
 
 -- | Get coefficient probabilities for a position
+{-# INLINE getCoeffProbs #-}
 getCoeffProbs :: VU.Vector Word8 -> Int -> Int -> V.Vector Word8
 getCoeffProbs probs baseIdx offset =
-  V.generate (11 - offset) $ \i -> probs VU.! (baseIdx + offset + i)
+  V.generate (11 - offset) $ \i -> probs `VU.unsafeIndex` (baseIdx + offset + i)

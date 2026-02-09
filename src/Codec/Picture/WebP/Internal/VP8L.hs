@@ -183,6 +183,7 @@ decodeVP8LImageData width height reader _transforms = do
   decodeLZ77 width height maybeCache codeGroup entropyImage reader4
 
 -- | Count the number of entropy groups in the entropy image
+{-# INLINE countEntropyGroups #-}
 countEntropyGroups :: VS.Vector Word32 -> Int
 countEntropyGroups entropyImage =
   let maxGroup = VS.foldl' (\acc pixel -> max acc (fromIntegral ((pixel `shiftR` 8) .&. 0xFF))) 0 entropyImage
@@ -257,16 +258,18 @@ applySubtractionCoding palette size = VS.generate size $ \i ->
        in (newA `shiftL` 24) .|. (newR `shiftL` 16) .|. (newG `shiftL` 8) .|. newB
 
 -- | Convert pixel data to JuicyPixels image
+{-# INLINE pixelsToImage #-}
 pixelsToImage :: Int -> Int -> VS.Vector Word32 -> Bool -> Image PixelRGBA8
 pixelsToImage width height pixels alphaIsUsed =
   let totalComponents = width * height * 4
+      !pixelsLen = VS.length pixels
       pixelData = VS.generate totalComponents $ \i ->
-        let pixelIdx = i `div` 4
-            component = i `mod` 4
-         in if pixelIdx < 0 || pixelIdx >= VS.length pixels
-              then error $ "Pixel index out of bounds: " ++ show pixelIdx ++ " (pixels length: " ++ show (VS.length pixels) ++ ", i=" ++ show i ++ ")"
+        let !pixelIdx = i `shiftR` 2  -- i `div` 4
+            !component = i .&. 3       -- i `mod` 4
+         in if pixelIdx < 0 || pixelIdx >= pixelsLen
+              then error $ "Pixel index out of bounds: " ++ show pixelIdx ++ " (pixels length: " ++ show pixelsLen ++ ", i=" ++ show i ++ ")"
               else
-                let pixel = pixels VS.! pixelIdx
+                let pixel = pixels `VS.unsafeIndex` pixelIdx
                  in case component of
                       0 -> fromIntegral ((pixel `shiftR` 16) .&. 0xFF) -- R
                       1 -> fromIntegral ((pixel `shiftR` 8) .&. 0xFF) -- G

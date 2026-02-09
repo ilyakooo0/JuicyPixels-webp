@@ -93,6 +93,7 @@ encodeCoefficients coeffs coeffProbs blockType initialCtx startPos encoder = do
 -- | Encode a token, optionally skipping the first bit (for skipEOB after DCT_0)
 -- When skipEOB is True, we find the path through the full tree but skip writing
 -- the first bit, since the decoder knows we're not at EOB
+{-# INLINE encodeTokenWithSkip #-}
 encodeTokenWithSkip ::
   VU.Vector Int8 ->
   VU.Vector Word8 ->
@@ -144,6 +145,7 @@ coeffToToken coeff
     absVal = abs (fromIntegral coeff :: Int)
 
 -- | Encode extra bits for category tokens
+{-# INLINE encodeExtraBits #-}
 encodeExtraBits :: Int -> Int -> Int16 -> BoolEncoder -> BoolEncoder
 encodeExtraBits token extraBits coeff enc
   | token >= 1 && token <= 4 =
@@ -242,6 +244,7 @@ encodeCat6 extraBits coeff enc =
    in enc12
 
 -- | Get coefficient probabilities starting at index
+{-# INLINE getCoeffProbs #-}
 getCoeffProbs :: VU.Vector Word8 -> Int -> Int -> VU.Vector Word8
 getCoeffProbs allProbs startIdx offset =
   VU.drop (startIdx + offset) allProbs
