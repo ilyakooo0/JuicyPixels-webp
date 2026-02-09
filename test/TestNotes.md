@@ -1,6 +1,6 @@
 # Test Suite Notes
 
-## Current Test Status: 222 tests, ~196 passing, 6 pending
+## Current Test Status: 421 tests, all passing
 
 ### Known Test Limitations
 

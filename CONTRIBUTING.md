@@ -19,18 +19,17 @@ Thank you for your interest in contributing to JuicyPixels-webp!
 
 ```
 JuicyPixels-webp/
-├── src/                        # Source code (18 modules, ~3,850 lines)
+├── src/                        # Source code (40 modules, ~11,273 lines)
 │   └── Codec/Picture/
 │       ├── WebP.hs            # Public API
 │       └── WebP/Internal/     # Internal modules
-├── test/                       # Test suite (11 modules, ~1,850 lines)
-├── examples/                   # Example programs
+├── test/                       # Test suite (27 modules, ~5,244 lines)
 ├── docs/                       # Specification documents
 │   ├── webp-format.md         # VP8L lossless spec (RFC 9649)
 │   ├── vp8-bitstream.md       # VP8 lossy spec (RFC 6386)
 │   └── libwebp/               # Reference implementation
-├── PLAN.md                     # Implementation roadmap
-├── TESTING.md                  # Test documentation
+├── PLAN.md                     # Original implementation plan
+├── STATUS.md                   # Current implementation status
 └── README.md
 ```
 
@@ -46,7 +45,7 @@ JuicyPixels-webp/
 
 ### Adding Features
 
-1. Check `PLAN.md` for planned features
+1. Check `STATUS.md` for current state and future enhancements
 2. Create a branch: `git checkout -b feature/your-feature`
 3. Implement with tests
 4. Ensure all tests pass: `stack test`
@@ -58,7 +57,7 @@ JuicyPixels-webp/
 1. Add a failing test that demonstrates the bug
 2. Fix the bug
 3. Verify the test now passes
-4. Update TESTING.md if relevant
+4. Update test/TestNotes.md if relevant
 
 ### Improving Performance
 
@@ -83,41 +82,26 @@ Test guidelines:
 ## Documentation
 
 - Update `README.md` for API changes
-- Update `TESTING.md` for new tests
-- Update `PLAN.md` for implementation progress
+- Update `test/TestNotes.md` for new tests
+- Update `STATUS.md` for implementation progress
 - Add Haddock comments for public APIs
 
-## Known Issues / Help Wanted
+## Areas for Improvement
 
-### High Priority
+### Encoding Quality
+- **VP8L transforms** — predictor, color, and color-indexing transforms not yet used in encoding (larger files, correct output)
+- **VP8 coefficient probability updates** — encoder uses fixed defaults
+- **VP8 segmentation** — decoder supports it, encoder doesn't use it
+- **Advanced mode selection** — encoder uses simple heuristics
 
-1. **VP8L Decoder Bug**: Real images fail with "No symbols with non-zero code length"
-   - Location: `src/Codec/Picture/WebP/Internal/VP8L/PrefixCode.hs`
-   - Issue: Prefix code reading logic has bugs with complex bitstreams
-   - Test: `test/data/test_webp_js.webp`
+### Performance
+- Benchmark against libwebp
+- SIMD acceleration
+- Streaming decode for very large images
 
-2. **VP8 Lossy Decoder**: Currently a stub
-   - Location: `src/Codec/Picture/WebP/Internal/VP8.hs`
-   - Needed: Integrate existing components (IDCT, prediction, loop filter)
-   - All supporting modules are complete
-
-### Medium Priority
-
-3. **Animation Compositing**: Frame assembly not implemented
-   - Location: `src/Codec/Picture/WebP/Internal/Animation.hs`
-   - Needed: Canvas compositing with alpha blending
-
-4. **Performance Optimization**:
-   - Add INLINE pragmas to hot paths
-   - Benchmark against libwebp
-   - Optimize LZ77 decode loop
-
-### Low Priority
-
-5. **Extended Test Coverage**:
-   - Add QuickCheck property tests
-   - Add fuzz testing
-   - Compare against dwebp output
+### Testing
+- Fuzz testing with random/malformed inputs
+- Comparison against `dwebp` output for more image variants
 
 ## Building and Testing
 
@@ -182,8 +166,8 @@ Before submitting a PR:
 
 ## Questions?
 
-- Check `PLAN.md` for implementation details
-- Check `TESTING.md` for test structure
+- Check `STATUS.md` for current implementation state
+- Check `test/TestNotes.md` for test structure
 - Open an issue for discussions
 
 ## License

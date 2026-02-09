@@ -38,16 +38,16 @@ case decodeWebP fileData of
 import Codec.Picture
 import Codec.Picture.WebP
 
--- Lossless encoding
-let webpData = encodeWebPLossless (ImageRGBA8 img)
+-- Lossless encoding (takes Image PixelRGBA8)
+let webpData = encodeWebPLossless img
 B.writeFile "output.webp" webpData
 
--- Lossy encoding with quality (0-100)
-let webpData = encodeWebPLossy 80 (ImageRGB8 img)
+-- Lossy encoding with quality (0-100, takes Image PixelRGB8)
+let webpData = encodeWebPLossy img 80
 B.writeFile "output.webp" webpData
 
--- Lossy with alpha channel
-let webpData = encodeWebPLossyWithAlpha 80 (ImageRGBA8 img)
+-- Lossy with alpha channel (takes Image PixelRGBA8)
+let webpData = encodeWebPLossyWithAlpha img 80
 B.writeFile "output.webp" webpData
 ```
 
@@ -67,7 +67,7 @@ let webpData = encodeWebPAnimation frames canvasWidth canvasHeight quality
 ## Testing
 
 ```bash
-stack test  # 217 tests passing
+stack test  # 421 tests passing
 ```
 
 ## API
@@ -81,16 +81,17 @@ stack test  # 217 tests passing
 
 ### Encoding
 
-- `encodeWebPLossless :: DynamicImage -> ByteString`
-- `encodeWebPLossy :: Int -> DynamicImage -> ByteString`
-- `encodeWebPLossyWithAlpha :: Int -> DynamicImage -> ByteString`
+- `encodeWebPLossless :: Image PixelRGBA8 -> ByteString`
+- `encodeWebPLossy :: Image PixelRGB8 -> Int -> ByteString`
+- `encodeWebPLossyWithAlpha :: Image PixelRGBA8 -> Int -> ByteString`
 - `encodeWebPAnimation :: [WebPEncodeFrame] -> Int -> Int -> Int -> ByteString`
 
 ## Documentation
 
 - `docs/webp-format.md` - VP8L lossless specification
 - `docs/vp8-bitstream.md` - VP8 lossy specification
-- `PLAN.md` - Original implementation plan
+- `STATUS.md` - Current implementation status
+- `PLAN.md` - Original implementation plan (historical)
 
 ## License
 

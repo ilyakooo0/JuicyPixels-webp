@@ -1,6 +1,8 @@
 # Implementation Plan: JuicyPixels-webp
 
-Pure Haskell WebP image decoder integrating with JuicyPixels types. Decode-only (no encoding). Covers lossy (VP8), lossless (VP8L), alpha, and animation.
+> **Note**: This was the original decode-only implementation plan. The project now also includes full encoding support (VP8L lossless, VP8 lossy, alpha, animation). See `STATUS.md` for the current state.
+
+Pure Haskell WebP image decoder integrating with JuicyPixels types. Covers lossy (VP8), lossless (VP8L), alpha, and animation.
 
 ## Module Structure
 

@@ -2,8 +2,8 @@
 
 Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 
-**Total Implementation:** ~9,883 lines of Haskell code across 39 modules
-**Test Status:** 217 tests - all passing
+**Total Implementation:** ~11,273 lines of Haskell code across 40 modules
+**Test Status:** 421 tests - all passing
 
 ---
 
@@ -156,9 +156,9 @@ decodeWebPAnimationComposited :: ByteString -> Either String [Image PixelRGBA8]
 ### Encoding
 ```haskell
 encodeWebPLossless :: Image PixelRGBA8 -> ByteString
-encodeWebPLossy :: Image PixelRGB8 -> Int -> ByteString  -- quality 0-100
-encodeWebPLossyWithAlpha :: Image PixelRGBA8 -> Int -> ByteString
-encodeWebPAnimation :: [WebPEncodeFrame] -> Int -> Int -> Int -> ByteString
+encodeWebPLossy :: Image PixelRGB8 -> Int -> ByteString       -- image, quality (0-100)
+encodeWebPLossyWithAlpha :: Image PixelRGBA8 -> Int -> ByteString  -- image, quality (0-100)
+encodeWebPAnimation :: [WebPEncodeFrame] -> Int -> Int -> Int -> ByteString  -- frames, width, height, quality
 ```
 
 ### Types
@@ -195,7 +195,14 @@ Internal/
 │   ├── Transform.hs                          -- All 4 transforms
 │   ├── LZ77.hs                               -- LZ77 decode loop
 │   ├── EncodeComplete.hs                     -- Main encoder with Huffman
-│   └── ...                                   -- Alternative encoders
+│   ├── EncodeAny.hs                          -- Dynamic image encoding
+│   ├── EncodeFull.hs                         -- Full encoding pipeline
+│   ├── EncodeIdentity.hs                     -- Identity encoder
+│   ├── EncodeSimple.hs                       -- Simple encoder
+│   ├── EncodeUncompressed.hs                 -- Uncompressed encoder
+│   ├── EncodeWorking.hs                      -- Working encoder utilities
+│   ├── PredictorEncode.hs                    -- Predictor transform encoding
+│   └── SubresolutionEncode.hs                -- Subresolution image encoding
 │
 ├── VP8/                                      -- VP8 Lossy
 │   ├── BoolDecoder.hs                        -- Arithmetic range coder
@@ -211,7 +218,10 @@ Internal/
 │   ├── DCT.hs                                -- Forward DCT
 │   ├── Quantize.hs                           -- Quantization
 │   ├── Encode.hs                             -- VP8 encoder
-│   └── ...                                   -- Encoding components
+│   ├── EncodeCoefficients.hs                 -- Coefficient encoding
+│   ├── EncodeHeader.hs                       -- Frame header encoding
+│   ├── EncodeMode.hs                         -- Mode encoding
+│   └── ModeSelection.hs                      -- Mode selection heuristics
 │
 ├── Alpha.hs                                  -- ALPH chunk decoder
 ├── AlphaEncode.hs                            -- ALPH chunk encoder
