@@ -15,6 +15,7 @@ import Data.Bits
 import qualified Data.ByteString as B
 import Data.List (sortBy)
 import Data.Ord (comparing)
+import qualified Data.Vector.Algorithms.Intro as VA
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import qualified Data.Vector.Unboxed.Mutable as VUM
@@ -187,13 +188,17 @@ huffmanFromHistogram hist =
           buildHuffmanCodes nonZeroSymbols hist
 
 -- | Build Huffman codes for 3+ symbols using length-limited Huffman
+{-# INLINE buildHuffmanCodes #-}
 buildHuffmanCodes :: VU.Vector Int -> VU.Vector Int -> VU.Vector (Int, Word32, Int)
 buildHuffmanCodes symbols hist =
   let -- Get symbol frequencies
       symFreqs = VU.map (\sym -> (sym, hist VU.! sym)) symbols
 
-      -- Sort by frequency (ascending) for Huffman tree building
-      sortedSymFreqs = VU.fromList $ sortBy (comparing snd) $ VU.toList symFreqs
+      -- Sort by frequency (ascending) for Huffman tree building using in-place sort
+      sortedSymFreqs = runST $ do
+        mv <- VU.thaw symFreqs
+        VA.sortBy (comparing snd) mv
+        VU.unsafeFreeze mv
 
       -- Compute code lengths using length-limited Huffman
       codeLengths = computeCodeLengths sortedSymFreqs
@@ -205,6 +210,7 @@ buildHuffmanCodes symbols hist =
 -- | Compute length-limited Huffman code lengths
 -- Uses a simplified approach: assigns lengths based on frequency ranking
 -- with proper length limiting to maxCodeLength
+{-# INLINE computeCodeLengths #-}
 computeCodeLengths :: VU.Vector (Int, Int) -> VU.Vector (Int, Int)
 computeCodeLengths symFreqs =
   let n = VU.length symFreqs
@@ -214,8 +220,12 @@ computeCodeLengths symFreqs =
       baseLen = max 1 $ ceilLog2 n
 
       -- Assign lengths: more frequent symbols get shorter codes
-      -- Sort by frequency descending and assign lengths
-      sortedDesc = VU.fromList $ reverse $ sortBy (comparing snd) $ VU.toList symFreqs
+      -- Sort by frequency descending and assign lengths using in-place sort
+      sortedDesc = runST $ do
+        mv <- VU.thaw symFreqs
+        -- Sort descending by negating the comparison
+        VA.sortBy (\(_, f1) (_, f2) -> compare f2 f1) mv
+        VU.unsafeFreeze mv
 
       -- Assign lengths ensuring Kraft inequality
       withLengths = assignLengths sortedDesc baseLen

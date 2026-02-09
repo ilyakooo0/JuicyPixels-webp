@@ -72,6 +72,7 @@ library
     , bytestring
     , primitive
     , vector
+    , vector-algorithms
   default-language: Haskell2010
 
 test-suite JuicyPixels-webp-test
@@ -122,6 +123,7 @@ test-suite JuicyPixels-webp-test
     , hspec
     , primitive
     , vector
+    , vector-algorithms
   default-language: Haskell2010
 
 benchmark JuicyPixels-webp-bench
@@ -145,4 +147,5 @@ benchmark JuicyPixels-webp-bench
     , directory
     , primitive
     , vector
+    , vector-algorithms
   default-language: Haskell2010

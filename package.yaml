@@ -10,6 +10,7 @@ dependencies:
   - JuicyPixels
   - bytestring
   - vector
+  - vector-algorithms
   - primitive
   - binary
 

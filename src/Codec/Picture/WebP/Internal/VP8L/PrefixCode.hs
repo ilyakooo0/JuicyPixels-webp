@@ -32,6 +32,7 @@ kCodeLengthCodeOrder =
 
 -- | Build a prefix code from code lengths
 -- Returns Left error message on invalid input
+{-# INLINE buildPrefixCode #-}
 buildPrefixCode :: VU.Vector Int -> Either String PrefixCode
 buildPrefixCode codeLengths
   | VU.null codeLengths = Left "Empty code lengths"
@@ -270,14 +271,13 @@ buildPrefixCodeTable codeLengths = runST $ do
 -- | Calculate the number of bits needed for a secondary table
 -- Simplified: always allocate maximum size (7 bits) for secondary tables
 -- This avoids the complex calculation and ensures all symbols fit
+{-# INLINE calculateSecondaryTableBits #-}
 calculateSecondaryTableBits :: VUM.MVector s Int -> Int -> Int -> Int -> ST s Int
-calculateSecondaryTableBits blCount currentLen primaryBits maxCodeLength = do
+calculateSecondaryTableBits _blCount _currentLen primaryBits maxCodeLength =
   -- Simple approach: just use the maximum possible secondary bits
   -- which is (maxCodeLength - primaryBits)
-  let maxSecondaryBits = maxCodeLength - primaryBits
-      -- But cap it at 7 bits (128 entries) for efficiency
-      tableBits = min 7 maxSecondaryBits
-  return tableBits
+  -- But cap it at 7 bits (128 entries) for efficiency
+  return $! min 7 (maxCodeLength - primaryBits)
 
 -- | Decode a single symbol from the bitstream using a prefix code
 {-# INLINE decodeSymbol #-}
@@ -324,6 +324,7 @@ decodeSymbol (PrefixCodeTable table primaryBits) reader =
 
 -- | Read code lengths for a prefix code from the bitstream
 -- Handles simple codes (1-2 symbols) and normal codes with repeat codes
+{-# INLINE readCodeLengths #-}
 readCodeLengths :: Int -> BitReader -> Either String (VU.Vector Int, BitReader)
 readCodeLengths alphabetSize reader = do
   let (isSimple, reader1) = readBit reader
@@ -358,6 +359,7 @@ readCodeLengths alphabetSize reader = do
           readSymbolCodeLengths alphabetSize codeLengthCode reader3
 
 -- | Read code lengths for the code length alphabet
+{-# INLINE readCodeLengthLengths #-}
 readCodeLengthLengths :: Int -> BitReader -> (VU.Vector Int, BitReader)
 readCodeLengthLengths numCodeLengths reader = runST $ do
   lengths <- VUM.replicate 19 0
@@ -373,6 +375,7 @@ readCodeLengthLengths numCodeLengths reader = runST $ do
   loop 0 reader
 
 -- | Read symbol code lengths using the code length code
+{-# INLINE readSymbolCodeLengths #-}
 readSymbolCodeLengths :: Int -> PrefixCode -> BitReader -> Either String (VU.Vector Int, BitReader)
 readSymbolCodeLengths alphabetSize codeLengthCode reader =
   let (useMaxSymbol, reader1) = readBit reader
