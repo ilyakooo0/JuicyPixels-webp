@@ -168,8 +168,8 @@ reconstructBPred yBuf mbY mbX mbStride decoder coeffProbs header = do
 
   -- Decode each 4x4 block with its own mode
   let decodeBBlock blockIdx dec = do
-        let !by = blockIdx `shiftR` 2  -- div 4
-            !bx = blockIdx .&. 3       -- mod 4
+        let !by = blockIdx `shiftR` 2 -- div 4
+            !bx = blockIdx .&. 3 -- mod 4
             blockY = mbYBase + by * 4
             blockX = mbXBase + bx * 4
 
@@ -234,8 +234,8 @@ reconstructMB16x16 yBuf mbY mbX mbStride yMode y2Coeffs decoder coeffProbs dequa
 
   -- Decode and apply each 4x4 Y block
   let decodeYBlock blockIdx dec = do
-        let !by = blockIdx `shiftR` 2  -- div 4
-            !bx = blockIdx .&. 3       -- mod 4
+        let !by = blockIdx `shiftR` 2 -- div 4
+            !bx = blockIdx .&. 3 -- mod 4
 
         -- Decode coefficients for this 4x4 block
         (coeffs, hasNonzero, dec') <- decodeCoefficients dec coeffProbs 0 0 1 -- Block type 0 (Y after Y2), start at pos 1 (DC is from Y2)
@@ -294,8 +294,8 @@ reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact c
 
   -- Decode and apply each 4x4 chroma block (4 blocks total for 8x8)
   let decodeUVBlock blockIdx dec = do
-        let !by = blockIdx `shiftR` 1  -- div 2
-            !bx = blockIdx .&. 1       -- mod 2
+        let !by = blockIdx `shiftR` 1 -- div 2
+            !bx = blockIdx .&. 1 -- mod 2
 
         -- Decode coefficients (use coefficient block type for probability lookup)
         (coeffs, hasNonzero, dec') <- decodeCoefficients dec coeffProbs coeffBlockType 0 0
