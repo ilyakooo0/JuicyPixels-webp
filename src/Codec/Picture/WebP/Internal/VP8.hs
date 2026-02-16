@@ -35,47 +35,53 @@ decodeVP8 bs = do
       mbWidth = (width + 15) `div` 16
       mbHeight = (height + 15) `div` 16
 
-  -- Simple implementation: decode macroblocks and apply basic transforms
+  -- Initialize the DCT partition decoder
+  -- With 1 DCT partition, the data follows immediately after partition 0
+  let dctPartitions = vp8DCTPartitions header
+      dctDecoder = case dctPartitions of
+        (p : _) -> initBoolDecoder p
+        [] -> initBoolDecoder B.empty -- Fallback: empty partition
+
   let pixelData = runST $ do
         -- Allocate YUV buffers
         yBuf <- VSM.replicate (mbWidth * 16 * mbHeight * 16) (128 :: Word8)
         uBuf <- VSM.replicate (mbWidth * 8 * mbHeight * 8) (128 :: Word8)
         vBuf <- VSM.replicate (mbWidth * 8 * mbHeight * 8) (128 :: Word8)
 
-        -- Use decoder state from header (already positioned after compressed header)
-        let decoder = vp8Decoder header
+        -- Partition 0 decoder: reads modes (positioned after compressed header)
+        let modeDecoder = vp8Decoder header
             coeffProbs = vp8CoeffProbs header
 
-        -- Decode all macroblocks with mode reading and coefficient decoding
-        let decodeMacroblocks !mbY !mbX !decoder
-              | mbY >= mbHeight = return decoder
-              | mbX >= mbWidth = decodeMacroblocks (mbY + 1) 0 decoder
+        -- Decode all macroblocks with separate decoders for modes and coefficients
+        let decodeMacroblocks !mbY !mbX !modeDec !coeffDec
+              | mbY >= mbHeight = return (modeDec, coeffDec)
+              | mbX >= mbWidth = decodeMacroblocks (mbY + 1) 0 modeDec coeffDec
               | otherwise = do
-                  -- Read Y mode (luma prediction mode)
-                  let (yMode, decoder1) = boolReadTree kfYModeTree kfYModeProbs decoder
+                  -- Read Y mode from partition 0
+                  let (yMode, modeDec1) = boolReadTree kfYModeTree kfYModeProbs modeDec
 
-                  -- Read UV mode
-                  let (uvMode, decoder2) = boolReadTree kfUVModeTree kfUVModeProbs decoder1
+                  -- Read UV mode from partition 0
+                  let (uvMode, modeDec2) = boolReadTree kfUVModeTree kfUVModeProbs modeDec1
 
-                  -- Full coefficient-based reconstruction
-                  decoderAfterMB <-
+                  -- Process macroblock, threading both decoders
+                  (modeDecAfterMB, coeffDecAfterMB) <-
                     if yMode == 4
                       then do
-                        -- B_PRED: 16 4x4 blocks with individual modes
-                        decoderBPred <- reconstructBPred yBuf mbY mbX mbWidth decoder2 coeffProbs header
+                        -- B_PRED: read sub-block modes from partition 0, coefficients from DCT partition
+                        (modeDec3, coeffDec') <- reconstructBPred yBuf mbY mbX mbWidth modeDec2 coeffDec coeffProbs header
 
                         -- Reconstruct U and V with 8x8 prediction
                         predict8x8 uvMode uBuf (mbWidth * 8) (mbX * 8) (mbY * 8)
                         predict8x8 uvMode vBuf (mbWidth * 8) (mbX * 8) (mbY * 8)
-                        decoderU <- reconstructChroma uBuf mbY mbX mbWidth uvMode decoderBPred coeffProbs (computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0) 2 -- U = block type 2
-                        decoderV <- reconstructChroma vBuf mbY mbX mbWidth uvMode decoderU coeffProbs (computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0) 3 -- V = block type 3
-                        return decoderV
+                        coeffDecU <- reconstructChroma uBuf mbY mbX mbWidth uvMode coeffDec' coeffProbs (computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0) 2
+                        coeffDecV <- reconstructChroma vBuf mbY mbX mbWidth uvMode coeffDecU coeffProbs (computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0) 3
+                        return (modeDec3, coeffDecV)
                       else do
-                        -- Decode Y2 block (contains DC values for 16 Y blocks)
-                        let (skip, decoder3) =
+                        -- Non-B_PRED: skip flag from partition 0, coefficients from DCT partition
+                        let (skip, modeDec3) =
                               if vp8SkipEnabled header
-                                then boolRead (vp8ProbSkipFalse header) decoder2
-                                else (False, decoder2)
+                                then boolRead (vp8ProbSkipFalse header) modeDec2
+                                else (False, modeDec2)
 
                         if skip
                           then do
@@ -85,10 +91,10 @@ decodeVP8 bs = do
                             predict16x16 yMode yBuf (mbWidth * 16) mbXBase mbYBase
                             predict8x8 uvMode uBuf (mbWidth * 8) (mbX * 8) (mbY * 8)
                             predict8x8 uvMode vBuf (mbWidth * 8) (mbX * 8) (mbY * 8)
-                            return decoder3
+                            return (modeDec3, coeffDec)
                           else do
-                            -- Decode Y2 block (DC coefficients)
-                            (y2Coeffs, _, decoder4) <- decodeCoefficients decoder3 coeffProbs 1 0 0
+                            -- Decode Y2 block from DCT partition
+                            (y2Coeffs, _, coeffDec1) <- decodeCoefficients coeffDec coeffProbs 1 0 0
 
                             -- Dequantize and apply WHT
                             let dequantFacts = computeDequantFactors (vp8QuantIndices header) (vp8Segments header)
@@ -96,18 +102,18 @@ decodeVP8 bs = do
                             dequantizeBlock dequantFact 1 y2Coeffs
                             iwht4x4 y2Coeffs
 
-                            -- Decode and reconstruct 16 Y blocks
-                            decoder5 <- reconstructMB16x16 yBuf mbY mbX mbWidth yMode y2Coeffs decoder4 coeffProbs dequantFact
+                            -- Decode and reconstruct 16 Y blocks from DCT partition
+                            coeffDec2 <- reconstructMB16x16 yBuf mbY mbX mbWidth yMode y2Coeffs coeffDec1 coeffProbs dequantFact
 
-                            -- Reconstruct U and V blocks (4 blocks each)
-                            decoder6 <- reconstructChroma uBuf mbY mbX mbWidth uvMode decoder5 coeffProbs dequantFact 2 -- U = block type 2
-                            decoder7 <- reconstructChroma vBuf mbY mbX mbWidth uvMode decoder6 coeffProbs dequantFact 3 -- V = block type 3
-                            return decoder7
+                            -- Reconstruct U and V blocks from DCT partition
+                            coeffDec3 <- reconstructChroma uBuf mbY mbX mbWidth uvMode coeffDec2 coeffProbs dequantFact 2
+                            coeffDec4 <- reconstructChroma vBuf mbY mbX mbWidth uvMode coeffDec3 coeffProbs dequantFact 3
+                            return (modeDec3, coeffDec4)
 
-                  -- Continue to next macroblock - USE THE UPDATED DECODER!
-                  decodeMacroblocks mbY (mbX + 1) decoderAfterMB
+                  -- Continue to next macroblock with updated decoders
+                  decodeMacroblocks mbY (mbX + 1) modeDecAfterMB coeffDecAfterMB
 
-        _finalDecoder <- decodeMacroblocks 0 0 decoder
+        (_finalModeDec, _finalCoeffDec) <- decodeMacroblocks 0 0 modeDecoder dctDecoder
 
         -- Apply loop filter to reconstructed frame
         when (vp8FilterLevel header > 0) $ do
@@ -148,43 +154,40 @@ decodeVP8 bs = do
   return $ Image width height pixelData
 
 -- | Reconstruct B_PRED macroblock (16 individual 4x4 blocks)
+-- Sub-block modes are read from modeDecoder (partition 0)
+-- Coefficients are read from coeffDecoder (DCT partition)
 reconstructBPred ::
   VSM.MVector s Word8 ->
   Int ->
   Int ->
   Int ->
-  BoolDecoder ->
+  BoolDecoder -> -- Mode decoder (partition 0) - for sub-block modes
+  BoolDecoder -> -- Coefficient decoder (DCT partition)
   VU.Vector Word8 ->
   VP8FrameHeader ->
-  ST s BoolDecoder
-reconstructBPred yBuf mbY mbX mbStride decoder coeffProbs header = do
+  ST s (BoolDecoder, BoolDecoder)
+reconstructBPred yBuf mbY mbX mbStride modeDecoder coeffDecoder coeffProbs header = do
   let mbYBase = mbY * 16
       mbXBase = mbX * 16
       dequantFact = computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0
 
-  -- For B_PRED, we need to track above and left modes for context
-  -- Simplified: use default context (mode 0 = DC_PRED)
-  let defaultProbs = kfBmodeProbs -- Flat vector, use default probabilities
-
   -- Decode each 4x4 block with its own mode
-  let decodeBBlock blockIdx dec = do
+  let decodeBBlock blockIdx modeDec coeffDec = do
         let !by = blockIdx `shiftR` 2 -- div 4
             !bx = blockIdx .&. 3 -- mod 4
             blockY = mbYBase + by * 4
             blockX = mbXBase + bx * 4
 
-        -- Read 4x4 intra mode for this block (using simplified context)
-        -- In full implementation, would use above/left modes for context
-        -- For now, use mode 0,0 (DC prediction for both neighbors)
+        -- Read 4x4 intra mode from partition 0
         let probOffset = 0 * 10 * 9 + 0 * 9 -- above=0, left=0
-            probs = V.convert $ VU.drop probOffset kfBmodeProbs -- Convert to boxed vector
-            (bMode, dec1) = boolReadTree kfBmodeTree probs dec
+            probs = V.convert $ VU.drop probOffset kfBmodeProbs
+            (bMode, modeDec') = boolReadTree kfBmodeTree probs modeDec
 
         -- Apply 4x4 prediction
         predict4x4 bMode yBuf (mbStride * 16) blockX blockY
 
-        -- Decode coefficients
-        (coeffs, hasNonzero, dec2) <- decodeCoefficients dec1 coeffProbs 0 0 0 -- Block type 0 (Y), includes DC for B_PRED
+        -- Decode coefficients from DCT partition
+        (coeffs, hasNonzero, coeffDec') <- decodeCoefficients coeffDec coeffProbs 0 0 0
 
         -- Dequantize
         dequantizeBlock dequantFact 3 coeffs -- Type 3: Y block with DC
@@ -202,18 +205,18 @@ reconstructBPred yBuf mbY mbX mbStride decoder coeffProbs header = do
                 clamped = fromIntegral $ min 255 $ max 0 reconstructed
             VSM.write yBuf yIdx clamped
 
-        return dec2
+        return (modeDec', coeffDec')
 
   -- Decode all 16 4x4 blocks
-  let loopBBlocks blockIdx dec
-        | blockIdx >= 16 = return dec
+  let loopBBlocks blockIdx modeDec coeffDec
+        | blockIdx >= 16 = return (modeDec, coeffDec)
         | otherwise = do
-            dec' <- decodeBBlock blockIdx dec
-            loopBBlocks (blockIdx + 1) dec'
+            (modeDec', coeffDec') <- decodeBBlock blockIdx modeDec coeffDec
+            loopBBlocks (blockIdx + 1) modeDec' coeffDec'
 
-  loopBBlocks 0 decoder
+  loopBBlocks 0 modeDecoder coeffDecoder
 
--- | Reconstruct 16x16 macroblock from coefficients
+-- | Reconstruct 16x16 macroblock from coefficients (DCT partition)
 reconstructMB16x16 ::
   VSM.MVector s Word8 ->
   Int ->
@@ -221,7 +224,7 @@ reconstructMB16x16 ::
   Int ->
   Int ->
   VSM.MVector s Int16 ->
-  BoolDecoder ->
+  BoolDecoder -> -- Coefficient decoder (DCT partition)
   VU.Vector Word8 ->
   DequantFactors ->
   ST s BoolDecoder
@@ -237,8 +240,8 @@ reconstructMB16x16 yBuf mbY mbX mbStride yMode y2Coeffs decoder coeffProbs dequa
         let !by = blockIdx `shiftR` 2 -- div 4
             !bx = blockIdx .&. 3 -- mod 4
 
-        -- Decode coefficients for this 4x4 block
-        (coeffs, hasNonzero, dec') <- decodeCoefficients dec coeffProbs 0 0 1 -- Block type 0 (Y after Y2), start at pos 1 (DC is from Y2)
+        -- Decode coefficients for this 4x4 block from DCT partition
+        (coeffs, hasNonzero, dec') <- decodeCoefficients dec coeffProbs 0 0 1 -- Block type 0 (Y after Y2), start at pos 1
 
         -- Set DC from Y2 block
         y2dc <- VSM.read y2Coeffs blockIdx
@@ -271,7 +274,7 @@ reconstructMB16x16 yBuf mbY mbX mbStride yMode y2Coeffs decoder coeffProbs dequa
 
   loopYBlocks 0 decoder
 
--- | Reconstruct chroma blocks (U or V)
+-- | Reconstruct chroma blocks (U or V) from DCT partition
 -- coeffBlockType should be 2 for U, 3 for V per RFC 6386 coefficient probability indexing
 -- Dequantization always uses type 2 (UV) for both U and V
 reconstructChroma ::
@@ -280,7 +283,7 @@ reconstructChroma ::
   Int ->
   Int ->
   Int ->
-  BoolDecoder ->
+  BoolDecoder -> -- Coefficient decoder (DCT partition)
   VU.Vector Word8 ->
   DequantFactors ->
   Int -> -- Coefficient block type: 2 for U, 3 for V
@@ -297,7 +300,7 @@ reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact c
         let !by = blockIdx `shiftR` 1 -- div 2
             !bx = blockIdx .&. 1 -- mod 2
 
-        -- Decode coefficients (use coefficient block type for probability lookup)
+        -- Decode coefficients from DCT partition
         (coeffs, hasNonzero, dec') <- decodeCoefficients dec coeffProbs coeffBlockType 0 0
 
         -- Dequantize (always use type 2 = UV dequant for both U and V)
@@ -326,37 +329,6 @@ reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact c
             loopUVBlocks (blockIdx + 1) dec'
 
   loopUVBlocks 0 decoder
-
--- | Fill macroblock with simple values (helper function)
-fillMBSimple ::
-  VSM.MVector s Word8 ->
-  VSM.MVector s Word8 ->
-  VSM.MVector s Word8 ->
-  Int ->
-  Int ->
-  Int ->
-  Word8 ->
-  Word8 ->
-  Word8 ->
-  ST s ()
-fillMBSimple yBuf uBuf vBuf mbY mbX mbWidth yVal uVal vVal = do
-  let yBase = mbY * 16 * mbWidth * 16 + mbX * 16
-      uBase = mbY * 8 * mbWidth * 8 + mbX * 8
-      vBase = mbY * 8 * mbWidth * 8 + mbX * 8
-
-  -- Fill Y plane
-  forM_ [0 :: Int .. 15] $ \dy ->
-    forM_ [0 :: Int .. 15] $ \dx -> do
-      let yIdx = yBase + dy * mbWidth * 16 + dx
-      VSM.write yBuf yIdx yVal
-
-  -- Fill U,V planes
-  forM_ [0 :: Int .. 7] $ \dy ->
-    forM_ [0 :: Int .. 7] $ \dx -> do
-      let uIdx = uBase + dy * mbWidth * 8 + dx
-          vIdx = vBase + dy * mbWidth * 8 + dx
-      VSM.write uBuf uIdx uVal
-      VSM.write vBuf vIdx vVal
 
 -- | Clamp value to 0-255 range
 clamp :: Int -> Int

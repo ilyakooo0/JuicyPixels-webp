@@ -54,6 +54,11 @@ defaultEncodeConfig quality =
 
 -- | Encode an RGB8 image to VP8 bitstream
 -- Returns the raw VP8 data (without WebP container)
+--
+-- VP8 frame layout (RFC 6386):
+--   [uncompressed header (10 bytes)]
+--   [partition 0: compressed header + per-MB modes]
+--   [DCT partition: per-MB coefficients]
 encodeVP8 :: Image PixelRGB8 -> Int -> B.ByteString
 encodeVP8 img quality = runST $ do
   -- Step 1: Convert RGB to YCbCr
@@ -86,12 +91,13 @@ encodeVP8 img quality = runST $ do
   uRecon <- VSM.replicate ((paddedW `div` 2) * (paddedH `div` 2)) 128
   vRecon <- VSM.replicate ((paddedW `div` 2) * (paddedH `div` 2)) 128
 
-  -- Step 4: Generate compressed header and continue encoding with same BoolEncoder
+  -- Step 4: Generate compressed header (goes into partition 0)
   let compressedHeaderEnc = generateCompressedHeader quantIndices (encFilterLevel config) (encFilterType config)
-  -- DO NOT finalize yet! Continue with same encoder for MB data
 
-  -- Step 5: Encode all macroblocks using the SAME encoder (continues arithmetic coding stream)
-  finalEncoder <-
+  -- Step 5: Encode all macroblocks with SEPARATE streams for modes and coefficients
+  -- Partition 0: compressed header + mode data
+  -- DCT partition: coefficient data
+  (finalModeEnc, finalCoeffEnc) <-
     encodeMacroblocks
       yBuf
       uBuf
@@ -105,17 +111,21 @@ encodeVP8 img quality = runST $ do
       mbCols
       dequantFactors
       defaultCoeffProbs
-      compressedHeaderEnc -- Continue from compressed header encoder!
+      compressedHeaderEnc -- Mode encoder (continues from compressed header)
+      initBoolEncoder -- Coefficient encoder (fresh)
 
-  -- Step 6: Finalize the combined stream
-  let partition0 = finalizeBoolEncoder finalEncoder
+  -- Step 6: Finalize both streams
+  let partition0 = finalizeBoolEncoder finalModeEnc
+      dctPartition = finalizeBoolEncoder finalCoeffEnc
 
-  -- Step 7: Generate uncompressed header
+  -- Step 7: Generate uncompressed header (firstPartSize = partition 0 only)
   let uncompHeader = generateUncompressedHeader width height (B.length partition0)
 
-  return $ uncompHeader <> partition0
+  -- With log2_nbr_of_dct_partitions=0: 1 DCT partition, 0 size entries
+  -- Layout: [uncompressed header][partition 0][DCT partition]
+  return $ uncompHeader <> partition0 <> dctPartition
 
--- | Encode all macroblocks
+-- | Encode all macroblocks, writing modes to modeEnc and coefficients to coeffEnc
 encodeMacroblocks ::
   VSM.MVector s Word8 -> -- Y original
   VSM.MVector s Word8 -> -- U original
@@ -129,14 +139,15 @@ encodeMacroblocks ::
   Int -> -- MB rows, cols
   DequantFactors ->
   VU.Vector Word8 -> -- Coefficient probabilities
-  BoolEncoder ->
-  ST s BoolEncoder
-encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dequantFactors coeffProbs encoder = do
-  let loop !mbY !mbX !enc
-        | mbY >= mbRows = return enc
-        | mbX >= mbCols = loop (mbY + 1) 0 enc
+  BoolEncoder -> -- Mode encoder (partition 0)
+  BoolEncoder -> -- Coefficient encoder (DCT partition)
+  ST s (BoolEncoder, BoolEncoder)
+encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dequantFactors coeffProbs modeEnc coeffEnc = do
+  let loop !mbY !mbX !mEnc !cEnc
+        | mbY >= mbRows = return (mEnc, cEnc)
+        | mbX >= mbCols = loop (mbY + 1) 0 mEnc cEnc
         | otherwise = do
-            enc' <-
+            (mEnc', cEnc') <-
               encodeMacroblock
                 yOrig
                 uOrig
@@ -150,12 +161,14 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
                 mbX
                 dequantFactors
                 coeffProbs
-                enc
-            loop mbY (mbX + 1) enc'
+                mEnc
+                cEnc
+            loop mbY (mbX + 1) mEnc' cEnc'
 
-  loop 0 0 encoder
+  loop 0 0 modeEnc coeffEnc
 
 -- | Encode a single macroblock
+-- Modes go to modeEnc (partition 0), coefficients go to coeffEnc (DCT partition)
 encodeMacroblock ::
   VSM.MVector s Word8 -> -- Y original
   VSM.MVector s Word8 -> -- U original
@@ -169,38 +182,35 @@ encodeMacroblock ::
   Int -> -- MB row, col
   DequantFactors ->
   VU.Vector Word8 -> -- Coefficient probabilities
-  BoolEncoder ->
-  ST s BoolEncoder
-encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbY mbX dequantFactors coeffProbs enc = do
+  BoolEncoder -> -- Mode encoder
+  BoolEncoder -> -- Coefficient encoder
+  ST s (BoolEncoder, BoolEncoder)
+encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbY mbX dequantFactors coeffProbs mEnc cEnc = do
   let mbXpix = mbX * 16
       mbYpix = mbY * 16
 
   -- Step 1: Select best Y mode using SAD
   (predMode, _) <- selectIntra16x16Mode yOrig yRecon paddedW mbXpix mbYpix
-  -- Map prediction mode (0-3) to tree value (1-4): DC=1, V=2, H=3, TM=4
-  let yMode = predMode + 1
 
   -- Step 2: Select best UV mode using SAD
   let chromaX = mbX * 8
       chromaY = mbY * 8
   (uvPredMode, _) <- selectChromaMode uOrig uRecon (paddedW `div` 2) chromaX chromaY
-  let uvMode = uvPredMode + 1
 
-  -- Step 3: Write modes to bitstream using selected modes
-  let enc1 = encodeYMode predMode enc
-      enc2 = encodeUVMode uvPredMode enc1
+  -- Step 3: Write modes to partition 0
+  let mEnc1 = encodeYMode predMode mEnc
+      mEnc2 = encodeUVMode uvPredMode mEnc1
 
-  -- Step 4: Encode Y blocks (non-B_PRED mode: use Y2)
-  -- Prediction was already done during mode selection, now encode
-  enc3 <- encodeYBlocks yOrig yRecon paddedW mbXpix mbYpix predMode dequantFactors coeffProbs enc2
+  -- Step 4: Encode Y blocks - coefficients go to DCT partition
+  cEnc1 <- encodeYBlocks yOrig yRecon paddedW mbXpix mbYpix predMode dequantFactors coeffProbs cEnc
 
   -- Step 5: Encode U blocks (block type 2 per RFC 6386)
-  enc4 <- encodeChromaBlocks uOrig uRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs enc3 2
+  cEnc2 <- encodeChromaBlocks uOrig uRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs cEnc1 2
 
   -- Step 6: Encode V blocks (block type 3 per RFC 6386)
-  enc5 <- encodeChromaBlocks vOrig vRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs enc4 3
+  cEnc3 <- encodeChromaBlocks vOrig vRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs cEnc2 3
 
-  return enc5
+  return (mEnc2, cEnc3)
 
 -- | Encode Y blocks for a macroblock (16x16)
 encodeYBlocks ::

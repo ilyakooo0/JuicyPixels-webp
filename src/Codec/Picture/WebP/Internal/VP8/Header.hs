@@ -345,9 +345,11 @@ parseCoeffProbs decoder = Right $ runST $ do
   loop decoder 0 0 0 0
 
 -- | Parse DCT partition sizes
+-- numPartitions is the number of partition SIZE ENTRIES (total_partitions - 1).
+-- With 0 size entries (1 DCT partition), the entire remaining data is the single partition.
 parseDCTPartitions :: B.ByteString -> Int -> Either String [B.ByteString]
 parseDCTPartitions bs numPartitions
-  | numPartitions == 0 = return []
+  | numPartitions == 0 = return [bs] -- 1 DCT partition: all remaining data
   | otherwise = do
       case runGetOrFail (parsePartitionSizes numPartitions) (B.fromStrict bs) of
         Left (_, _, err) -> Left $ "Failed to parse DCT partition sizes: " ++ err
