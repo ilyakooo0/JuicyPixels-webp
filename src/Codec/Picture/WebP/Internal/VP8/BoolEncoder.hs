@@ -426,11 +426,11 @@ finalizeBoolEncoder !enc =
              in enc'' {beBytes = bytes', beRun = 0}
           else enc''
       !finalBytes = reverse (beBytes enc''')
-      -- Step 4: Append extra zero bytes for decoder look-ahead.
+   in -- Step 4: Append extra zero bytes for decoder look-ahead.
       -- The VP8 bool decoder may load bytes beyond the meaningful data
       -- during its read-ahead buffering. Without these trailing zeros,
       -- the decoder can hit EOF prematurely and return NOT_ENOUGH_DATA.
-   in B.pack finalBytes <> B.replicate 32 0
+      B.pack finalBytes <> B.replicate 32 0
   where
     writePadding 0 e = e
     writePadding n e = writePadding (n - 1) (boolWriteUniform False e)

@@ -104,28 +104,35 @@ encodeCoefficients coeffs coeffProbs blockType initialCtx startPos encoder = do
                 if coeff == 0
                   then do
                     -- DCT_0: p[0]=True (not EOB), p[1]=False (zero)
-                    let enc' = if skipEOB
-                                then boolWrite (coeffProbs VU.! (probIdx + 1)) False enc -- p[1]=False
-                                else let e1 = boolWrite (coeffProbs VU.! probIdx) True enc -- p[0]=True
-                                      in boolWrite (coeffProbs VU.! (probIdx + 1)) False e1 -- p[1]=False
+                    let enc' =
+                          if skipEOB
+                            then boolWrite (coeffProbs VU.! (probIdx + 1)) False enc -- p[1]=False
+                            else
+                              let e1 = boolWrite (coeffProbs VU.! probIdx) True enc -- p[0]=True
+                               in boolWrite (coeffProbs VU.! (probIdx + 1)) False e1 -- p[1]=False
                     loop (pos + 1) 0 enc' True
                   else do
                     -- Nonzero coefficient: encode token using flat p[k] indices
                     let absCoeff = abs (fromIntegral coeff :: Int)
-                        enc1 = if skipEOB
-                                then enc -- Skip p[0]
-                                else boolWrite (coeffProbs VU.! probIdx) True enc -- p[0]=True (not EOB)
+                        enc1 =
+                          if skipEOB
+                            then enc -- Skip p[0]
+                            else boolWrite (coeffProbs VU.! probIdx) True enc -- p[0]=True (not EOB)
                         enc2 = boolWrite (coeffProbs VU.! (probIdx + 1)) True enc1 -- p[1]=True (nonzero)
-                        enc3 = encodeValue (coeffProbs VU.! (probIdx + 2))
-                                           (coeffProbs VU.! (probIdx + 3))
-                                           (coeffProbs VU.! (probIdx + 4))
-                                           (coeffProbs VU.! (probIdx + 5))
-                                           (coeffProbs VU.! (probIdx + 6))
-                                           (coeffProbs VU.! (probIdx + 7))
-                                           (coeffProbs VU.! (probIdx + 8))
-                                           (coeffProbs VU.! (probIdx + 9))
-                                           (coeffProbs VU.! (probIdx + 10))
-                                           absCoeff coeff enc2
+                        enc3 =
+                          encodeValue
+                            (coeffProbs VU.! (probIdx + 2))
+                            (coeffProbs VU.! (probIdx + 3))
+                            (coeffProbs VU.! (probIdx + 4))
+                            (coeffProbs VU.! (probIdx + 5))
+                            (coeffProbs VU.! (probIdx + 6))
+                            (coeffProbs VU.! (probIdx + 7))
+                            (coeffProbs VU.! (probIdx + 8))
+                            (coeffProbs VU.! (probIdx + 9))
+                            (coeffProbs VU.! (probIdx + 10))
+                            absCoeff
+                            coeff
+                            enc2
                         newCtx = if absCoeff == 1 then 1 else 2
                     loop (pos + 1) newCtx enc3 False
 
@@ -146,9 +153,17 @@ encodeCoefficients coeffs coeffProbs blockType initialCtx startPos encoder = do
 -- This matches GetCoeffsFast + GetLargeValue from libwebp exactly.
 {-# INLINE encodeValue #-}
 encodeValue ::
-  Word8 -> Word8 -> Word8 -> Word8 -> -- p[2], p[3], p[4], p[5]
-  Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> -- p[6], p[7], p[8], p[9], p[10]
-  Int -> -- |coeff|
+  Word8 ->
+  Word8 ->
+  Word8 ->
+  Word8 -> -- p[2], p[3], p[4], p[5]
+  Word8 ->
+  Word8 ->
+  Word8 ->
+  Word8 ->
+  Word8 -> -- p[6], p[7], p[8], p[9], p[10]
+  Int ->
+  -- | coeff|
   Int16 -> -- coeff (signed, for sign bit)
   BoolEncoder ->
   BoolEncoder

@@ -148,7 +148,6 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
   aboveNzU <- VSM.replicate (mbCols * 2) (0 :: Word8) -- 2 U columns per MB
   aboveNzV <- VSM.replicate (mbCols * 2) (0 :: Word8) -- 2 V columns per MB
   aboveNzDC <- VSM.replicate mbCols (0 :: Word8) -- 1 DC per MB
-
   let loop !mbY !mbX !mEnc !cEnc !leftNzY0 !leftNzY1 !leftNzY2 !leftNzY3 !leftNzU0 !leftNzU1 !leftNzV0 !leftNzV1 !leftNzDC
         | mbY >= mbRows = return (mEnc, cEnc)
         | mbX >= mbCols =
@@ -157,12 +156,33 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
         | otherwise = do
             (mEnc', cEnc', lY0, lY1, lY2, lY3, lU0, lU1, lV0, lV1, lDC) <-
               encodeMacroblock
-                yOrig uOrig vOrig yRecon uRecon vRecon
-                paddedW paddedH mbY mbX
-                dequantFactors coeffProbs mEnc cEnc
-                aboveNzY aboveNzU aboveNzV aboveNzDC
-                leftNzY0 leftNzY1 leftNzY2 leftNzY3
-                leftNzU0 leftNzU1 leftNzV0 leftNzV1 leftNzDC
+                yOrig
+                uOrig
+                vOrig
+                yRecon
+                uRecon
+                vRecon
+                paddedW
+                paddedH
+                mbY
+                mbX
+                dequantFactors
+                coeffProbs
+                mEnc
+                cEnc
+                aboveNzY
+                aboveNzU
+                aboveNzV
+                aboveNzDC
+                leftNzY0
+                leftNzY1
+                leftNzY2
+                leftNzY3
+                leftNzU0
+                leftNzU1
+                leftNzV0
+                leftNzV1
+                leftNzDC
             loop mbY (mbX + 1) mEnc' cEnc' lY0 lY1 lY2 lY3 lU0 lU1 lV0 lV1 lDC
 
   loop 0 0 modeEnc coeffEnc 0 0 0 0 0 0 0 0 0
@@ -177,18 +197,26 @@ encodeMacroblock ::
   VSM.MVector s Word8 -> -- Y reconstruction
   VSM.MVector s Word8 -> -- U reconstruction
   VSM.MVector s Word8 -> -- V reconstruction
-  Int -> Int -> -- Padded width, height
-  Int -> Int -> -- MB row, col
+  Int ->
+  Int -> -- Padded width, height
+  Int ->
+  Int -> -- MB row, col
   DequantFactors ->
   VU.Vector Word8 -> -- Coefficient probabilities
-  BoolEncoder -> BoolEncoder -> -- Mode and coefficient encoders
+  BoolEncoder ->
+  BoolEncoder -> -- Mode and coefficient encoders
   VSM.MVector s Word8 -> -- aboveNzY (mbCols * 4)
   VSM.MVector s Word8 -> -- aboveNzU (mbCols * 2)
   VSM.MVector s Word8 -> -- aboveNzV (mbCols * 2)
   VSM.MVector s Word8 -> -- aboveNzDC (mbCols)
-  Int -> Int -> Int -> Int -> -- leftNzY[0..3]
-  Int -> Int -> -- leftNzU[0..1]
-  Int -> Int -> -- leftNzV[0..1]
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- leftNzY[0..3]
+  Int ->
+  Int -> -- leftNzU[0..1]
+  Int ->
+  Int -> -- leftNzV[0..1]
   Int -> -- leftNzDC
   ST s (BoolEncoder, BoolEncoder, Int, Int, Int, Int, Int, Int, Int, Int, Int)
 encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX dequantFactors coeffProbs mEnc cEnc aboveNzY aboveNzU aboveNzV aboveNzDC leftNzY0 leftNzY1 leftNzY2 leftNzY3 leftNzU0 leftNzU1 leftNzV0 leftNzV1 leftNzDC = do
@@ -210,25 +238,63 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
   -- Step 4: Encode Y blocks with NZ context tracking
   aNzDC <- VSM.read aboveNzDC mbX
   (cEnc1, y2nz, newLeftY0, newLeftY1, newLeftY2, newLeftY3) <-
-    encodeYBlocks yOrig yRecon paddedW mbXpix mbYpix predMode dequantFactors coeffProbs cEnc
-      aboveNzY mbX
-      leftNzY0 leftNzY1 leftNzY2 leftNzY3
-      (fromIntegral aNzDC) leftNzDC
+    encodeYBlocks
+      yOrig
+      yRecon
+      paddedW
+      mbXpix
+      mbYpix
+      predMode
+      dequantFactors
+      coeffProbs
+      cEnc
+      aboveNzY
+      mbX
+      leftNzY0
+      leftNzY1
+      leftNzY2
+      leftNzY3
+      (fromIntegral aNzDC)
+      leftNzDC
 
   -- Update above DC NZ
   VSM.write aboveNzDC mbX (if y2nz then 1 else 0)
 
   -- Step 5: Encode U blocks with NZ context
   (cEnc2, newLeftU0, newLeftU1) <-
-    encodeChromaBlocks uOrig uRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs cEnc1 2
-      aboveNzU mbX
-      leftNzU0 leftNzU1
+    encodeChromaBlocks
+      uOrig
+      uRecon
+      (paddedW `div` 2)
+      chromaX
+      chromaY
+      uvPredMode
+      dequantFactors
+      coeffProbs
+      cEnc1
+      2
+      aboveNzU
+      mbX
+      leftNzU0
+      leftNzU1
 
   -- Step 6: Encode V blocks with NZ context
   (cEnc3, newLeftV0, newLeftV1) <-
-    encodeChromaBlocks vOrig vRecon (paddedW `div` 2) chromaX chromaY uvPredMode dequantFactors coeffProbs cEnc2 2
-      aboveNzV mbX
-      leftNzV0 leftNzV1
+    encodeChromaBlocks
+      vOrig
+      vRecon
+      (paddedW `div` 2)
+      chromaX
+      chromaY
+      uvPredMode
+      dequantFactors
+      coeffProbs
+      cEnc2
+      2
+      aboveNzV
+      mbX
+      leftNzV0
+      leftNzV1
 
   let newLeftDC = if y2nz then 1 else 0
   return (mEnc2, cEnc3, newLeftY0, newLeftY1, newLeftY2, newLeftY3, newLeftU0, newLeftU1, newLeftV0, newLeftV1, newLeftDC)
@@ -248,8 +314,12 @@ encodeYBlocks ::
   BoolEncoder ->
   VSM.MVector s Word8 -> -- aboveNzY (mbCols*4, read top row, write bottom row)
   Int -> -- mbX
-  Int -> Int -> Int -> Int -> -- leftNzY[0..3]
-  Int -> Int -> -- aboveDcNz, leftDcNz
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- leftNzY[0..3]
+  Int ->
+  Int -> -- aboveDcNz, leftDcNz
   ST s (BoolEncoder, Bool, Int, Int, Int, Int)
 encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 aboveDcNz leftDcNz = do
   -- Create temporary buffer for prediction (don't overwrite reconstruction yet)
@@ -332,17 +402,21 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc abo
             -- Get above NZ
             aboveNz <-
               if row == 0
-                then
-                  return $ fromIntegral $ case col of
-                    0 -> aNzCol0; 1 -> aNzCol1; 2 -> aNzCol2; _ -> aNzCol3
+                then return $ fromIntegral $ case col of
+                  0 -> aNzCol0
+                  1 -> aNzCol1
+                  2 -> aNzCol2
+                  _ -> aNzCol3
                 else fromIntegral <$> VSM.read nzGrid ((row - 1) * 4 + col)
 
             -- Get left NZ
             leftNz <-
               if col == 0
-                then
-                  return $ case row of
-                    0 -> leftNzY0; 1 -> leftNzY1; 2 -> leftNzY2; _ -> leftNzY3
+                then return $ case row of
+                  0 -> leftNzY0
+                  1 -> leftNzY1
+                  2 -> leftNzY2
+                  _ -> leftNzY3
                 else fromIntegral <$> VSM.read nzGrid (row * 4 + col - 1)
 
             -- Get stored residuals for this block
@@ -440,7 +514,8 @@ encodeChromaBlocks ::
   Int -> -- Coefficient block type (2 for both U and V)
   VSM.MVector s Word8 -> -- aboveNz (mbCols*2, read top row, write bottom row)
   Int -> -- mbX
-  Int -> Int -> -- leftNz row 0, row 1
+  Int ->
+  Int -> -- leftNz row 0, row 1
   ST s (BoolEncoder, Int, Int)
 encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coeffProbs enc coeffBlockType aboveNz mbX leftNz0 leftNz1 = do
   -- Create temporary buffer for prediction
@@ -476,7 +551,6 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coe
               if col == 0
                 then return $ if row == 0 then leftNz0 else leftNz1
                 else fromIntegral <$> VSM.read nzGrid (row * 2) -- block to the left
-
             let !ctx = min 2 (aboveNzVal + leftNzVal)
 
             -- Allocate residual block

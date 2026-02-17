@@ -41,7 +41,6 @@ decodeVP8 bs = do
       dctDecoder = case dctPartitions of
         (p : _) -> initBoolDecoder p
         [] -> initBoolDecoder B.empty -- Fallback: empty partition
-
   let pixelData = runST $ do
         -- Allocate YUV buffers
         yBuf <- VSM.replicate (mbWidth * 16 * mbHeight * 16) (128 :: Word8)
