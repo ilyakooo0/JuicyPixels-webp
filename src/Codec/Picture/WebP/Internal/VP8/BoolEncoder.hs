@@ -406,29 +406,34 @@ boolWriteSigned !n !value !enc =
    in boolWrite 128 (value < 0) enc'
 
 -- | Finalize the encoder and return the encoded bytes
+-- Matches libwebp's VP8BitWriterFinish:
+--   VP8PutBits(bw, 0, 9 - bw->nb_bits);  // padding
+--   bw->nb_bits = 0;                       // force
+--   Flush(bw);                             // final flush
+-- Plus extra trailing zero bytes for decoder look-ahead safety.
 finalizeBoolEncoder :: BoolEncoder -> B.ByteString
 finalizeBoolEncoder !enc =
-  let -- Write padding bits to flush remaining data
-      -- We need to write enough bits to ensure the decoder can read our data
-      -- libwebp uses: VP8PutBits(bw, 0, 9 - bw->nb_bits)
+  let -- Step 1: Write padding bits (9 - nb_bits uniform zeros)
       !padBits = max 0 (9 - beNbBits enc)
       !enc' = writePadding padBits enc
-      -- Flush any remaining bytes
-      !enc'' = finalFlush enc'
-      !finalBytes = reverse (beBytes enc'')
-   in B.pack finalBytes
+      -- Step 2: Force nb_bits to 0 and flush once (like libwebp)
+      !enc'' = flush (enc' {beNbBits = 0})
+      -- Step 3: Flush any pending 0xff run bytes
+      !enc''' =
+        if beRun enc'' > 0
+          then
+            let bytes' = flushRun (beRun enc'') 0xff (beBytes enc'')
+             in enc'' {beBytes = bytes', beRun = 0}
+          else enc''
+      !finalBytes = reverse (beBytes enc''')
+      -- Step 4: Append extra zero bytes for decoder look-ahead.
+      -- The VP8 bool decoder may load bytes beyond the meaningful data
+      -- during its read-ahead buffering. Without these trailing zeros,
+      -- the decoder can hit EOF prematurely and return NOT_ENOUGH_DATA.
+   in B.pack finalBytes <> B.replicate 32 0
   where
     writePadding 0 e = e
     writePadding n e = writePadding (n - 1) (boolWriteUniform False e)
-
-    -- Final flush to output any remaining buffered data
-    finalFlush e
-      | beNbBits e > 0 = finalFlush (flush e)
-      | beRun e > 0 =
-          -- Output pending 0xff bytes
-          let bytes' = flushRun (beRun e) 0xff (beBytes e)
-           in e {beBytes = bytes', beRun = 0}
-      | otherwise = e
 
     flushRun 0 _ bytes = bytes
     flushRun n val bytes = flushRun (n - 1) val (val : bytes)

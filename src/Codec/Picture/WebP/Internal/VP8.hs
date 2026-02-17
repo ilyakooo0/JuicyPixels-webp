@@ -107,7 +107,7 @@ decodeVP8 bs = do
 
                             -- Reconstruct U and V blocks from DCT partition
                             coeffDec3 <- reconstructChroma uBuf mbY mbX mbWidth uvMode coeffDec2 coeffProbs dequantFact 2
-                            coeffDec4 <- reconstructChroma vBuf mbY mbX mbWidth uvMode coeffDec3 coeffProbs dequantFact 3
+                            coeffDec4 <- reconstructChroma vBuf mbY mbX mbWidth uvMode coeffDec3 coeffProbs dequantFact 2
                             return (modeDec3, coeffDec4)
 
                   -- Continue to next macroblock with updated decoders
@@ -286,7 +286,7 @@ reconstructChroma ::
   BoolDecoder -> -- Coefficient decoder (DCT partition)
   VU.Vector Word8 ->
   DequantFactors ->
-  Int -> -- Coefficient block type: 2 for U, 3 for V
+  Int -> -- Coefficient block type: 2 for both U and V
   ST s BoolDecoder
 reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact coeffBlockType = do
   let mbUVY = mbY * 8
@@ -354,7 +354,10 @@ kfYModeTree =
       -3 -- H_PRED (2) at code "110", TM_PRED (3) at code "111"
     ]
 
--- Keyframe Y mode probabilities (4 probabilities for 4 decision points)
+-- Keyframe Y mode probabilities (matching libwebp hardcoded values)
+-- boolReadTree uses node-indexed probs[i/2]:
+--   node 0 (root): probs[0]=145, node 2: probs[1]=156,
+--   node 4 (DC/V): probs[2]=163, node 6 (H/TM): probs[3]=128
 kfYModeProbs :: V.Vector Word8
 kfYModeProbs = V.fromList [145, 156, 163, 128]
 
