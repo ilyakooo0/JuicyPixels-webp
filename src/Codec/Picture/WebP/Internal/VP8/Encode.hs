@@ -370,8 +370,9 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc abo
   quantizeBlock dequantFactors 1 y2DCs
 
   -- ENCODE Y2 FIRST
-  -- blockType=1 for Y2 (i16-DC per libwebp convention), ctx=0 (matches decoder)
-  (enc1, y2nz) <- encodeCoefficients y2DCs coeffProbs 1 0 0 enc
+  -- blockType=1 for Y2 (i16-DC per libwebp convention)
+  let !dcCtx = min 2 (aboveDcNz + leftDcNz)
+  (enc1, y2nz) <- encodeCoefficients y2DCs coeffProbs 1 dcCtx 0 enc
 
   -- Dequantize Y2 for reconstruction
   dequantizeBlock dequantFactors 1 y2DCs
@@ -431,9 +432,10 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc abo
             -- Quantize AC coefficients
             quantizeBlock dequantFactors 0 residuals
 
-            -- Encode AC coefficients, ctx=0 (matches decoder)
+            -- Encode AC coefficients with NZ context
             -- blockType=0 for Y AC (i16-AC per libwebp convention)
-            (e', hasNz) <- encodeCoefficients residuals coeffProbs 0 0 1 e
+            let !ctx = min 2 (aboveNz + leftNz)
+            (e', hasNz) <- encodeCoefficients residuals coeffProbs 0 ctx 1 e
 
             -- Track NZ
             VSM.write nzGrid blockIdx (if hasNz then 1 else 0)
@@ -573,8 +575,8 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coe
             -- Quantize (always use type 2 = UV quant for both U and V)
             quantizeBlock dequantFactors 2 residuals
 
-            -- Encode coefficients, ctx=0 (matches decoder)
-            (e', hasNz) <- encodeCoefficients residuals coeffProbs coeffBlockType 0 0 e
+            -- Encode coefficients with NZ context
+            (e', hasNz) <- encodeCoefficients residuals coeffProbs coeffBlockType ctx 0 e
 
             -- Track NZ
             VSM.write nzGrid blockIdx (if hasNz then 1 else 0)
