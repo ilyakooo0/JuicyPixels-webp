@@ -156,9 +156,25 @@ inversePredictorTransform sizeBits transformData width height pixels = do
       -- Using Int arithmetic instead of Integer for index calculation
       top <- if isFirstRow then return 0xFF000000 else VSM.unsafeRead pixels (prevRowBase + x)
       topLeft <- if x == 0 || isFirstRow then return 0xFF000000 else VSM.unsafeRead pixels (prevRowBase + x - 1)
-      topRight <- if x >= width - 1 || isFirstRow then return top else VSM.unsafeRead pixels (prevRowBase + x + 1)
+      topRight <-
+        if isFirstRow
+          then return 0xFF000000
+          else
+            if x >= width - 1
+              then VSM.unsafeRead pixels prevRowBase -- leftmost pixel of row above
+              else VSM.unsafeRead pixels (prevRowBase + x + 1)
 
-      let !predicted = predictor mode left top topLeft topRight
+      -- Border pixels use fixed predictions regardless of mode (spec Section 4.2.1)
+      let !predicted =
+            if x == 0 && isFirstRow
+              then 0xFF000000
+              else
+                if isFirstRow
+                  then left
+                  else
+                    if x == 0
+                      then top
+                      else predictor mode left top topLeft topRight
           !result = addPixels pixel predicted
 
       VSM.unsafeWrite pixels idx result
@@ -166,23 +182,23 @@ inversePredictorTransform sizeBits transformData width height pixels = do
       -- Update left for next pixel
       writeSTRef leftRef result
 
--- | Predictor modes
+-- | Predictor modes (RFC 9649 Section 4.2.1)
 {-# INLINE predictor #-}
 predictor :: Int -> Word32 -> Word32 -> Word32 -> Word32 -> Word32
 predictor 0 _left _top _topLeft _topRight = 0xFF000000
 predictor 1 left _top _topLeft _topRight = left
 predictor 2 _left top _topLeft _topRight = top
 predictor 3 _left _top _topLeft topRight = topRight
-predictor 4 _left top topLeft _topRight = top `addPixels` topLeft
-predictor 5 left top topLeft _topRight = (left `addPixels` top) `subPixels` topLeft
-predictor 6 left _top _topLeft _topRight = left
-predictor 7 _left top _topLeft _topRight = top
-predictor 8 _left _top topLeft _topRight = topLeft
-predictor 9 left top _topLeft _topRight = avgPixels2 left top
-predictor 10 left top topLeft _topRight = avgPixels3 left top topLeft
-predictor 11 left top _topLeft _topRight = select left top
-predictor 12 left _top topLeft _topRight = clampAddSubtractFull left topLeft topLeft
-predictor 13 left top topLeft _topRight = clampAddSubtractHalf left top topLeft
+predictor 4 _left _top topLeft _topRight = topLeft
+predictor 5 left top _topLeft topRight = avgPixels2 (avgPixels2 left topRight) top
+predictor 6 left _top topLeft _topRight = avgPixels2 left topLeft
+predictor 7 left top _topLeft _topRight = avgPixels2 left top
+predictor 8 _left top topLeft _topRight = avgPixels2 topLeft top
+predictor 9 _left top _topLeft topRight = avgPixels2 top topRight
+predictor 10 left top topLeft topRight = avgPixels2 (avgPixels2 left topLeft) (avgPixels2 top topRight)
+predictor 11 left top topLeft _topRight = selectPredictor left top topLeft
+predictor 12 left top topLeft _topRight = clampAddSubtractFull left top topLeft
+predictor 13 left top topLeft _topRight = clampAddSubtractHalf (avgPixels2 left top) topLeft
 predictor _ _left _top _topLeft _topRight = 0xFF000000
 
 -- | Add two pixels component-wise (mod 256)
@@ -205,26 +221,6 @@ addPixels p1 p2 =
       !b = (b1 + b2) .&. 0xFF
    in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
 
--- | Subtract two pixels component-wise (mod 256)
-{-# INLINE subPixels #-}
-subPixels :: Word32 -> Word32 -> Word32
-subPixels p1 p2 =
-  let !a1 = (p1 `shiftR` 24) .&. 0xFF
-      !r1 = (p1 `shiftR` 16) .&. 0xFF
-      !g1 = (p1 `shiftR` 8) .&. 0xFF
-      !b1 = p1 .&. 0xFF
-
-      !a2 = (p2 `shiftR` 24) .&. 0xFF
-      !r2 = (p2 `shiftR` 16) .&. 0xFF
-      !g2 = (p2 `shiftR` 8) .&. 0xFF
-      !b2 = p2 .&. 0xFF
-
-      !a = (a1 - a2) .&. 0xFF
-      !r = (r1 - r2) .&. 0xFF
-      !g = (g1 - g2) .&. 0xFF
-      !b = (b1 - b2) .&. 0xFF
-   in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
-
 -- | Average of two pixels
 {-# INLINE avgPixels2 #-}
 avgPixels2 :: Word32 -> Word32 -> Word32
@@ -245,53 +241,35 @@ avgPixels2 p1 p2 =
       !b = (b1 + b2) `shiftR` 1
    in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
 
--- | Average of three pixels
-{-# INLINE avgPixels3 #-}
-avgPixels3 :: Word32 -> Word32 -> Word32 -> Word32
-avgPixels3 p1 p2 p3 =
-  let !a1 = (p1 `shiftR` 24) .&. 0xFF
-      !r1 = (p1 `shiftR` 16) .&. 0xFF
-      !g1 = (p1 `shiftR` 8) .&. 0xFF
-      !b1 = p1 .&. 0xFF
+-- | Select predictor (mode 11, RFC 9649)
+{-# INLINE selectPredictor #-}
+selectPredictor :: Word32 -> Word32 -> Word32 -> Word32
+selectPredictor left top topLeft =
+  let !lA = fromIntegral ((left `shiftR` 24) .&. 0xFF) :: Int
+      !lR = fromIntegral ((left `shiftR` 16) .&. 0xFF) :: Int
+      !lG = fromIntegral ((left `shiftR` 8) .&. 0xFF) :: Int
+      !lB = fromIntegral (left .&. 0xFF) :: Int
 
-      !a2 = (p2 `shiftR` 24) .&. 0xFF
-      !r2 = (p2 `shiftR` 16) .&. 0xFF
-      !g2 = (p2 `shiftR` 8) .&. 0xFF
-      !b2 = p2 .&. 0xFF
+      !tA = fromIntegral ((top `shiftR` 24) .&. 0xFF) :: Int
+      !tR = fromIntegral ((top `shiftR` 16) .&. 0xFF) :: Int
+      !tG = fromIntegral ((top `shiftR` 8) .&. 0xFF) :: Int
+      !tB = fromIntegral (top .&. 0xFF) :: Int
 
-      !a3 = (p3 `shiftR` 24) .&. 0xFF
-      !r3 = (p3 `shiftR` 16) .&. 0xFF
-      !g3 = (p3 `shiftR` 8) .&. 0xFF
-      !b3 = p3 .&. 0xFF
+      !tlA = fromIntegral ((topLeft `shiftR` 24) .&. 0xFF) :: Int
+      !tlR = fromIntegral ((topLeft `shiftR` 16) .&. 0xFF) :: Int
+      !tlG = fromIntegral ((topLeft `shiftR` 8) .&. 0xFF) :: Int
+      !tlB = fromIntegral (topLeft .&. 0xFF) :: Int
 
-      -- Fast div 3 approximation: (x * 171) `shiftR` 9 ≈ x / 3 for x < 768
-      !a = ((a1 + a2 + a3) * 171) `shiftR` 9
-      !r = ((r1 + r2 + r3) * 171) `shiftR` 9
-      !g = ((g1 + g2 + g3) * 171) `shiftR` 9
-      !b = ((b1 + b2 + b3) * 171) `shiftR` 9
-   in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
+      -- ARGB component estimates: p = L + T - TL
+      !pA = lA + tA - tlA
+      !pR = lR + tR - tlR
+      !pG = lG + tG - tlG
+      !pB = lB + tB - tlB
 
--- | Select predictor (mode 11)
-{-# INLINE select #-}
-select :: Word32 -> Word32 -> Word32
-select left top =
-  let !leftA = (left `shiftR` 24) .&. 0xFF
-      !leftR = (left `shiftR` 16) .&. 0xFF
-      !leftG = (left `shiftR` 8) .&. 0xFF
-      !leftB = left .&. 0xFF
-
-      !topA = (top `shiftR` 24) .&. 0xFF
-      !topR = (top `shiftR` 16) .&. 0xFF
-      !topG = (top `shiftR` 8) .&. 0xFF
-      !topB = top .&. 0xFF
-
-      !pa = abs (fromIntegral topA - fromIntegral leftA :: Int)
-      !pr = abs (fromIntegral topR - fromIntegral leftR :: Int)
-      !pg = abs (fromIntegral topG - fromIntegral leftG :: Int)
-      !pb = abs (fromIntegral topB - fromIntegral leftB :: Int)
-
-      !sum1 = pa + pr + pg + pb
-   in if sum1 < 0 then left else top
+      -- Manhattan distances to estimates
+      !pL = abs (pA - lA) + abs (pR - lR) + abs (pG - lG) + abs (pB - lB)
+      !pT = abs (pA - tA) + abs (pR - tR) + abs (pG - tG) + abs (pB - tB)
+   in if pL < pT then left else top
 
 -- | Clamp add subtract full (mode 12)
 {-# INLINE clampAddSubtractFull #-}
@@ -318,29 +296,24 @@ clampAddSubtractFull base delta1 delta2 =
       !b = clip255Int (baseB + d1B - d2B)
    in (fromIntegral a `shiftL` 24) .|. (fromIntegral r `shiftL` 16) .|. (fromIntegral g `shiftL` 8) .|. fromIntegral b
 
--- | Clamp add subtract half (mode 13)
+-- | Clamp add subtract half (mode 13): Clamp(a + (a - b) / 2)
 {-# INLINE clampAddSubtractHalf #-}
-clampAddSubtractHalf :: Word32 -> Word32 -> Word32 -> Word32
-clampAddSubtractHalf base delta1 delta2 =
-  let !baseA = fromIntegral ((base `shiftR` 24) .&. 0xFF) :: Int
-      !baseR = fromIntegral ((base `shiftR` 16) .&. 0xFF) :: Int
-      !baseG = fromIntegral ((base `shiftR` 8) .&. 0xFF) :: Int
-      !baseB = fromIntegral (base .&. 0xFF) :: Int
+clampAddSubtractHalf :: Word32 -> Word32 -> Word32
+clampAddSubtractHalf p1 p2 =
+  let !aA = fromIntegral ((p1 `shiftR` 24) .&. 0xFF) :: Int
+      !aR = fromIntegral ((p1 `shiftR` 16) .&. 0xFF) :: Int
+      !aG = fromIntegral ((p1 `shiftR` 8) .&. 0xFF) :: Int
+      !aB = fromIntegral (p1 .&. 0xFF) :: Int
 
-      !d1A = fromIntegral ((delta1 `shiftR` 24) .&. 0xFF) :: Int
-      !d1R = fromIntegral ((delta1 `shiftR` 16) .&. 0xFF) :: Int
-      !d1G = fromIntegral ((delta1 `shiftR` 8) .&. 0xFF) :: Int
-      !d1B = fromIntegral (delta1 .&. 0xFF) :: Int
+      !bA = fromIntegral ((p2 `shiftR` 24) .&. 0xFF) :: Int
+      !bR = fromIntegral ((p2 `shiftR` 16) .&. 0xFF) :: Int
+      !bG = fromIntegral ((p2 `shiftR` 8) .&. 0xFF) :: Int
+      !bB = fromIntegral (p2 .&. 0xFF) :: Int
 
-      !d2A = fromIntegral ((delta2 `shiftR` 24) .&. 0xFF) :: Int
-      !d2R = fromIntegral ((delta2 `shiftR` 16) .&. 0xFF) :: Int
-      !d2G = fromIntegral ((delta2 `shiftR` 8) .&. 0xFF) :: Int
-      !d2B = fromIntegral (delta2 .&. 0xFF) :: Int
-
-      !a = clip255Int (baseA + (d1A - d2A) `shiftR` 1)
-      !r = clip255Int (baseR + (d1R - d2R) `shiftR` 1)
-      !g = clip255Int (baseG + (d1G - d2G) `shiftR` 1)
-      !b = clip255Int (baseB + (d1B - d2B) `shiftR` 1)
+      !a = clip255Int (aA + (aA - bA) `div` 2)
+      !r = clip255Int (aR + (aR - bR) `div` 2)
+      !g = clip255Int (aG + (aG - bG) `div` 2)
+      !b = clip255Int (aB + (aB - bB) `div` 2)
    in (fromIntegral a `shiftL` 24) .|. (fromIntegral r `shiftL` 16) .|. (fromIntegral g `shiftL` 8) .|. fromIntegral b
 
 -- | Clip Int to 0-255 range

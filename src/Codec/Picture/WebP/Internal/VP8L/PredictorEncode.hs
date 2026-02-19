@@ -62,10 +62,24 @@ computePredictorTransform sizeBits width height pixels =
                 then pixels VS.! (i - width - 1)
                 else 0xFF000000
             topRight =
-              if x < width - 1 && y > 0
-                then pixels VS.! (i - width + 1)
-                else top -- Same as decoder line 161
-            predicted = predictor mode left top topLeft topRight
+              if y == 0
+                then 0xFF000000
+                else
+                  if x >= width - 1
+                    then pixels VS.! ((y - 1) * width) -- leftmost pixel of row above
+                    else pixels VS.! (i - width + 1)
+
+            -- Border pixels use fixed predictions regardless of mode (spec Section 4.2.1)
+            predicted =
+              if x == 0 && y == 0
+                then 0xFF000000
+                else
+                  if y == 0
+                    then left
+                    else
+                      if x == 0
+                        then top
+                        else predictor mode left top topLeft topRight
          in subPixels pixel predicted
    in PredictorResult
         { prSizeBits = sizeBits,
@@ -122,11 +136,24 @@ pixelSAD width _height pixels mode (x, y) =
           then pixels VS.! (i - width - 1)
           else 0xFF000000
       topRight =
-        if x < width - 1 && y > 0
-          then pixels VS.! (i - width + 1)
-          else top
+        if y == 0
+          then 0xFF000000
+          else
+            if x >= width - 1
+              then pixels VS.! ((y - 1) * width)
+              else pixels VS.! (i - width + 1)
 
-      predicted = predictor mode left top topLeft topRight
+      -- Border pixels use fixed predictions regardless of mode
+      predicted =
+        if x == 0 && y == 0
+          then 0xFF000000
+          else
+            if y == 0
+              then left
+              else
+                if x == 0
+                  then top
+                  else predictor mode left top topLeft topRight
       residual = subPixels pixel predicted
 
       -- Extract components and sum absolute differences
@@ -140,24 +167,23 @@ pixelSAD width _height pixels mode (x, y) =
       signedAbs v = if v > 127 then 256 - v else v
    in signedAbs a + signedAbs r + signedAbs g + signedAbs b
 
--- | Predictor modes (same as Transform.hs)
+-- | Predictor modes (RFC 9649 Section 4.2.1, must match Transform.hs)
 {-# INLINE predictor #-}
 predictor :: Int -> Word32 -> Word32 -> Word32 -> Word32 -> Word32
 predictor 0 _left _top _topLeft _topRight = 0xFF000000
 predictor 1 left _top _topLeft _topRight = left
 predictor 2 _left top _topLeft _topRight = top
 predictor 3 _left _top _topLeft topRight = topRight
-predictor 4 _left top topLeft _topRight = top `addPixels` topLeft
-predictor 5 left top topLeft _topRight =
-  (left `addPixels` top) `subPixels` topLeft
-predictor 6 left _top _topLeft _topRight = left
-predictor 7 _left top _topLeft _topRight = top
-predictor 8 _left _top topLeft _topRight = topLeft
-predictor 9 left top _topLeft _topRight = avgPixels2 left top
-predictor 10 left top topLeft _topRight = avgPixels3 left top topLeft
-predictor 11 left top _topLeft _topRight = selectPredictor left top
-predictor 12 left _top topLeft _topRight = clampAddSubtractFull left topLeft topLeft
-predictor 13 left top topLeft _topRight = clampAddSubtractHalf left top topLeft
+predictor 4 _left _top topLeft _topRight = topLeft
+predictor 5 left top _topLeft topRight = avgPixels2 (avgPixels2 left topRight) top
+predictor 6 left _top topLeft _topRight = avgPixels2 left topLeft
+predictor 7 left top _topLeft _topRight = avgPixels2 left top
+predictor 8 _left top topLeft _topRight = avgPixels2 topLeft top
+predictor 9 _left top _topLeft topRight = avgPixels2 top topRight
+predictor 10 left top topLeft topRight = avgPixels2 (avgPixels2 left topLeft) (avgPixels2 top topRight)
+predictor 11 left top topLeft _topRight = selectPred left top topLeft
+predictor 12 left top topLeft _topRight = clampAddSubtractFull left top topLeft
+predictor 13 left top topLeft _topRight = clampAddSubtractHalf (avgPixels2 left top) topLeft
 predictor _ _left _top _topLeft _topRight = 0xFF000000
 
 -- | Add two pixels component-wise (mod 256)
@@ -220,102 +246,81 @@ avgPixels2 p1 p2 =
       b = (b1 + b2) `shiftR` 1
    in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
 
--- | Average of three pixels
-{-# INLINE avgPixels3 #-}
-avgPixels3 :: Word32 -> Word32 -> Word32 -> Word32
-avgPixels3 p1 p2 p3 =
-  let a1 = (p1 `shiftR` 24) .&. 0xFF
-      r1 = (p1 `shiftR` 16) .&. 0xFF
-      g1 = (p1 `shiftR` 8) .&. 0xFF
-      b1 = p1 .&. 0xFF
+-- | Select predictor (mode 11, RFC 9649)
+{-# INLINE selectPred #-}
+selectPred :: Word32 -> Word32 -> Word32 -> Word32
+selectPred left top topLeft =
+  let lA = fromIntegral ((left `shiftR` 24) .&. 0xFF) :: Int
+      lR = fromIntegral ((left `shiftR` 16) .&. 0xFF) :: Int
+      lG = fromIntegral ((left `shiftR` 8) .&. 0xFF) :: Int
+      lB = fromIntegral (left .&. 0xFF) :: Int
 
-      a2 = (p2 `shiftR` 24) .&. 0xFF
-      r2 = (p2 `shiftR` 16) .&. 0xFF
-      g2 = (p2 `shiftR` 8) .&. 0xFF
-      b2 = p2 .&. 0xFF
+      tA = fromIntegral ((top `shiftR` 24) .&. 0xFF) :: Int
+      tR = fromIntegral ((top `shiftR` 16) .&. 0xFF) :: Int
+      tG = fromIntegral ((top `shiftR` 8) .&. 0xFF) :: Int
+      tB = fromIntegral (top .&. 0xFF) :: Int
 
-      a3 = (p3 `shiftR` 24) .&. 0xFF
-      r3 = (p3 `shiftR` 16) .&. 0xFF
-      g3 = (p3 `shiftR` 8) .&. 0xFF
-      b3 = p3 .&. 0xFF
+      tlA = fromIntegral ((topLeft `shiftR` 24) .&. 0xFF) :: Int
+      tlR = fromIntegral ((topLeft `shiftR` 16) .&. 0xFF) :: Int
+      tlG = fromIntegral ((topLeft `shiftR` 8) .&. 0xFF) :: Int
+      tlB = fromIntegral (topLeft .&. 0xFF) :: Int
 
-      a = (a1 + a2 + a3) `div` 3
-      r = (r1 + r2 + r3) `div` 3
-      g = (g1 + g2 + g3) `div` 3
-      b = (b1 + b2 + b3) `div` 3
-   in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
+      -- ARGB component estimates: p = L + T - TL
+      pA = lA + tA - tlA
+      pR = lR + tR - tlR
+      pG = lG + tG - tlG
+      pB = lB + tB - tlB
 
--- | Select predictor (mode 11)
-selectPredictor :: Word32 -> Word32 -> Word32
-selectPredictor left top =
-  let leftA = (left `shiftR` 24) .&. 0xFF
-      leftR = (left `shiftR` 16) .&. 0xFF
-      leftG = (left `shiftR` 8) .&. 0xFF
-      leftB = left .&. 0xFF
+      -- Manhattan distances to estimates
+      pL = abs (pA - lA) + abs (pR - lR) + abs (pG - lG) + abs (pB - lB)
+      pT = abs (pA - tA) + abs (pR - tR) + abs (pG - tG) + abs (pB - tB)
+   in if pL < pT then left else top
 
-      topA = (top `shiftR` 24) .&. 0xFF
-      topR = (top `shiftR` 16) .&. 0xFF
-      topG = (top `shiftR` 8) .&. 0xFF
-      topB = top .&. 0xFF
-
-      pa = abs (fromIntegral topA - fromIntegral leftA) :: Int
-      pr = abs (fromIntegral topR - fromIntegral leftR) :: Int
-      pg = abs (fromIntegral topG - fromIntegral leftG) :: Int
-      pb = abs (fromIntegral topB - fromIntegral leftB) :: Int
-
-      -- sum1 is the distance from top, sum2 from left (both 0 in original code)
-      sum1 = pa + pr + pg + pb
-      sum2 = 0
-   in if sum1 < sum2 then left else top
-
--- | Clamp add subtract full (mode 12)
+-- | Clamp add subtract full (mode 12): Clamp(a + b - c)
+{-# INLINE clampAddSubtractFull #-}
 clampAddSubtractFull :: Word32 -> Word32 -> Word32 -> Word32
-clampAddSubtractFull base delta1 delta2 =
+clampAddSubtractFull pL pT pTL =
   let clip x = if x < 0 then 0 else if x > 255 then 255 else x
 
-      baseA = fromIntegral ((base `shiftR` 24) .&. 0xFF) :: Int
-      baseR = fromIntegral ((base `shiftR` 16) .&. 0xFF) :: Int
-      baseG = fromIntegral ((base `shiftR` 8) .&. 0xFF) :: Int
-      baseB = fromIntegral (base .&. 0xFF) :: Int
+      lA = fromIntegral ((pL `shiftR` 24) .&. 0xFF) :: Int
+      lR = fromIntegral ((pL `shiftR` 16) .&. 0xFF) :: Int
+      lG = fromIntegral ((pL `shiftR` 8) .&. 0xFF) :: Int
+      lB = fromIntegral (pL .&. 0xFF) :: Int
 
-      d1A = fromIntegral ((delta1 `shiftR` 24) .&. 0xFF) :: Int
-      d1R = fromIntegral ((delta1 `shiftR` 16) .&. 0xFF) :: Int
-      d1G = fromIntegral ((delta1 `shiftR` 8) .&. 0xFF) :: Int
-      d1B = fromIntegral (delta1 .&. 0xFF) :: Int
+      tA = fromIntegral ((pT `shiftR` 24) .&. 0xFF) :: Int
+      tR = fromIntegral ((pT `shiftR` 16) .&. 0xFF) :: Int
+      tG = fromIntegral ((pT `shiftR` 8) .&. 0xFF) :: Int
+      tB = fromIntegral (pT .&. 0xFF) :: Int
 
-      d2A = fromIntegral ((delta2 `shiftR` 24) .&. 0xFF) :: Int
-      d2R = fromIntegral ((delta2 `shiftR` 16) .&. 0xFF) :: Int
-      d2G = fromIntegral ((delta2 `shiftR` 8) .&. 0xFF) :: Int
-      d2B = fromIntegral (delta2 .&. 0xFF) :: Int
+      tlA = fromIntegral ((pTL `shiftR` 24) .&. 0xFF) :: Int
+      tlR = fromIntegral ((pTL `shiftR` 16) .&. 0xFF) :: Int
+      tlG = fromIntegral ((pTL `shiftR` 8) .&. 0xFF) :: Int
+      tlB = fromIntegral (pTL .&. 0xFF) :: Int
 
-      a = clip (baseA + d1A - d2A)
-      r = clip (baseR + d1R - d2R)
-      g = clip (baseG + d1G - d2G)
-      b = clip (baseB + d1B - d2B)
+      a = clip (lA + tA - tlA)
+      r = clip (lR + tR - tlR)
+      g = clip (lG + tG - tlG)
+      b = clip (lB + tB - tlB)
    in (fromIntegral a `shiftL` 24) .|. (fromIntegral r `shiftL` 16) .|. (fromIntegral g `shiftL` 8) .|. fromIntegral b
 
--- | Clamp add subtract half (mode 13)
-clampAddSubtractHalf :: Word32 -> Word32 -> Word32 -> Word32
-clampAddSubtractHalf base delta1 delta2 =
+-- | Clamp add subtract half (mode 13): Clamp(a + (a - b) / 2)
+{-# INLINE clampAddSubtractHalf #-}
+clampAddSubtractHalf :: Word32 -> Word32 -> Word32
+clampAddSubtractHalf p1 p2 =
   let clip x = if x < 0 then 0 else if x > 255 then 255 else x
 
-      baseA = fromIntegral ((base `shiftR` 24) .&. 0xFF) :: Int
-      baseR = fromIntegral ((base `shiftR` 16) .&. 0xFF) :: Int
-      baseG = fromIntegral ((base `shiftR` 8) .&. 0xFF) :: Int
-      baseB = fromIntegral (base .&. 0xFF) :: Int
+      aA = fromIntegral ((p1 `shiftR` 24) .&. 0xFF) :: Int
+      aR = fromIntegral ((p1 `shiftR` 16) .&. 0xFF) :: Int
+      aG = fromIntegral ((p1 `shiftR` 8) .&. 0xFF) :: Int
+      aB = fromIntegral (p1 .&. 0xFF) :: Int
 
-      d1A = fromIntegral ((delta1 `shiftR` 24) .&. 0xFF) :: Int
-      d1R = fromIntegral ((delta1 `shiftR` 16) .&. 0xFF) :: Int
-      d1G = fromIntegral ((delta1 `shiftR` 8) .&. 0xFF) :: Int
-      d1B = fromIntegral (delta1 .&. 0xFF) :: Int
+      bA = fromIntegral ((p2 `shiftR` 24) .&. 0xFF) :: Int
+      bR = fromIntegral ((p2 `shiftR` 16) .&. 0xFF) :: Int
+      bG = fromIntegral ((p2 `shiftR` 8) .&. 0xFF) :: Int
+      bB = fromIntegral (p2 .&. 0xFF) :: Int
 
-      d2A = fromIntegral ((delta2 `shiftR` 24) .&. 0xFF) :: Int
-      d2R = fromIntegral ((delta2 `shiftR` 16) .&. 0xFF) :: Int
-      d2G = fromIntegral ((delta2 `shiftR` 8) .&. 0xFF) :: Int
-      d2B = fromIntegral (delta2 .&. 0xFF) :: Int
-
-      a = clip (baseA + (d1A - d2A) `div` 2)
-      r = clip (baseR + (d1R - d2R) `div` 2)
-      g = clip (baseG + (d1G - d2G) `div` 2)
-      b = clip (baseB + (d1B - d2B) `div` 2)
+      a = clip (aA + (aA - bA) `div` 2)
+      r = clip (aR + (aR - bR) `div` 2)
+      g = clip (aG + (aG - bG) `div` 2)
+      b = clip (aB + (aB - bB) `div` 2)
    in (fromIntegral a `shiftL` 24) .|. (fromIntegral r `shiftL` 16) .|. (fromIntegral g `shiftL` 8) .|. fromIntegral b
