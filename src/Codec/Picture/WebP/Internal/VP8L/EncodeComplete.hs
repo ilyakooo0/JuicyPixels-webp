@@ -88,7 +88,7 @@ writeTransformHeader Nothing _ w =
 writeTransformHeader (Just predResult) sizeBits w =
   let w1 = writeBit True w -- transform_present = 1
       w2 = writeBits 2 0 w1 -- transform_type = 0 (predictor)
-      w3 = writeBits 3 (fromIntegral sizeBits) w2 -- size_bits (decoder uses this directly)
+      w3 = writeBits 3 (fromIntegral $ sizeBits - 2) w2 -- decoder reads ReadBits(3) + 2
       w4 =
         encodeSubresolutionImage
           (prTransformWidth predResult)
@@ -212,88 +212,98 @@ buildHuffmanCodes symbols hist =
       canonicalCodes = buildCanonicalCodes codeLengths
    in canonicalCodes
 
--- | Compute length-limited Huffman code lengths
--- Uses a simplified approach: assigns lengths based on frequency ranking
--- with proper length limiting to maxCodeLength
-{-# INLINE computeCodeLengths #-}
+-- | Compute Huffman code lengths using the standard Huffman tree algorithm.
+-- Produces a COMPLETE code (Kraft sum = 1), required by VP8L.
+-- Code lengths are limited to maxCodeLength (15) using the DEFLATE-style
+-- length-limiting algorithm.
 computeCodeLengths :: VU.Vector (Int, Int) -> VU.Vector (Int, Int)
 computeCodeLengths symFreqs =
-  let n = VU.length symFreqs
-      -- Use Kraft inequality to assign valid lengths
-      -- For n symbols, we need sum(2^-len_i) <= 1
-      -- Simple strategy: use ceil(log2(n)) as base length, adjust for frequency
-      baseLen = max 1 $ ceilLog2 n
+  let freqList = VU.toList symFreqs
+      depths = huffmanDepths freqList
+      maxD = maximum (map snd depths)
+   in if maxD <= maxCodeLength
+        then VU.fromList depths -- No clamping needed
+        else VU.fromList (limitCodeLengths depths)
 
-      -- Assign lengths: more frequent symbols get shorter codes
-      -- Sort by frequency descending and assign lengths using in-place sort
-      sortedDesc = runST $ do
-        mv <- VU.thaw symFreqs
-        -- Sort descending by negating the comparison
-        VA.sortBy (\(_, f1) (_, f2) -> compare f2 f1) mv
-        VU.unsafeFreeze mv
-
-      -- Assign lengths ensuring Kraft inequality
-      withLengths = assignLengths sortedDesc baseLen
-   in withLengths
-
--- | Assign code lengths respecting Kraft inequality and max length
--- Uses a simple approach: assign length ceil(log2(n)) to all symbols
--- This always satisfies Kraft inequality for n symbols
-assignLengths :: VU.Vector (Int, Int) -> Int -> VU.Vector (Int, Int)
-assignLengths symFreqs baseLen =
-  let n = VU.length symFreqs
-      -- For n symbols, we need ceil(log2(n)) bits per symbol
-      -- This is suboptimal but always valid
-      uniformLen = max 1 $ ceilLog2 n
-      -- Ensure uniform length doesn't exceed max
-      safeLen = min maxCodeLength uniformLen
-   in VU.map (\(sym, _) -> (sym, safeLen)) symFreqs
-
--- | Adjust code lengths to satisfy Kraft inequality
-adjustForKraft :: VU.Vector (Int, Int) -> VU.Vector (Int, Int)
-adjustForKraft symLens =
-  let n = VU.length symLens
-      -- Calculate current Kraft sum (scaled by 2^maxCodeLength)
-      kraftSum =
-        VU.foldl'
-          ( \acc (_, len) ->
-              acc + (1 `shiftL` (maxCodeLength - len))
-          )
-          0
-          symLens
-
-      -- Target is 2^maxCodeLength (scaled sum should equal this)
+-- | Limit code lengths to maxCodeLength while maintaining a valid (Kraft sum = 1) code.
+-- Uses the iterative algorithm from DEFLATE/zlib: when clamping creates oversubscription,
+-- repeatedly promote the deepest symbol below maxCodeLength to free up code space.
+limitCodeLengths :: [(Int, Int)] -> [(Int, Int)]
+limitCodeLengths depths =
+  let -- Sort by depth descending (deepest first), then by symbol
+      sorted = sortBy (\(_, d1) (_, d2) -> compare d2 d1) depths
+      -- Clamp all depths to maxCodeLength
+      clamped = map (\(s, d) -> (s, min maxCodeLength (max 1 d))) sorted
+      -- Compute Kraft sum in units of 2^(-maxCodeLength)
+      -- For a valid code: sum must equal 2^maxCodeLength = 32768
       target = 1 `shiftL` maxCodeLength :: Int
-   in -- If sum > target, increase lengths; if sum < target, we're OK
-      -- (Kraft inequality allows sum <= 1)
-      if kraftSum > target
-        then -- Need to increase some lengths
-          increaseUntilValid symLens kraftSum target
-        else symLens
+      kraftSum xs = sum [1 `shiftL` (maxCodeLength - d) | (_, d) <- xs]
+      excess = kraftSum clamped - target
+   in if excess <= 0
+        then clamped -- Already valid (shouldn't happen if max depth > 15)
+        else fixOversubscribed clamped excess
 
--- | Increase code lengths until Kraft inequality is satisfied
-increaseUntilValid :: VU.Vector (Int, Int) -> Int -> Int -> VU.Vector (Int, Int)
-increaseUntilValid symLens currentSum targetSum
-  | currentSum <= targetSum = symLens
-  | otherwise =
-      -- Find the symbol with shortest length that can be increased
-      let minLen = VU.minimum $ VU.map snd symLens
-          -- Increase length of first symbol with minLen
-          (updated, newSum) =
-            VU.ifoldl'
-              ( \(acc, csum) i (sym, len) ->
-                  if len == minLen && csum > targetSum && len < maxCodeLength
-                    then
-                      let newLen = len + 1
-                          delta = (1 `shiftL` (maxCodeLength - len)) - (1 `shiftL` (maxCodeLength - newLen))
-                       in (VU.snoc acc (sym, newLen), csum - delta)
-                    else (VU.snoc acc (sym, len), csum)
-              )
-              (VU.empty, currentSum)
-              symLens
-       in if newSum == currentSum
-            then symLens -- Can't reduce further
-            else increaseUntilValid updated newSum targetSum
+-- | Fix an oversubscribed code by lengthening short codes.
+-- Works from the deepest non-maxCodeLength codes toward shallower ones.
+-- The input list must be sorted descending by depth.
+fixOversubscribed :: [(Int, Int)] -> Int -> [(Int, Int)]
+fixOversubscribed syms excess = go syms excess
+  where
+    go xs 0 = xs
+    go xs ex
+      | ex < 0 = xs -- Slightly undersubscribed is acceptable
+      | otherwise =
+          -- List is sorted descending. Find the first (deepest) symbol < maxCodeLength.
+          let (atMax, rest) = break (\(_, d) -> d < maxCodeLength) xs
+           in case rest of
+                [] -> xs -- All at maxCodeLength, can't fix
+                ((s, d) : after) ->
+                  let newLen = d + 1
+                      freed = (1 `shiftL` (maxCodeLength - d)) - (1 `shiftL` (maxCodeLength - newLen))
+                      newList = atMax ++ ((s, newLen) : after)
+                   in go newList (ex - freed)
+
+-- | Build a Huffman tree from (symbol, frequency) pairs and return (symbol, depth) pairs.
+-- Uses a simple list-based priority queue (sufficient for alphabet sizes up to ~300).
+huffmanDepths :: [(Int, Int)] -> [(Int, Int)]
+huffmanDepths [] = []
+huffmanDepths [(sym, _)] = [(sym, 1)]
+huffmanDepths pairs =
+  let -- Create initial leaves sorted by frequency
+      sorted = sortBy (comparing snd) pairs
+      leaves = map (\(s, f) -> HLeaf s f) sorted
+      -- Build tree by repeatedly merging two lowest-frequency nodes
+      tree = buildTree leaves
+   in -- Extract symbol depths from tree
+      treeToDepths 0 tree
+
+-- | Huffman tree data type
+data HTree = HLeaf !Int !Int | HNode !Int HTree HTree
+
+htreeFreq :: HTree -> Int
+htreeFreq (HLeaf _ f) = f
+htreeFreq (HNode f _ _) = f
+
+-- | Build Huffman tree from sorted list of tree nodes
+buildTree :: [HTree] -> HTree
+buildTree [t] = t
+buildTree (t1 : t2 : rest) =
+  let merged = HNode (htreeFreq t1 + htreeFreq t2) t1 t2
+   in buildTree (insertByFreq merged rest)
+buildTree [] = HLeaf 0 0 -- shouldn't happen
+
+-- | Insert a tree node into a frequency-sorted list
+insertByFreq :: HTree -> [HTree] -> [HTree]
+insertByFreq node [] = [node]
+insertByFreq node (x : xs)
+  | htreeFreq node <= htreeFreq x = node : x : xs
+  | otherwise = x : insertByFreq node xs
+
+-- | Extract (symbol, depth) pairs from tree
+treeToDepths :: Int -> HTree -> [(Int, Int)]
+treeToDepths depth (HLeaf sym _) = [(sym, max 1 depth)]
+treeToDepths depth (HNode _ l r) =
+  treeToDepths (depth + 1) l ++ treeToDepths (depth + 1) r
 
 -- | Build canonical Huffman codes from symbol-length pairs
 buildCanonicalCodes :: VU.Vector (Int, Int) -> VU.Vector (Int, Word32, Int)

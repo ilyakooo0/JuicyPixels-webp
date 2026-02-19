@@ -37,7 +37,7 @@ encodeSubresolutionImage width height pixels w =
       -- - prefix_code_group (5 Huffman codes)
       -- - entropy_coded_pixels
       w1 = writeBit False w -- no color cache
-      -- NOTE: subresolution images do NOT have the use_meta_prefix bit!
+      -- Subresolution images do NOT have the use_meta_prefix bit
       w3 = writeHuffmanCode (cGreen codes) 280 w1 -- Green alphabet
       w4 = writeHuffmanCode (cRed codes) 256 w3 -- Red
       w5 = writeHuffmanCode (cBlue codes) 256 w4 -- Blue
@@ -141,21 +141,81 @@ buildHuffmanCodes symbols hist =
       codeLengths = computeCodeLengths sortedSymFreqs
    in buildCanonicalCodes codeLengths
 
--- | Compute length-limited Huffman code lengths
+-- | Compute Huffman code lengths using the standard Huffman tree algorithm.
+-- Produces a COMPLETE code (Kraft sum = 1), required by VP8L.
+-- Code lengths are limited to maxCodeLength (15).
 computeCodeLengths :: VU.Vector (Int, Int) -> VU.Vector (Int, Int)
 computeCodeLengths symFreqs =
-  let n = VU.length symFreqs
-      baseLen = max 1 $ ceilLog2 n
-      sortedDesc = VU.fromList $ reverse $ sortBy (comparing snd) $ VU.toList symFreqs
-   in assignLengths sortedDesc baseLen
+  let freqList = VU.toList symFreqs
+      depths = huffmanDepths freqList
+      maxD = maximum (map snd depths)
+   in if maxD <= maxCodeLength
+        then VU.fromList depths
+        else VU.fromList (limitCodeLengths depths)
 
--- | Assign code lengths
-assignLengths :: VU.Vector (Int, Int) -> Int -> VU.Vector (Int, Int)
-assignLengths symFreqs _baseLen =
-  let n = VU.length symFreqs
-      uniformLen = max 1 $ ceilLog2 n
-      safeLen = min maxCodeLength uniformLen
-   in VU.map (\(sym, _) -> (sym, safeLen)) symFreqs
+-- | Limit code lengths to maxCodeLength while maintaining a valid code.
+limitCodeLengths :: [(Int, Int)] -> [(Int, Int)]
+limitCodeLengths depths =
+  let sorted = sortBy (\(_, d1) (_, d2) -> compare d2 d1) depths
+      clamped = map (\(s, d) -> (s, min maxCodeLength (max 1 d))) sorted
+      target = 1 `shiftL` maxCodeLength :: Int
+      kraftSum xs = sum [1 `shiftL` (maxCodeLength - d) | (_, d) <- xs]
+      excess = kraftSum clamped - target
+   in if excess <= 0 then clamped else fixOversubscribed clamped excess
+
+fixOversubscribed :: [(Int, Int)] -> Int -> [(Int, Int)]
+fixOversubscribed syms excess = go syms excess
+  where
+    go xs 0 = xs
+    go xs ex
+      | ex < 0 = xs
+      | otherwise =
+          let (atMax, rest) = break (\(_, d) -> d < maxCodeLength) xs
+           in case rest of
+                [] -> xs
+                ((s, d) : after) ->
+                  let newLen = d + 1
+                      freed = (1 `shiftL` (maxCodeLength - d)) - (1 `shiftL` (maxCodeLength - newLen))
+                      newList = atMax ++ ((s, newLen) : after)
+                   in go newList (ex - freed)
+
+-- | Build a Huffman tree from (symbol, frequency) pairs and return (symbol, depth) pairs.
+huffmanDepths :: [(Int, Int)] -> [(Int, Int)]
+huffmanDepths [] = []
+huffmanDepths [(sym, _)] = [(sym, 1)]
+huffmanDepths pairs =
+  let sorted = sortBy (comparing snd) pairs
+      leaves = map (\(s, f) -> HLeaf s f) sorted
+      tree = buildTree leaves
+   in treeToDepths 0 tree
+
+-- | Huffman tree data type
+data HTree = HLeaf !Int !Int | HNode !Int HTree HTree
+
+htreeFreq :: HTree -> Int
+htreeFreq (HLeaf _ f) = f
+htreeFreq (HNode f _ _) = f
+
+-- | Build Huffman tree from sorted list of tree nodes
+buildTree :: [HTree] -> HTree
+buildTree [t] = t
+buildTree (t1 : t2 : rest) =
+  let merged = HNode (htreeFreq t1 + htreeFreq t2) t1 t2
+   in buildTree (insertByFreq merged rest)
+buildTree [] = HLeaf 0 0
+
+-- | Insert a tree node into a frequency-sorted list
+insertByFreq :: HTree -> [HTree] -> [HTree]
+insertByFreq node [] = [node]
+insertByFreq node (x : xs)
+  | htreeFreq node <= htreeFreq x = node : x : xs
+  | otherwise = x : insertByFreq node xs
+
+-- | Extract (symbol, depth) pairs from tree
+treeToDepths :: Int -> HTree -> [(Int, Int)]
+treeToDepths depth (HLeaf sym _) = [(sym, max 1 depth)]
+treeToDepths depth (HNode _ l r) =
+  treeToDepths (depth + 1) l ++ treeToDepths (depth + 1) r
 
 -- | Build canonical Huffman codes from symbol-length pairs
 buildCanonicalCodes :: VU.Vector (Int, Int) -> VU.Vector (Int, Word32, Int)

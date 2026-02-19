@@ -87,7 +87,8 @@ readTransform width height reader = do
 
   case transformType of
     0 -> do
-      let (sizeBits, reader2) = readBits 3 reader1
+      let (sizeBitsRaw, reader2) = readBits 3 reader1
+          sizeBits = sizeBitsRaw + 2 -- spec: size_bits = ReadBits(3) + 2
           blockSize = 1 `shiftL` fromIntegral sizeBits
           transformWidth = (width + blockSize - 1) `shiftR` fromIntegral sizeBits
           transformHeight = (height + blockSize - 1) `shiftR` fromIntegral sizeBits
@@ -96,7 +97,8 @@ readTransform width height reader = do
 
       return (TransformPredictor (fromIntegral sizeBits) transformData, reader3)
     1 -> do
-      let (sizeBits, reader2) = readBits 3 reader1
+      let (sizeBitsRaw, reader2) = readBits 3 reader1
+          sizeBits = sizeBitsRaw + 2 -- spec: size_bits = ReadBits(3) + 2
           blockSize = 1 `shiftL` fromIntegral sizeBits
           transformWidth = (width + blockSize - 1) `shiftR` fromIntegral sizeBits
           transformHeight = (height + blockSize - 1) `shiftR` fromIntegral sizeBits
