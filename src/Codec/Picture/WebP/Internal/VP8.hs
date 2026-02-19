@@ -11,7 +11,7 @@ import Codec.Picture.WebP.Internal.VP8.Coefficients
 import Codec.Picture.WebP.Internal.VP8.Dequant
 import Codec.Picture.WebP.Internal.VP8.Header
 import Codec.Picture.WebP.Internal.VP8.IDCT
-import Codec.Picture.WebP.Internal.VP8.LoopFilter
+import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyLoopFilter, applySimpleLoopFilterRow)
 import Codec.Picture.WebP.Internal.VP8.Predict
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad (forM_, when)
@@ -58,11 +58,18 @@ decodeVP8 bs = do
             coeffProbs = vp8CoeffProbs header
             dequantFact = computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0
 
+        let !filterLevel = vp8FilterLevel header
+            !filterType = vp8FilterType header
+
         -- Decode all macroblocks with separate decoders for modes and coefficients
         -- NZ state is threaded: left NZ resets to 0 at each row start
         let decodeMacroblocks !mbY !mbX !modeDec !coeffDec !lY0 !lY1 !lY2 !lY3 !lU0 !lU1 !lV0 !lV1 !lDC
               | mbY >= mbHeight = return (modeDec, coeffDec)
-              | mbX >= mbWidth = decodeMacroblocks (mbY + 1) 0 modeDec coeffDec 0 0 0 0 0 0 0 0 0
+              | mbX >= mbWidth = do
+                  -- Apply per-row simple loop filter to completed row
+                  when (filterLevel > 0 && filterType == 1) $
+                    applySimpleLoopFilterRow yBuf (mbWidth * 16) mbY mbWidth filterLevel
+                  decodeMacroblocks (mbY + 1) 0 modeDec coeffDec 0 0 0 0 0 0 0 0 0
               | otherwise = do
                   -- Read Y mode from partition 0
                   let (yMode, modeDec1) = boolReadTree kfYModeTree kfYModeProbs modeDec
@@ -211,7 +218,9 @@ decodeVP8 bs = do
         (_finalModeDec, _finalCoeffDec) <- decodeMacroblocks 0 0 modeDecoder dctDecoder 0 0 0 0 0 0 0 0 0
 
         -- Apply loop filter to reconstructed frame
-        when (vp8FilterLevel header > 0) $ do
+        -- Simple filter (type 1) was already applied per-row above
+        -- Normal filter (type 0) is applied post-frame
+        when (vp8FilterLevel header > 0 && vp8FilterType header /= 1) $ do
           applyLoopFilter header yBuf (mbWidth * 16) (mbHeight * 16)
 
         -- Convert YUV to RGB

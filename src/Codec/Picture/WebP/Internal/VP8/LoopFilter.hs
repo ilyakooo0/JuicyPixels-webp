@@ -2,6 +2,7 @@
 
 module Codec.Picture.WebP.Internal.VP8.LoopFilter
   ( applyLoopFilter,
+    applySimpleLoopFilterRow,
   )
 where
 
@@ -28,16 +29,33 @@ applyLoopFilter header yPlane width height = do
 applySimpleLoopFilter :: VSM.MVector s Word8 -> Int -> Int -> Int -> ST s ()
 applySimpleLoopFilter yPlane width height filterLevel = do
   let !limit = filterLevel * 2 + filterLevel
+      !mbLimit = limit + 4
       !hevThresh = if filterLevel >= 40 then 2 else if filterLevel >= 15 then 1 else 0
       !planeLen = VSM.length yPlane
 
+  -- All edges in simple filter are MB edges, use mbLimit (limit + 4)
   forM_ [0, 16 .. height - 1] $ \y ->
     forM_ [16, 32 .. width - 1] $ \x ->
-      filterSimpleVEdgeFast yPlane width planeLen (x, y) limit hevThresh
+      filterSimpleVEdgeFast yPlane width planeLen (x, y) mbLimit hevThresh
 
   forM_ [16, 32 .. height - 1] $ \y ->
     forM_ [0, 16 .. width - 1] $ \x ->
-      filterSimpleHEdgeFast yPlane width planeLen (x, y) limit hevThresh
+      filterSimpleHEdgeFast yPlane width planeLen (x, y) mbLimit hevThresh
+
+-- | Apply simple loop filter to a single MB row (for per-row filtering)
+-- Matches libwebp's DoFilter per-MB ordering: vertical MB edge, then horizontal MB edge
+applySimpleLoopFilterRow :: VSM.MVector s Word8 -> Int -> Int -> Int -> Int -> ST s ()
+applySimpleLoopFilterRow yPlane stride mbRow mbCols filterLevel = do
+  let !limit = filterLevel * 2 + filterLevel
+      !mbLimit = limit + 4
+      !planeLen = VSM.length yPlane
+  forM_ [0 .. mbCols - 1] $ \mbX -> do
+    -- Filter left vertical MB edge (if not leftmost)
+    when (mbX > 0) $
+      filterSimpleVEdgeFast yPlane stride planeLen (mbX * 16, mbRow * 16) mbLimit 0
+    -- Filter top horizontal MB edge (if not topmost)
+    when (mbRow > 0) $
+      filterSimpleHEdgeFast yPlane stride planeLen (mbX * 16, mbRow * 16) mbLimit 0
 
 -- | Apply normal loop filter (Y, U, V planes)
 applyNormalLoopFilter :: VP8FrameHeader -> VSM.MVector s Word8 -> Int -> Int -> ST s ()

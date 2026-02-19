@@ -16,6 +16,7 @@ import Codec.Picture.WebP.Internal.VP8.EncodeCoefficients
 import Codec.Picture.WebP.Internal.VP8.EncodeHeader
 import Codec.Picture.WebP.Internal.VP8.EncodeMode
 import Codec.Picture.WebP.Internal.VP8.IDCT
+import Codec.Picture.WebP.Internal.VP8.LoopFilter (applySimpleLoopFilterRow)
 import Codec.Picture.WebP.Internal.VP8.ModeSelection
 import Codec.Picture.WebP.Internal.VP8.Predict
 import Codec.Picture.WebP.Internal.VP8.Quantize
@@ -113,6 +114,7 @@ encodeVP8 img quality = runST $ do
       defaultCoeffProbs
       compressedHeaderEnc -- Mode encoder (continues from compressed header)
       initBoolEncoder -- Coefficient encoder (fresh)
+      (encFilterLevel config) -- Filter level for per-row loop filter
 
   -- Step 6: Finalize both streams
   let partition0 = finalizeBoolEncoder finalModeEnc
@@ -141,8 +143,9 @@ encodeMacroblocks ::
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder -> -- Mode encoder (partition 0)
   BoolEncoder -> -- Coefficient encoder (DCT partition)
+  Int -> -- Filter level for per-row loop filter
   ST s (BoolEncoder, BoolEncoder)
-encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dequantFactors coeffProbs modeEnc coeffEnc = do
+encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dequantFactors coeffProbs modeEnc coeffEnc filterLevel = do
   -- Allocate above NZ tracking arrays (persist across MB rows)
   aboveNzY <- VSM.replicate (mbCols * 4) (0 :: Word8) -- 4 Y columns per MB
   aboveNzU <- VSM.replicate (mbCols * 2) (0 :: Word8) -- 2 U columns per MB
@@ -150,7 +153,10 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
   aboveNzDC <- VSM.replicate mbCols (0 :: Word8) -- 1 DC per MB
   let loop !mbY !mbX !mEnc !cEnc !leftNzY0 !leftNzY1 !leftNzY2 !leftNzY3 !leftNzU0 !leftNzU1 !leftNzV0 !leftNzV1 !leftNzDC
         | mbY >= mbRows = return (mEnc, cEnc)
-        | mbX >= mbCols =
+        | mbX >= mbCols = do
+            -- Apply per-row loop filter to completed row
+            when (filterLevel > 0) $
+              applySimpleLoopFilterRow yRecon paddedW mbY mbCols filterLevel
             -- New row: reset left NZ to 0
             loop (mbY + 1) 0 mEnc cEnc 0 0 0 0 0 0 0 0 0
         | otherwise = do
