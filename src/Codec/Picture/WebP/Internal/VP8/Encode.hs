@@ -86,6 +86,7 @@ encodeVP8 img quality = runST $ do
           }
       dequantFactorsVec = computeDequantFactors quantIndices Nothing
       dequantFactors = dequantFactorsVec V.! 0 -- Single segment
+      lambda = rdLambdaFromQi qi
 
   -- Step 3: Allocate reconstruction buffers (for prediction)
   yRecon <- VSM.replicate (paddedW * paddedH) 128
@@ -111,6 +112,7 @@ encodeVP8 img quality = runST $ do
       mbRows
       mbCols
       dequantFactors
+      lambda
       defaultCoeffProbs
       compressedHeaderEnc -- Mode encoder (continues from compressed header)
       initBoolEncoder -- Coefficient encoder (fresh)
@@ -140,12 +142,13 @@ encodeMacroblocks ::
   Int ->
   Int -> -- MB rows, cols
   DequantFactors ->
+  Int -> -- RDO lambda
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder -> -- Mode encoder (partition 0)
   BoolEncoder -> -- Coefficient encoder (DCT partition)
   Int -> -- Filter level for per-row loop filter
   ST s (BoolEncoder, BoolEncoder)
-encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dequantFactors coeffProbs modeEnc coeffEnc filterLevel = do
+encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dequantFactors lambda coeffProbs modeEnc coeffEnc filterLevel = do
   -- Allocate above NZ tracking arrays (persist across MB rows)
   aboveNzY <- VSM.replicate (mbCols * 4) (0 :: Word8) -- 4 Y columns per MB
   aboveNzU <- VSM.replicate (mbCols * 2) (0 :: Word8) -- 2 U columns per MB
@@ -173,6 +176,7 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
                 mbY
                 mbX
                 dequantFactors
+                lambda
                 coeffProbs
                 mEnc
                 cEnc
@@ -208,6 +212,7 @@ encodeMacroblock ::
   Int ->
   Int -> -- MB row, col
   DequantFactors ->
+  Int -> -- RDO lambda
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
   BoolEncoder -> -- Mode and coefficient encoders
@@ -225,17 +230,17 @@ encodeMacroblock ::
   Int -> -- leftNzV[0..1]
   Int -> -- leftNzDC
   ST s (BoolEncoder, BoolEncoder, Int, Int, Int, Int, Int, Int, Int, Int, Int)
-encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX dequantFactors coeffProbs mEnc cEnc aboveNzY aboveNzU aboveNzV aboveNzDC leftNzY0 leftNzY1 leftNzY2 leftNzY3 leftNzU0 leftNzU1 leftNzV0 leftNzV1 leftNzDC = do
+encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX dequantFactors lambda coeffProbs mEnc cEnc aboveNzY aboveNzU aboveNzV aboveNzDC leftNzY0 leftNzY1 leftNzY2 leftNzY3 leftNzU0 leftNzU1 leftNzV0 leftNzV1 leftNzDC = do
   let mbXpix = mbX * 16
       mbYpix = mbY * 16
 
-  -- Step 1: Select best Y mode using SAD
-  (predMode, _) <- selectIntra16x16Mode yOrig yRecon paddedW mbXpix mbYpix
+  -- Step 1: Select best Y mode using RDO (SSE after quantization + rate)
+  (predMode, _) <- selectIntra16x16ModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda
 
-  -- Step 2: Select best UV mode using SAD
+  -- Step 2: Select best UV mode using RDO (both U and V)
   let chromaX = mbX * 8
       chromaY = mbY * 8
-  (uvPredMode, _) <- selectChromaMode uOrig uRecon (paddedW `div` 2) chromaX chromaY
+  (uvPredMode, _) <- selectChromaModeRDO uOrig uRecon vOrig vRecon (paddedW `div` 2) chromaX chromaY dequantFactors lambda
 
   -- Step 3: Write modes to partition 0
   let mEnc1 = encodeYMode predMode mEnc

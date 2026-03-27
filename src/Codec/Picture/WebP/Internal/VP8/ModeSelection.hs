@@ -4,12 +4,21 @@ module Codec.Picture.WebP.Internal.VP8.ModeSelection
   ( selectIntra16x16Mode,
     selectIntra4x4Mode,
     selectChromaMode,
+    selectIntra16x16ModeRDO,
+    selectChromaModeRDO,
   )
 where
 
+import Codec.Picture.WebP.Internal.VP8.ColorConvert (clip255)
+import Codec.Picture.WebP.Internal.VP8.DCT (fdct4x4, fwht4x4)
+import Codec.Picture.WebP.Internal.VP8.Dequant (DequantFactors, dequantizeBlock)
+import Codec.Picture.WebP.Internal.VP8.IDCT (idct4x4, iwht4x4)
 import Codec.Picture.WebP.Internal.VP8.Predict
+import Codec.Picture.WebP.Internal.VP8.Quantize (quantizeBlock)
 import Control.Monad.ST
 import Data.Bits (shiftR, (.&.))
+import Data.Int (Int16)
+import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
 import Data.Word
 
@@ -291,3 +300,216 @@ computeSAD4x4Fast orig pred_ stride x y = do
             goRow (row + 1) (acc + d0 + d1 + d2 + d3)
 
   goRow 0 0
+
+-- ---------------------------------------------------------------------------
+-- Rate-Distortion Optimized mode selection
+-- ---------------------------------------------------------------------------
+
+-- | Select best 16x16 mode using Rate-Distortion Optimization.
+-- For each candidate mode: predict → DCT → quant → dequant → IDCT → SSE.
+-- Score = SSE + lambda * nonZeroCount.
+{-# INLINE selectIntra16x16ModeRDO #-}
+selectIntra16x16ModeRDO ::
+  VSM.MVector s Word8 -> -- Y plane original buffer
+  VSM.MVector s Word8 -> -- Y plane reconstruction buffer (for prediction context)
+  Int -> -- Stride (padded width)
+  Int -> -- Macroblock X position (pixels)
+  Int -> -- Macroblock Y position (pixels)
+  DequantFactors -> -- Quantization parameters
+  Int -> -- Lambda (rate-distortion tradeoff)
+  ST s (Int, Int) -- (mode, rdCost)
+selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda = do
+  predBuf <- VSM.clone yRecon
+  y2DCs <- VSM.new 16
+  residuals <- VSM.new 16
+  dctStore <- VSM.new (16 * 16)
+
+  let tryMode !mode !bestMode !bestCost
+        | mode > 3 = return (bestMode, bestCost)
+        | otherwise = do
+            predict16x16 mode predBuf stride mbX mbY
+
+            -- First pass: compute residuals, DCT, collect DCs
+            let collectDC !bi
+                  | bi >= 16 = return ()
+                  | otherwise = do
+                      let !subX = (bi .&. 3) * 4
+                          !subY = (bi `shiftR` 2) * 4
+                      let fillRes !r
+                            | r >= 4 = return ()
+                            | otherwise = do
+                                let fillCol !c
+                                      | c >= 4 = fillRes (r + 1)
+                                      | otherwise = do
+                                          let !idx = (mbY + subY + r) * stride + (mbX + subX + c)
+                                          !o <- VSM.unsafeRead yOrig idx
+                                          !p <- VSM.unsafeRead predBuf idx
+                                          VSM.unsafeWrite residuals (r * 4 + c) (fromIntegral o - fromIntegral p :: Int16)
+                                          fillCol (c + 1)
+                                fillCol 0
+                      fillRes 0
+                      fdct4x4 residuals
+                      !dc <- VSM.unsafeRead residuals 0
+                      VSM.unsafeWrite y2DCs bi dc
+                      let storeCoeffs !i
+                            | i >= 16 = collectDC (bi + 1)
+                            | otherwise = do
+                                !r <- VSM.unsafeRead residuals i
+                                VSM.unsafeWrite dctStore (bi * 16 + i) r
+                                storeCoeffs (i + 1)
+                      storeCoeffs 0
+            collectDC 0
+
+            -- Y2: WHT → quantize → count NZ → dequant → inverse WHT
+            fwht4x4 y2DCs
+            quantizeBlock dqFactors 1 y2DCs
+            !nnzY2 <- countNonZeroM y2DCs 0 16
+            dequantizeBlock dqFactors 1 y2DCs
+            reconDCsV <- iwht4x4 y2DCs
+
+            -- Second pass: quantize AC, reconstruct, compute SSE
+            let processBlock !bi !sse !nnz
+                  | bi >= 16 = do
+                      let !rdCost = sse + lambda * nnz
+                      if rdCost < bestCost
+                        then tryMode (mode + 1) mode rdCost
+                        else tryMode (mode + 1) bestMode bestCost
+                  | otherwise = do
+                      let !subX = (bi .&. 3) * 4
+                          !subY = (bi `shiftR` 2) * 4
+                      let loadCoeffs !i
+                            | i >= 16 = return ()
+                            | otherwise = do
+                                !r <- VSM.unsafeRead dctStore (bi * 16 + i)
+                                VSM.unsafeWrite residuals i r
+                                loadCoeffs (i + 1)
+                      loadCoeffs 0
+                      VSM.unsafeWrite residuals 0 0
+                      quantizeBlock dqFactors 0 residuals
+                      !blockNnz <- countNonZeroM residuals 1 16
+                      dequantizeBlock dqFactors 0 residuals
+                      VSM.unsafeWrite residuals 0 (reconDCsV VS.! bi)
+                      idct4x4 residuals
+                      !blockSSE <- computeBlockSSEM yOrig predBuf residuals stride (mbX + subX) (mbY + subY)
+                      processBlock (bi + 1) (sse + blockSSE) (nnz + blockNnz)
+
+            processBlock 0 0 nnzY2
+
+  tryMode 0 0 maxBound
+
+-- | Select best chroma mode using RDO over both U and V planes.
+-- Score = (SSE_U + SSE_V) + lambda * (NNZ_U + NNZ_V).
+{-# INLINE selectChromaModeRDO #-}
+selectChromaModeRDO ::
+  VSM.MVector s Word8 -> -- U original
+  VSM.MVector s Word8 -> -- U reconstruction
+  VSM.MVector s Word8 -> -- V original
+  VSM.MVector s Word8 -> -- V reconstruction
+  Int -> -- Stride
+  Int -> -- X position (chroma coords)
+  Int -> -- Y position (chroma coords)
+  DequantFactors ->
+  Int -> -- Lambda
+  ST s (Int, Int) -- (mode, rdCost)
+selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda = do
+  uPredBuf <- VSM.clone uRecon
+  vPredBuf <- VSM.clone vRecon
+  residuals <- VSM.new 16
+
+  let tryMode !mode !bestMode !bestCost
+        | mode > 3 = return (bestMode, bestCost)
+        | otherwise = do
+            predict8x8 mode uPredBuf stride x y
+            predict8x8 mode vPredBuf stride x y
+            (!sseU, !nnzU) <- trialEncodeChroma8x8 uOrig uPredBuf residuals stride x y dqFactors
+            (!sseV, !nnzV) <- trialEncodeChroma8x8 vOrig vPredBuf residuals stride x y dqFactors
+            let !rdCost = (sseU + sseV) + lambda * (nnzU + nnzV)
+            if rdCost < bestCost
+              then tryMode (mode + 1) mode rdCost
+              else tryMode (mode + 1) bestMode bestCost
+
+  tryMode 0 0 maxBound
+
+-- | Trial-encode a single 8x8 chroma plane (4 blocks of 4x4).
+-- Returns (SSE, nonZeroCount) without writing to any bool encoder.
+{-# INLINE trialEncodeChroma8x8 #-}
+trialEncodeChroma8x8 ::
+  VSM.MVector s Word8 -> -- Chroma original
+  VSM.MVector s Word8 -> -- Prediction buffer (prediction already applied)
+  VSM.MVector s Int16 -> -- Reusable 16-element residual buffer
+  Int -> -- Stride
+  Int -> -- X position
+  Int -> -- Y position
+  DequantFactors ->
+  ST s (Int, Int) -- (SSE, nonZeroCount)
+trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors = do
+  let processBlock !bi !sse !nnz
+        | bi >= 4 = return (sse, nnz)
+        | otherwise = do
+            let !row = bi `shiftR` 1
+                !col = bi .&. 1
+                !subX = col * 4
+                !subY = row * 4
+            let fillRes !r
+                  | r >= 4 = return ()
+                  | otherwise = do
+                      let fillCol !c
+                            | c >= 4 = fillRes (r + 1)
+                            | otherwise = do
+                                let !idx = (y + subY + r) * stride + (x + subX + c)
+                                !o <- VSM.unsafeRead chromaOrig idx
+                                !p <- VSM.unsafeRead predBuf idx
+                                VSM.unsafeWrite residuals (r * 4 + c) (fromIntegral o - fromIntegral p :: Int16)
+                                fillCol (c + 1)
+                      fillCol 0
+            fillRes 0
+            fdct4x4 residuals
+            quantizeBlock dqFactors 2 residuals
+            !blockNnz <- countNonZeroM residuals 0 16
+            dequantizeBlock dqFactors 2 residuals
+            idct4x4 residuals
+            !blockSSE <- computeBlockSSEM chromaOrig predBuf residuals stride (x + subX) (y + subY)
+            processBlock (bi + 1) (sse + blockSSE) (nnz + blockNnz)
+  processBlock 0 0 0
+
+-- ---------------------------------------------------------------------------
+-- RDO helpers
+-- ---------------------------------------------------------------------------
+
+-- | Count non-zero coefficients in range [start, end)
+{-# INLINE countNonZeroM #-}
+countNonZeroM :: VSM.MVector s Int16 -> Int -> Int -> ST s Int
+countNonZeroM coeffs start end = go start 0
+  where
+    go !i !count
+      | i >= end = return count
+      | otherwise = do
+          !c <- VSM.unsafeRead coeffs i
+          go (i + 1) (if c /= 0 then count + 1 else count)
+
+-- | Compute SSE for one 4x4 block: original vs (prediction + IDCT residuals)
+{-# INLINE computeBlockSSEM #-}
+computeBlockSSEM ::
+  VSM.MVector s Word8 -> -- Original pixels
+  VSM.MVector s Word8 -> -- Prediction pixels
+  VSM.MVector s Int16 -> -- IDCT output (reconstruction residuals)
+  Int -> -- Stride
+  Int -> -- X position
+  Int -> -- Y position
+  ST s Int
+computeBlockSSEM orig predBuf idctOut stride x y = do
+  let go !r !acc
+        | r >= 4 = return acc
+        | otherwise = do
+            let goC !c !a
+                  | c >= 4 = go (r + 1) a
+                  | otherwise = do
+                      let !idx = (y + r) * stride + (x + c)
+                      !o <- VSM.unsafeRead orig idx
+                      !p <- VSM.unsafeRead predBuf idx
+                      !res <- VSM.unsafeRead idctOut (r * 4 + c)
+                      let !recon = clip255 (fromIntegral p + fromIntegral res)
+                          !diff = fromIntegral o - fromIntegral recon :: Int
+                      goC (c + 1) (a + diff * diff)
+            goC 0 acc
+  go 0 0

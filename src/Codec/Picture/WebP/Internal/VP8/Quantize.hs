@@ -3,6 +3,7 @@
 module Codec.Picture.WebP.Internal.VP8.Quantize
   ( quantizeBlock,
     qualityToYacQi,
+    rdLambdaFromQi,
   )
 where
 
@@ -118,3 +119,10 @@ quantizeCoeff !coeff !quant
           -- Preserve sign
           result = if coeff < 0 then -quantized else quantized
        in fromIntegral result
+
+-- | Compute RDO lambda from quantizer index.
+-- Controls the rate vs distortion tradeoff in mode selection:
+--   low qi (high quality) → small lambda → prioritize distortion
+--   high qi (low quality) → large lambda → prioritize rate
+rdLambdaFromQi :: Int -> Int
+rdLambdaFromQi qi = max 1 ((qi * qi + 8) `div` 16)
