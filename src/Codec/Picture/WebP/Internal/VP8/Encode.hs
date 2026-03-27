@@ -154,16 +154,19 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
   aboveNzU <- VSM.replicate (mbCols * 2) (0 :: Word8) -- 2 U columns per MB
   aboveNzV <- VSM.replicate (mbCols * 2) (0 :: Word8) -- 2 V columns per MB
   aboveNzDC <- VSM.replicate mbCols (0 :: Word8) -- 1 DC per MB
-  let loop !mbY !mbX !mEnc !cEnc !leftNzY0 !leftNzY1 !leftNzY2 !leftNzY3 !leftNzU0 !leftNzU1 !leftNzV0 !leftNzV1 !leftNzDC
+  -- B_PRED sub-block mode context (4 modes per MB column for bottom row)
+  -- Non-B_PRED MBs store 0 (B_DC_PRED) as default context
+  aboveBModes <- VSM.replicate (mbCols * 4) (0 :: Word8)
+  let loop !mbY !mbX !mEnc !cEnc !leftNzY0 !leftNzY1 !leftNzY2 !leftNzY3 !leftNzU0 !leftNzU1 !leftNzV0 !leftNzV1 !leftNzDC !leftBM0 !leftBM1 !leftBM2 !leftBM3
         | mbY >= mbRows = return (mEnc, cEnc)
         | mbX >= mbCols = do
             -- Apply per-row loop filter to completed row
             when (filterLevel > 0) $
               applySimpleLoopFilterRow yRecon paddedW mbY mbCols filterLevel
-            -- New row: reset left NZ to 0
-            loop (mbY + 1) 0 mEnc cEnc 0 0 0 0 0 0 0 0 0
+            -- New row: reset left NZ and left B modes to 0
+            loop (mbY + 1) 0 mEnc cEnc 0 0 0 0 0 0 0 0 0 0 0 0 0
         | otherwise = do
-            (mEnc', cEnc', lY0, lY1, lY2, lY3, lU0, lU1, lV0, lV1, lDC) <-
+            (mEnc', cEnc', lY0, lY1, lY2, lY3, lU0, lU1, lV0, lV1, lDC, lBM0, lBM1, lBM2, lBM3) <-
               encodeMacroblock
                 yOrig
                 uOrig
@@ -184,6 +187,7 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
                 aboveNzU
                 aboveNzV
                 aboveNzDC
+                aboveBModes
                 leftNzY0
                 leftNzY1
                 leftNzY2
@@ -193,13 +197,17 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
                 leftNzV0
                 leftNzV1
                 leftNzDC
-            loop mbY (mbX + 1) mEnc' cEnc' lY0 lY1 lY2 lY3 lU0 lU1 lV0 lV1 lDC
+                leftBM0
+                leftBM1
+                leftBM2
+                leftBM3
+            loop mbY (mbX + 1) mEnc' cEnc' lY0 lY1 lY2 lY3 lU0 lU1 lV0 lV1 lDC lBM0 lBM1 lBM2 lBM3
 
-  loop 0 0 modeEnc coeffEnc 0 0 0 0 0 0 0 0 0
+  loop 0 0 modeEnc coeffEnc 0 0 0 0 0 0 0 0 0 0 0 0 0
 
 -- | Encode a single macroblock
 -- Modes go to modeEnc (partition 0), coefficients go to coeffEnc (DCT partition)
--- Returns updated encoders and NZ state for left neighbor
+-- Returns updated encoders, NZ state, and B mode context for left neighbor
 encodeMacroblock ::
   VSM.MVector s Word8 -> -- Y original
   VSM.MVector s Word8 -> -- U original
@@ -220,6 +228,7 @@ encodeMacroblock ::
   VSM.MVector s Word8 -> -- aboveNzU (mbCols * 2)
   VSM.MVector s Word8 -> -- aboveNzV (mbCols * 2)
   VSM.MVector s Word8 -> -- aboveNzDC (mbCols)
+  VSM.MVector s Word8 -> -- aboveBModes (mbCols * 4)
   Int ->
   Int ->
   Int ->
@@ -229,86 +238,220 @@ encodeMacroblock ::
   Int ->
   Int -> -- leftNzV[0..1]
   Int -> -- leftNzDC
-  ST s (BoolEncoder, BoolEncoder, Int, Int, Int, Int, Int, Int, Int, Int, Int)
-encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX dequantFactors lambda coeffProbs mEnc cEnc aboveNzY aboveNzU aboveNzV aboveNzDC leftNzY0 leftNzY1 leftNzY2 leftNzY3 leftNzU0 leftNzU1 leftNzV0 leftNzV1 leftNzDC = do
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- leftBMode[0..3]
+  ST s (BoolEncoder, BoolEncoder, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int)
+encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX dequantFactors lambda coeffProbs mEnc cEnc aboveNzY aboveNzU aboveNzV aboveNzDC aboveBModes leftNzY0 leftNzY1 leftNzY2 leftNzY3 leftNzU0 leftNzU1 leftNzV0 leftNzV1 leftNzDC leftBM0 leftBM1 leftBM2 leftBM3 = do
   let mbXpix = mbX * 16
       mbYpix = mbY * 16
 
-  -- Step 1: Select best Y mode using RDO (SSE after quantization + rate)
-  (predMode, _) <- selectIntra16x16ModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda
+  -- Step 1: Select best i16 Y mode using RDO
+  (i16Mode, i16Cost) <- selectIntra16x16ModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda
 
-  -- Step 2: Select best UV mode using RDO (both U and V)
+  -- Step 2: Select best B_PRED modes using RDO (modifies yRecon's MB area)
+  (bpredModes, bpredCost) <- selectBPredModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda
+  -- yRecon now has B_PRED reconstruction; if i16 wins, encodeYBlocks will overwrite it
+
+  -- B_PRED uses ~46 more bits for mode encoding (16 sub-block modes vs 1 Y mode).
+  -- Each sub-block also has its own DC (vs shared Y2 for i16).
+  -- Penalize to avoid choosing B_PRED when it barely wins on SSE.
+  let !modeCostPenalty = lambda * 32
+      useBPred = bpredCost + modeCostPenalty < i16Cost
+
+  -- Step 3: Select best UV mode using RDO (both U and V)
   let chromaX = mbX * 8
       chromaY = mbY * 8
   (uvPredMode, _) <- selectChromaModeRDO uOrig uRecon vOrig vRecon (paddedW `div` 2) chromaX chromaY dequantFactors lambda
 
-  -- Step 3: Write modes to partition 0
-  let mEnc1 = encodeYMode predMode mEnc
-      mEnc2 = encodeUVMode uvPredMode mEnc1
+  if useBPred
+    then do
+      -- === B_PRED path ===
+      -- Write B_PRED Y mode to partition 0
+      let mEnc1 = encodeYModeBPred mEnc
 
-  -- Step 4: Encode Y blocks with NZ context tracking
-  aNzDC <- VSM.read aboveNzDC mbX
-  (cEnc1, y2nz, newLeftY0, newLeftY1, newLeftY2, newLeftY3) <-
-    encodeYBlocks
-      yOrig
-      yRecon
-      paddedW
-      mbXpix
-      mbYpix
-      predMode
-      dequantFactors
-      coeffProbs
-      cEnc
-      aboveNzY
-      mbX
-      leftNzY0
-      leftNzY1
-      leftNzY2
-      leftNzY3
-      (fromIntegral aNzDC)
-      leftNzDC
+      -- Write 16 sub-block modes to partition 0 with above/left context
+      aBM0 <- VSM.read aboveBModes (mbX * 4)
+      aBM1 <- VSM.read aboveBModes (mbX * 4 + 1)
+      aBM2 <- VSM.read aboveBModes (mbX * 4 + 2)
+      aBM3 <- VSM.read aboveBModes (mbX * 4 + 3)
 
-  -- Update above DC NZ
-  VSM.write aboveNzDC mbX (if y2nz then 1 else 0)
+      let mEnc2 = encodeBPredModesToStream bpredModes aBM0 aBM1 aBM2 aBM3 leftBM0 leftBM1 leftBM2 leftBM3 mEnc1
+          mEnc3 = encodeUVMode uvPredMode mEnc2
 
-  -- Step 5: Encode U blocks with NZ context
-  (cEnc2, newLeftU0, newLeftU1) <-
-    encodeChromaBlocks
-      uOrig
-      uRecon
-      (paddedW `div` 2)
-      chromaX
-      chromaY
-      uvPredMode
-      dequantFactors
-      coeffProbs
-      cEnc1
-      2
-      aboveNzU
-      mbX
-      leftNzU0
-      leftNzU1
+      -- Encode Y blocks (B_PRED: blockType=3, no Y2)
+      (cEnc1, newLeftY0, newLeftY1, newLeftY2, newLeftY3) <-
+        encodeYBlocksBPred
+          yOrig
+          yRecon
+          paddedW
+          mbXpix
+          mbYpix
+          bpredModes
+          dequantFactors
+          coeffProbs
+          cEnc
+          aboveNzY
+          mbX
+          leftNzY0
+          leftNzY1
+          leftNzY2
+          leftNzY3
 
-  -- Step 6: Encode V blocks with NZ context
-  (cEnc3, newLeftV0, newLeftV1) <-
-    encodeChromaBlocks
-      vOrig
-      vRecon
-      (paddedW `div` 2)
-      chromaX
-      chromaY
-      uvPredMode
-      dequantFactors
-      coeffProbs
-      cEnc2
-      2
-      aboveNzV
-      mbX
-      leftNzV0
-      leftNzV1
+      -- B_PRED: no Y2, so DC NZ = 0
+      VSM.write aboveNzDC mbX 0
 
-  let newLeftDC = if y2nz then 1 else 0
-  return (mEnc2, cEnc3, newLeftY0, newLeftY1, newLeftY2, newLeftY3, newLeftU0, newLeftU1, newLeftV0, newLeftV1, newLeftDC)
+      -- Update above B modes with bottom row (blocks 12-15)
+      VSM.write aboveBModes (mbX * 4) (bpredModes VS.! 12)
+      VSM.write aboveBModes (mbX * 4 + 1) (bpredModes VS.! 13)
+      VSM.write aboveBModes (mbX * 4 + 2) (bpredModes VS.! 14)
+      VSM.write aboveBModes (mbX * 4 + 3) (bpredModes VS.! 15)
+
+      -- Encode chroma
+      (cEnc2, newLeftU0, newLeftU1) <-
+        encodeChromaBlocks
+          uOrig
+          uRecon
+          (paddedW `div` 2)
+          chromaX
+          chromaY
+          uvPredMode
+          dequantFactors
+          coeffProbs
+          cEnc1
+          2
+          aboveNzU
+          mbX
+          leftNzU0
+          leftNzU1
+
+      (cEnc3, newLeftV0, newLeftV1) <-
+        encodeChromaBlocks
+          vOrig
+          vRecon
+          (paddedW `div` 2)
+          chromaX
+          chromaY
+          uvPredMode
+          dequantFactors
+          coeffProbs
+          cEnc2
+          2
+          aboveNzV
+          mbX
+          leftNzV0
+          leftNzV1
+
+      -- Right column B modes (blocks 3,7,11,15) for next MB's left context
+      let !newLBM0 = fromIntegral (bpredModes VS.! 3)
+          !newLBM1 = fromIntegral (bpredModes VS.! 7)
+          !newLBM2 = fromIntegral (bpredModes VS.! 11)
+          !newLBM3 = fromIntegral (bpredModes VS.! 15)
+
+      return (mEnc3, cEnc3, newLeftY0, newLeftY1, newLeftY2, newLeftY3, newLeftU0, newLeftU1, newLeftV0, newLeftV1, 0, newLBM0, newLBM1, newLBM2, newLBM3)
+    else do
+      -- === i16 path (original) ===
+      let mEnc1 = encodeYMode i16Mode mEnc
+          mEnc2 = encodeUVMode uvPredMode mEnc1
+
+      aNzDC <- VSM.read aboveNzDC mbX
+      (cEnc1, y2nz, newLeftY0, newLeftY1, newLeftY2, newLeftY3) <-
+        encodeYBlocks
+          yOrig
+          yRecon
+          paddedW
+          mbXpix
+          mbYpix
+          i16Mode
+          dequantFactors
+          coeffProbs
+          cEnc
+          aboveNzY
+          mbX
+          leftNzY0
+          leftNzY1
+          leftNzY2
+          leftNzY3
+          (fromIntegral aNzDC)
+          leftNzDC
+
+      VSM.write aboveNzDC mbX (if y2nz then 1 else 0)
+
+      -- Non-B_PRED: above B modes default to 0 (B_DC_PRED)
+      VSM.write aboveBModes (mbX * 4) 0
+      VSM.write aboveBModes (mbX * 4 + 1) 0
+      VSM.write aboveBModes (mbX * 4 + 2) 0
+      VSM.write aboveBModes (mbX * 4 + 3) 0
+
+      (cEnc2, newLeftU0, newLeftU1) <-
+        encodeChromaBlocks
+          uOrig
+          uRecon
+          (paddedW `div` 2)
+          chromaX
+          chromaY
+          uvPredMode
+          dequantFactors
+          coeffProbs
+          cEnc1
+          2
+          aboveNzU
+          mbX
+          leftNzU0
+          leftNzU1
+
+      (cEnc3, newLeftV0, newLeftV1) <-
+        encodeChromaBlocks
+          vOrig
+          vRecon
+          (paddedW `div` 2)
+          chromaX
+          chromaY
+          uvPredMode
+          dequantFactors
+          coeffProbs
+          cEnc2
+          2
+          aboveNzV
+          mbX
+          leftNzV0
+          leftNzV1
+
+      let !newLeftDC = if y2nz then 1 else 0
+      return (mEnc2, cEnc3, newLeftY0, newLeftY1, newLeftY2, newLeftY3, newLeftU0, newLeftU1, newLeftV0, newLeftV1, newLeftDC, 0, 0, 0, 0)
+
+-- | Encode 16 B_PRED sub-block modes to bitstream with above/left context.
+-- Pure function: walks the kfBmodeTree for each sub-block.
+encodeBPredModesToStream ::
+  VS.Vector Word8 -> -- 16 sub-block modes
+  Word8 ->
+  Word8 ->
+  Word8 ->
+  Word8 -> -- aboveBModes (from above MB's bottom row)
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- leftBModes (from left MB's right column)
+  BoolEncoder ->
+  BoolEncoder
+encodeBPredModesToStream modes aBM0 aBM1 aBM2 aBM3 lBM0 lBM1 lBM2 lBM3 enc =
+  let go !bi !e
+        | bi >= 16 = e
+        | otherwise =
+            let !row = bi `shiftR` 2
+                !col = bi .&. 3
+                !above =
+                  if row == 0
+                    then fromIntegral $ case col of 0 -> aBM0; 1 -> aBM1; 2 -> aBM2; _ -> aBM3
+                    else fromIntegral $ modes VS.! ((row - 1) * 4 + col)
+                !left =
+                  if col == 0
+                    then case row of 0 -> lBM0; 1 -> lBM1; 2 -> lBM2; _ -> lBM3
+                    else fromIntegral $ modes VS.! (row * 4 + col - 1)
+                !mode = fromIntegral (modes VS.! bi)
+             in go (bi + 1) (encodeBSubMode above left mode e)
+   in go 0 enc
 
 -- | Encode Y blocks for a macroblock (16x16) with NZ context tracking
 -- Processes: Y2 DC block first, then 16 Y AC blocks in raster order
@@ -508,6 +651,120 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc abo
         VSM.write yRecon idx reconstructed
 
   return (enc2, y2nz, newLeftY0', newLeftY1', newLeftY2', newLeftY3')
+
+-- | Encode Y blocks for a B_PRED macroblock.
+-- No Y2 block. Each 4x4 sub-block uses blockType=3 (full coefficients with DC).
+-- Predicts each sub-block sequentially from yRecon (which already has B_PRED reconstruction).
+-- Returns: (coeffEncoder, leftNzY0..3)
+encodeYBlocksBPred ::
+  VSM.MVector s Word8 -> -- Y original
+  VSM.MVector s Word8 -> -- Y reconstruction
+  Int -> -- Stride
+  Int ->
+  Int -> -- X, Y position
+  VS.Vector Word8 -> -- 16 sub-block modes
+  DequantFactors ->
+  VU.Vector Word8 -> -- Coefficient probabilities
+  BoolEncoder -> -- Coefficient encoder (DCT partition)
+  VSM.MVector s Word8 -> -- aboveNzY (mbCols*4)
+  Int -> -- mbX
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- leftNzY[0..3]
+  ST s (BoolEncoder, Int, Int, Int, Int)
+encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 = do
+  -- NZ tracking grid for 16 sub-blocks
+  nzGrid <- VSM.replicate 16 (0 :: Word8)
+
+  -- Read above NZ for this MB's Y columns
+  aNzCol0 <- VSM.read aboveNzY (mbX * 4)
+  aNzCol1 <- VSM.read aboveNzY (mbX * 4 + 1)
+  aNzCol2 <- VSM.read aboveNzY (mbX * 4 + 2)
+  aNzCol3 <- VSM.read aboveNzY (mbX * 4 + 3)
+
+  -- Process 16 blocks in raster order
+  let encodeBlock !blockIdx !e
+        | blockIdx >= 16 = return e
+        | otherwise = do
+            let !row = blockIdx `div` 4
+                !col = blockIdx `mod` 4
+                !subX = col * 4
+                !subY = row * 4
+                !mode = fromIntegral (bpredModes VS.! blockIdx) :: Int
+
+            -- Predict into yRecon (reads from already-reconstructed neighbors)
+            predict4x4 mode yRecon stride (x + subX) (y + subY)
+
+            -- Compute residuals
+            residuals <- VSM.new 16
+            forM_ [0 .. 3] $ \r ->
+              forM_ [0 .. 3] $ \c -> do
+                let !idx = (y + subY + r) * stride + (x + subX + c)
+                !orig <- VSM.read yOrig idx
+                !pred <- VSM.read yRecon idx
+                VSM.write residuals (r * 4 + c) (fromIntegral orig - fromIntegral pred :: Int16)
+
+            -- Forward DCT
+            fdct4x4 residuals
+
+            -- Quantize (blockType=3: Y full with DC)
+            quantizeBlock dequantFactors 3 residuals
+
+            -- Get NZ context
+            aboveNz <-
+              if row == 0
+                then return $ fromIntegral $ case col of
+                  0 -> aNzCol0
+                  1 -> aNzCol1
+                  2 -> aNzCol2
+                  _ -> aNzCol3
+                else fromIntegral <$> VSM.read nzGrid ((row - 1) * 4 + col)
+            leftNz <-
+              if col == 0
+                then return $ case row of
+                  0 -> leftNzY0
+                  1 -> leftNzY1
+                  2 -> leftNzY2
+                  _ -> leftNzY3
+                else fromIntegral <$> VSM.read nzGrid (row * 4 + col - 1)
+            let !ctx = min 2 (aboveNz + leftNz)
+
+            -- Encode coefficients (blockType=3 for i4-AC, startPos=0 to include DC)
+            (e', hasNz) <- encodeCoefficients residuals coeffProbs 3 ctx 0 e
+            VSM.write nzGrid blockIdx (if hasNz then 1 else 0)
+
+            -- Dequantize and reconstruct
+            dequantizeBlock dequantFactors 3 residuals
+            idct4x4 residuals
+            forM_ [0 .. 3] $ \r ->
+              forM_ [0 .. 3] $ \c -> do
+                let !idx = (y + subY + r) * stride + (x + subX + c)
+                !pred <- VSM.read yRecon idx
+                !res <- VSM.read residuals (r * 4 + c)
+                VSM.write yRecon idx (clip255 (fromIntegral pred + fromIntegral res))
+
+            encodeBlock (blockIdx + 1) e'
+
+  enc' <- encodeBlock 0 enc
+
+  -- Update aboveNzY with bottom row NZ
+  nz12 <- VSM.read nzGrid 12
+  nz13 <- VSM.read nzGrid 13
+  nz14 <- VSM.read nzGrid 14
+  nz15 <- VSM.read nzGrid 15
+  VSM.write aboveNzY (mbX * 4) nz12
+  VSM.write aboveNzY (mbX * 4 + 1) nz13
+  VSM.write aboveNzY (mbX * 4 + 2) nz14
+  VSM.write aboveNzY (mbX * 4 + 3) nz15
+
+  -- Right column NZ for next MB's left
+  newLeftY0' <- fromIntegral <$> VSM.read nzGrid 3
+  newLeftY1' <- fromIntegral <$> VSM.read nzGrid 7
+  newLeftY2' <- fromIntegral <$> VSM.read nzGrid 11
+  newLeftY3' <- fromIntegral <$> VSM.read nzGrid 15
+
+  return (enc', newLeftY0', newLeftY1', newLeftY2', newLeftY3')
 
 -- | Encode chroma blocks (U or V) with NZ context tracking
 -- coeffBlockType: 2 for both U and V per RFC 6386 coefficient probability indexing

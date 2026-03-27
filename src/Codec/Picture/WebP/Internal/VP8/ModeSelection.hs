@@ -5,6 +5,7 @@ module Codec.Picture.WebP.Internal.VP8.ModeSelection
     selectIntra4x4Mode,
     selectChromaMode,
     selectIntra16x16ModeRDO,
+    selectBPredModeRDO,
     selectChromaModeRDO,
   )
 where
@@ -396,6 +397,112 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda = do
             processBlock 0 0 nnzY2
 
   tryMode 0 0 maxBound
+
+-- | Select best 4x4 modes for all 16 sub-blocks of a B_PRED macroblock.
+-- For each sub-block (in raster order): tries all 10 modes with RDO,
+-- picks the best, then reconstructs into yRecon so subsequent blocks
+-- can predict from it.
+-- Returns (16 modes as Word8, total RD cost).
+-- WARNING: Modifies yRecon in place!
+selectBPredModeRDO ::
+  VSM.MVector s Word8 -> -- Y plane original
+  VSM.MVector s Word8 -> -- Y plane reconstruction (MODIFIED!)
+  Int -> -- Stride (padded width)
+  Int -> -- MB X position (pixels)
+  Int -> -- MB Y position (pixels)
+  DequantFactors ->
+  Int -> -- Lambda
+  ST s (VS.Vector Word8, Int) -- (16 modes, total RD cost)
+selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda = do
+  modesMut <- VSM.new 16 :: ST s (VSM.MVector s Word8)
+  residuals <- VSM.new 16 :: ST s (VSM.MVector s Int16)
+
+  let processSB !bi !totalCost
+        | bi >= 16 = do
+            modesVec <- VS.unsafeFreeze modesMut
+            return (modesVec, totalCost)
+        | otherwise = do
+            let !subX = mbX + (bi .&. 3) * 4
+                !subY = mbY + (bi `shiftR` 2) * 4
+
+            -- Try all 10 modes, pick best by RD cost
+            let tryMode !m !bestMode !bestCost
+                  | m > 9 = return (bestMode, bestCost)
+                  | otherwise = do
+                      -- Predict into yRecon (reads only from outside the 4x4 block)
+                      predict4x4 m yRecon stride subX subY
+
+                      -- Compute residuals
+                      let fillRes !r
+                            | r >= 4 = return ()
+                            | otherwise = do
+                                let fillCol !c
+                                      | c >= 4 = fillRes (r + 1)
+                                      | otherwise = do
+                                          let !idx = (subY + r) * stride + (subX + c)
+                                          !o <- VSM.unsafeRead yOrig idx
+                                          !p <- VSM.unsafeRead yRecon idx
+                                          VSM.unsafeWrite residuals (r * 4 + c) (fromIntegral o - fromIntegral p :: Int16)
+                                          fillCol (c + 1)
+                                fillCol 0
+                      fillRes 0
+
+                      fdct4x4 residuals
+                      quantizeBlock dqFactors 3 residuals -- type 3 = Y full (with DC)
+                      !nz <- countNonZeroM residuals 0 16
+                      dequantizeBlock dqFactors 3 residuals
+                      idct4x4 residuals
+                      !sse <- computeBlockSSEM yOrig yRecon residuals stride subX subY
+
+                      let !cost = sse + lambda * nz
+                      if cost < bestCost
+                        then
+                          if cost < earlyExitThreshold4x4
+                            then return (m, cost) -- Early exit
+                            else tryMode (m + 1) m cost
+                        else tryMode (m + 1) bestMode bestCost
+
+            (!bestMode, !bestCost) <- tryMode 0 0 maxBound
+
+            -- Commit: predict with best mode and reconstruct into yRecon
+            predict4x4 bestMode yRecon stride subX subY
+            let fillRes !r
+                  | r >= 4 = return ()
+                  | otherwise = do
+                      let fillCol !c
+                            | c >= 4 = fillRes (r + 1)
+                            | otherwise = do
+                                let !idx = (subY + r) * stride + (subX + c)
+                                !o <- VSM.unsafeRead yOrig idx
+                                !p <- VSM.unsafeRead yRecon idx
+                                VSM.unsafeWrite residuals (r * 4 + c) (fromIntegral o - fromIntegral p :: Int16)
+                                fillCol (c + 1)
+                      fillCol 0
+            fillRes 0
+            fdct4x4 residuals
+            quantizeBlock dqFactors 3 residuals
+            dequantizeBlock dqFactors 3 residuals
+            idct4x4 residuals
+
+            -- Write reconstruction to yRecon
+            let reconSB !r
+                  | r >= 4 = return ()
+                  | otherwise = do
+                      let reconCol !c
+                            | c >= 4 = reconSB (r + 1)
+                            | otherwise = do
+                                let !idx = (subY + r) * stride + (subX + c)
+                                !p <- VSM.unsafeRead yRecon idx
+                                !res <- VSM.unsafeRead residuals (r * 4 + c)
+                                VSM.unsafeWrite yRecon idx (clip255 (fromIntegral p + fromIntegral res))
+                                reconCol (c + 1)
+                      reconCol 0
+            reconSB 0
+
+            VSM.unsafeWrite modesMut bi (fromIntegral bestMode)
+            processSB (bi + 1) (totalCost + bestCost)
+
+  processSB 0 0
 
 -- | Select best chroma mode using RDO over both U and V planes.
 -- Score = (SSE_U + SSE_V) + lambda * (NNZ_U + NNZ_V).
