@@ -59,26 +59,31 @@ decodeVP8LImage width height alphaIsUsed reader = do
     Left $
       "Invalid height in decodeVP8LImage: " ++ show height
 
-  (transforms, reader1) <- readTransforms width height reader
+  (transforms, effectiveWidth, reader1) <- readTransforms width height reader
 
-  (pixels, _) <- decodeVP8LImageData width height reader1 transforms
+  (pixels, _) <- decodeVP8LImageData effectiveWidth height reader1 transforms
 
   finalPixels <- applyInverseTransforms transforms width height pixels
 
   let image = pixelsToImage width height finalPixels alphaIsUsed
   return image
 
--- | Read all transforms
-readTransforms :: Int -> Int -> BitReader -> Either String ([VP8LTransform], BitReader)
-readTransforms width height reader = go [] reader
+-- | Read all transforms, returning the effective width (may be reduced by color-indexing bundling)
+readTransforms :: Int -> Int -> BitReader -> Either String ([VP8LTransform], Int, BitReader)
+readTransforms width height reader = go [] width reader
   where
-    go !acc !r = do
+    go !acc !w !r = do
       let (hasTransform, r1) = readBit r
       if not hasTransform
-        then return (reverse acc, r1)
+        then return (reverse acc, w, r1)
         else do
-          (transform, r2) <- readTransform width height r1
-          go (transform : acc) r2
+          (transform, r2) <- readTransform w height r1
+          -- Color-indexing with bundling reduces the effective image width
+          let w' = case transform of
+                TransformColorIndex _ wb
+                  | wb > 0 -> (w + (1 `shiftL` wb) - 1) `shiftR` wb
+                _ -> w
+          go (transform : acc) w' r2
 
 -- | Read a single transform
 readTransform :: Int -> Int -> BitReader -> Either String (VP8LTransform, BitReader)
@@ -115,7 +120,7 @@ readTransform width height reader = do
 
       let palette = applySubtractionCoding paletteData paletteSize
 
-      let widthBits = if width < 2 then 3 else if width < 4 then 2 else if width < 16 then 1 else 0
+      let widthBits = if paletteSize <= 2 then 3 else if paletteSize <= 4 then 2 else if paletteSize <= 16 then 1 else 0
 
       return (TransformColorIndex palette widthBits, reader3)
     _ -> Left $ "Unknown transform type: " ++ show transformType
@@ -234,30 +239,26 @@ readPrefixCodeWithAlphabet alphabetSize reader = do
     Left err -> Left $ "Failed to build prefix code for alphabet size " ++ show alphabetSize ++ ": " ++ err
     Right code -> return (code, reader1)
 
--- | Apply subtraction coding to palette data
+-- | Apply inverse subtraction coding to palette data (cumulative addition).
+-- stored[i] contains a delta; actual[i] = stored[i] + actual[i-1] per channel, mod 256.
 applySubtractionCoding :: VS.Vector Word32 -> Int -> VS.Vector Word32
-applySubtractionCoding palette size = VS.generate size $ \i ->
-  if i == 0
-    then palette VS.! 0
-    else
-      let prev = palette VS.! (i - 1)
-          curr = palette VS.! i
+applySubtractionCoding stored size
+  | size <= 0 = VS.empty
+  | otherwise = VS.constructN size $ \built ->
+      let !i = VS.length built
+       in if i == 0
+            then stored VS.! 0
+            else addPixels (stored VS.! i) (built `VS.unsafeIndex` (i - 1))
 
-          prevA = (prev `shiftR` 24) .&. 0xFF
-          prevR = (prev `shiftR` 16) .&. 0xFF
-          prevG = (prev `shiftR` 8) .&. 0xFF
-          prevB = prev .&. 0xFF
-
-          currA = (curr `shiftR` 24) .&. 0xFF
-          currR = (curr `shiftR` 16) .&. 0xFF
-          currG = (curr `shiftR` 8) .&. 0xFF
-          currB = curr .&. 0xFF
-
-          newA = (currA + prevA) .&. 0xFF
-          newR = (currR + prevR) .&. 0xFF
-          newG = (currG + prevG) .&. 0xFF
-          newB = (currB + prevB) .&. 0xFF
-       in (newA `shiftL` 24) .|. (newR `shiftL` 16) .|. (newG `shiftL` 8) .|. newB
+-- | Add two pixels component-wise (mod 256)
+{-# INLINE addPixels #-}
+addPixels :: Word32 -> Word32 -> Word32
+addPixels p1 p2 =
+  let !a = (((p1 `shiftR` 24) .&. 0xFF) + ((p2 `shiftR` 24) .&. 0xFF)) .&. 0xFF
+      !r = (((p1 `shiftR` 16) .&. 0xFF) + ((p2 `shiftR` 16) .&. 0xFF)) .&. 0xFF
+      !g = (((p1 `shiftR` 8) .&. 0xFF) + ((p2 `shiftR` 8) .&. 0xFF)) .&. 0xFF
+      !b = ((p1 .&. 0xFF) + (p2 .&. 0xFF)) .&. 0xFF
+   in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
 
 -- | Convert pixel data to JuicyPixels image
 {-# INLINE pixelsToImage #-}

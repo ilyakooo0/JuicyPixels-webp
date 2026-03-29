@@ -8,6 +8,7 @@ where
 
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.BitWriter
+import Codec.Picture.WebP.Internal.VP8L.ColorIndexingEncode
 import Codec.Picture.WebP.Internal.VP8L.LZ77Encode
 import Codec.Picture.WebP.Internal.VP8L.PredictorEncode
 import Codec.Picture.WebP.Internal.VP8L.SubresolutionEncode
@@ -44,23 +45,42 @@ encodeVP8LComplete img =
             !a = imgPixels `VS.unsafeIndex` (base + 3)
          in packARGB a r g b
 
+      -- Try color-indexing transform (for images with ≤ 256 unique colors)
+      maybeColorIndex = tryColorIndexing width height argbPixels
+
+      -- Effective pixels and width after color indexing
+      (effectivePixels, effectiveWidth) = case maybeColorIndex of
+        Nothing -> (argbPixels, width)
+        Just ci -> (ciIndexedPixels ci, ciPackedWidth ci)
+
       -- Compute predictor transform (sizeBits=4 -> 16x16 blocks)
       -- Only use predictor transform for images large enough to benefit
-      usePredictorTransform = width >= 8 && height >= 8
+      usePredictorTransform = effectiveWidth >= 8 && height >= 8
       sizeBits = 4
 
       (pixelsToEncode, maybePredResult) =
         if usePredictorTransform
           then
-            let pr = computePredictorTransform sizeBits width height argbPixels
+            let pr = computePredictorTransform sizeBits effectiveWidth height effectivePixels
              in (prResiduals pr, Just pr)
-          else (argbPixels, Nothing)
+          else (effectivePixels, Nothing)
 
-      -- LZ77 compress the pixel data
-      tokens = lz77Compress width height pixelsToEncode
+      -- Apply forward subtract-green to residuals (only when not using color indexing)
+      -- This subtracts the green channel from red and blue, decorrelating them.
+      -- Applied after predictor (same as libwebp): residuals benefit from channel decorrelation.
+      useSubtractGreen = case maybeColorIndex of
+        Nothing -> True
+        Just _ -> False
+      pixelsForLZ77 =
+        if useSubtractGreen
+          then applyForwardSubtractGreen pixelsToEncode
+          else pixelsToEncode
+
+      -- LZ77 compress the pixel data (at effective width)
+      tokens = lz77Compress effectiveWidth height pixelsForLZ77
 
       -- Build histograms from LZ77 tokens
-      reverseDistMap = buildReverseDistanceMap width
+      reverseDistMap = buildReverseDistanceMap effectiveWidth
       hists = buildHistogramsFromTokens reverseDistMap tokens
 
       -- Generate Huffman codes from extended histograms
@@ -70,11 +90,11 @@ encodeVP8LComplete img =
       w =
         emptyBitWriter
           |> writeBits 8 0x2F -- VP8L signature
-          |> writeBits 14 (fromIntegral $ width - 1)
+          |> writeBits 14 (fromIntegral $ width - 1) -- original width
           |> writeBits 14 (fromIntegral $ height - 1)
           |> writeBit True -- alpha_is_used
           |> writeBits 3 0 -- version (must be 0)
-          |> writeTransformHeader maybePredResult sizeBits
+          |> writeAllTransforms maybeColorIndex maybePredResult useSubtractGreen sizeBits
           |> writeBit False -- no color cache
           |> writeBit False -- single prefix code group (no meta prefix)
           |> writeHuffmanCode (cGreen codes) 280 -- Green alphabet: 256 + 24 LZ77 length codes (no cache)
@@ -88,11 +108,40 @@ encodeVP8LComplete img =
   where
     (|>) = flip ($)
 
--- | Write transform header (predictor transform if enabled, otherwise just no-transform marker)
-writeTransformHeader :: Maybe PredictorResult -> Int -> BitWriter -> BitWriter
-writeTransformHeader Nothing _ w =
-  writeBit False w -- no transforms
-writeTransformHeader (Just predResult) sizeBits w =
+-- | Write all transform headers (color-indexing, predictor, subtract-green, then no-more-transforms marker)
+writeAllTransforms :: Maybe ColorIndexResult -> Maybe PredictorResult -> Bool -> Int -> BitWriter -> BitWriter
+writeAllTransforms maybeCI maybePred subGreen sizeBits w0 =
+  let w1 = case maybeCI of
+        Just ci -> writeColorIndexTransform ci w0
+        Nothing -> w0
+      w2 = case maybePred of
+        Just pr -> writePredictorTransform pr sizeBits w1
+        Nothing -> w1
+      w3 =
+        if subGreen
+          then writeSubtractGreenTransform w2
+          else w2
+   in writeBit False w3 -- no more transforms
+
+-- | Write subtract-green transform header (type 2, no additional data)
+writeSubtractGreenTransform :: BitWriter -> BitWriter
+writeSubtractGreenTransform w =
+  let w1 = writeBit True w -- transform_present = 1
+      w2 = writeBits 2 2 w1 -- transform_type = 2 (subtract green)
+   in w2
+
+-- | Write color-indexing transform header
+writeColorIndexTransform :: ColorIndexResult -> BitWriter -> BitWriter
+writeColorIndexTransform ci w =
+  let w1 = writeBit True w -- transform_present = 1
+      w2 = writeBits 2 3 w1 -- transform_type = 3 (color indexing)
+      w3 = writeBits 8 (fromIntegral $ ciPaletteSize ci - 1) w2 -- color_table_size - 1
+      w4 = encodeSubresolutionImage (ciPaletteSize ci) 1 (ciPalette ci) w3
+   in w4
+
+-- | Write predictor transform header
+writePredictorTransform :: PredictorResult -> Int -> BitWriter -> BitWriter
+writePredictorTransform predResult sizeBits w =
   let w1 = writeBit True w -- transform_present = 1
       w2 = writeBits 2 0 w1 -- transform_type = 0 (predictor)
       w3 = writeBits 3 (fromIntegral $ sizeBits - 2) w2 -- decoder reads ReadBits(3) + 2
@@ -102,8 +151,7 @@ writeTransformHeader (Just predResult) sizeBits w =
           (prTransformHeight predResult)
           (prModeImage predResult)
           w3
-      w5 = writeBit False w4 -- no more transforms
-   in w5
+   in w4
 
 -- | Histogram data for all channels (extended for LZ77)
 data Histograms = Histograms
@@ -546,6 +594,20 @@ findMaxSymbol :: VU.Vector (Int, Word32, Int) -> Int
 findMaxSymbol codes = VU.maximum $ VU.map (\(sym, _, _) -> sym) codes
 
 -- Helper functions
+
+-- | Forward subtract-green transform: subtract green from red and blue channels.
+-- Inverse of the decoder's inverseSubtractGreen (which adds green back).
+applyForwardSubtractGreen :: VS.Vector Word32 -> VS.Vector Word32
+applyForwardSubtractGreen = VS.map subtractGreenPixel
+  where
+    {-# INLINE subtractGreenPixel #-}
+    subtractGreenPixel px =
+      let !g = (px `shiftR` 8) .&. 0xFF
+          !r = (px `shiftR` 16) .&. 0xFF
+          !b = px .&. 0xFF
+          !r' = (r - g) .&. 0xFF
+          !b' = (b - g) .&. 0xFF
+       in (px .&. 0xFF00FF00) .|. (r' `shiftL` 16) .|. b'
 
 {-# INLINE packARGB #-}
 packARGB :: Word8 -> Word8 -> Word8 -> Word8 -> Word32

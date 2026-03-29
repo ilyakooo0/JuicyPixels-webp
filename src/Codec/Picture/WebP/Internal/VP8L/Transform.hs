@@ -22,25 +22,49 @@ data VP8LTransform
   | TransformColorIndex !(VS.Vector Word32) !Int
   deriving (Show)
 
--- | Apply inverse transforms in reverse order
+-- | Apply inverse transforms in reverse order.
+-- Color-indexing is handled separately because it may change image dimensions (pixel bundling).
 applyInverseTransforms :: [VP8LTransform] -> Int -> Int -> VS.Vector Word32 -> Either String (VS.Vector Word32)
-applyInverseTransforms transforms width height pixels =
-  runST $ do
-    mutablePixels <- VS.thaw pixels
-    mapM_ (\t -> applyInverseTransform t width height mutablePixels) (reverse transforms)
-    result <- VS.unsafeFreeze mutablePixels
-    return $ Right result
+applyInverseTransforms transforms origWidth height pixels =
+  let -- Separate color-indexing from other transforms
+      (maybeCI, otherTransforms) = extractColorIndex transforms
 
--- | Apply a single inverse transform
-applyInverseTransform :: VP8LTransform -> Int -> Int -> VSM.MVector s Word32 -> ST s ()
-applyInverseTransform TransformSubGreen width height pixels =
+      -- Width used for in-place transforms (packed width if bundling)
+      effectiveWidth = case maybeCI of
+        Just (TransformColorIndex _ wb) | wb > 0 ->
+          (origWidth + (1 `shiftL` wb) - 1) `shiftR` wb
+        _ -> origWidth
+
+      -- Apply non-color-indexing inverse transforms in-place (reverse order)
+      afterInPlace = runST $ do
+        mp <- VS.thaw pixels
+        mapM_ (\t -> applyInPlaceInverseTransform t effectiveWidth height mp) (reverse otherTransforms)
+        VS.unsafeFreeze mp
+   in -- Apply color-indexing inverse (creates new vector at original dimensions)
+      case maybeCI of
+        Just (TransformColorIndex palette widthBits) ->
+          Right $ inverseColorIndexingPure palette widthBits origWidth height afterInPlace
+        _ -> Right afterInPlace
+
+-- | Extract the color-indexing transform (if any) from the list.
+-- Returns (color-indexing transform, remaining transforms in original order).
+extractColorIndex :: [VP8LTransform] -> (Maybe VP8LTransform, [VP8LTransform])
+extractColorIndex = go Nothing []
+  where
+    go ci acc [] = (ci, reverse acc)
+    go _ acc (t@(TransformColorIndex _ _) : rest) = go (Just t) acc rest
+    go ci acc (t : rest) = go ci (t : acc) rest
+
+-- | Apply a single in-place inverse transform (everything except color-indexing)
+applyInPlaceInverseTransform :: VP8LTransform -> Int -> Int -> VSM.MVector s Word32 -> ST s ()
+applyInPlaceInverseTransform TransformSubGreen width height pixels =
   inverseSubtractGreen width height pixels
-applyInverseTransform (TransformColor sizeBits transformData) width height pixels =
+applyInPlaceInverseTransform (TransformColor sizeBits transformData) width height pixels =
   inverseColorTransform sizeBits transformData width height pixels
-applyInverseTransform (TransformPredictor sizeBits transformData) width height pixels =
+applyInPlaceInverseTransform (TransformPredictor sizeBits transformData) width height pixels =
   inversePredictorTransform sizeBits transformData width height pixels
-applyInverseTransform (TransformColorIndex palette widthBits) width height pixels =
-  inverseColorIndexing palette widthBits width height pixels
+applyInPlaceInverseTransform (TransformColorIndex _ _) _ _ _ =
+  return () -- Handled separately in applyInverseTransforms
 
 -- | Inverse subtract green transform
 inverseSubtractGreen :: Int -> Int -> VSM.MVector s Word32 -> ST s ()
@@ -324,44 +348,31 @@ clip255Int x
   | x > 255 = 255
   | otherwise = x
 
--- | Inverse color indexing transform
-inverseColorIndexing :: VS.Vector Word32 -> Int -> Int -> Int -> VSM.MVector s Word32 -> ST s ()
-inverseColorIndexing palette widthBits width height pixels = do
-  let !totalPixels = width * height
-      !paletteLen = VS.length palette
-
-  if widthBits == 0
-    then do
-      -- Simple case: 1 pixel per byte, direct index lookup
-      let go !i
-            | i >= totalPixels = return ()
-            | otherwise = do
-                pixel <- VSM.unsafeRead pixels i
-                let !idx = fromIntegral ((pixel `shiftR` 8) .&. 0xFF)
-                when (idx < paletteLen) $ do
-                  let !color = VS.unsafeIndex palette idx
-                  VSM.unsafeWrite pixels i color
-                go (i + 1)
-      go 0
-    else do
-      let !bitsPerPixel = 8 `shiftR` widthBits
-          !pixelsPerByte = 1 `shiftL` widthBits
-          !mask = (1 `shiftL` bitsPerPixel) - 1
-
-      forM_ [0 .. height - 1] $ \y -> do
-        let !rowBase = y * width
-        forM_ [0 .. width - 1] $ \x -> do
-          let !packedIdx = x `shiftR` widthBits
-              !subIdx = x .&. (pixelsPerByte - 1)
-              !idx = rowBase + packedIdx
-
-          when (idx >= 0 && idx < VSM.length pixels) $ do
-            pixel <- VSM.unsafeRead pixels idx
-            let !green = (pixel `shiftR` 8) .&. 0xFF
-                !shiftAmt = subIdx * bitsPerPixel
-                !colorIdx = fromIntegral ((green `shiftR` shiftAmt) .&. mask) :: Int
-                !outIdx = rowBase + x
-
-            when (colorIdx < paletteLen && outIdx >= 0 && outIdx < VSM.length pixels) $ do
-              let !color = VS.unsafeIndex palette colorIdx
-              VSM.unsafeWrite pixels outIdx color
+-- | Pure inverse color-indexing transform. Creates a new vector at the original dimensions.
+-- Handles both the simple case (widthBits=0, no bundling) and the bundled case.
+inverseColorIndexingPure :: VS.Vector Word32 -> Int -> Int -> Int -> VS.Vector Word32 -> VS.Vector Word32
+inverseColorIndexingPure palette widthBits origWidth height packedPixels
+  | widthBits == 0 =
+      -- No bundling: direct 1:1 index replacement
+      VS.generate (origWidth * height) $ \i ->
+        let !px = packedPixels `VS.unsafeIndex` i
+            !idx = fromIntegral ((px `shiftR` 8) .&. 0xFF)
+         in if idx < paletteLen then palette `VS.unsafeIndex` idx else 0x00000000
+  | otherwise =
+      -- With bundling: expand packed pixels to original width
+      let !bpp = 8 `shiftR` widthBits
+          !ppb = 1 `shiftL` widthBits
+          !mask = (1 `shiftL` bpp) - 1 :: Word32
+          !packedWidth = VS.length packedPixels `div` max 1 height
+       in VS.generate (origWidth * height) $ \i ->
+            let !y = i `div` origWidth
+                !x = i `mod` origWidth
+                !packedX = x `shiftR` widthBits
+                !subIdx = x .&. (ppb - 1)
+                !packedI = y * packedWidth + packedX
+                !px = packedPixels `VS.unsafeIndex` packedI
+                !green = (px `shiftR` 8) .&. 0xFF
+                !colorIdx = fromIntegral ((green `shiftR` (subIdx * bpp)) .&. mask) :: Int
+             in if colorIdx < paletteLen then palette `VS.unsafeIndex` colorIdx else 0x00000000
+  where
+    !paletteLen = VS.length palette
