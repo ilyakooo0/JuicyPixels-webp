@@ -7,13 +7,11 @@ module Codec.Picture.WebP.Internal.VP8.ColorConvert
 where
 
 import Codec.Picture.Types
-import Control.Monad (forM_, when)
+import Control.Monad (forM_)
 import Control.Monad.ST
 import Data.Bits
 import qualified Data.Vector.Storable.Mutable as VSM
 import Data.Word
-
--- Performance: INLINE pragmas and shiftR instead of div
 
 -- | Clip value to [0, 255] range
 {-# INLINE clip255 #-}
@@ -27,56 +25,64 @@ clip255 !x
 -- Returns (Y buffer, U buffer, V buffer)
 -- Y plane is full resolution (width × height)
 -- U and V planes are subsampled (width/2 × height/2)
--- Uses BT.601 conversion with chroma subsampling (4:2:0)
+-- Uses BT.601 conversion with 4:2:0 chroma subsampling via 2×2 box filter
 rgbToYCbCr ::
   Image PixelRGB8 ->
   ST s (VSM.MVector s Word8, VSM.MVector s Word8, VSM.MVector s Word8)
 rgbToYCbCr img = do
   let w = imageWidth img
       h = imageHeight img
-      -- Pad dimensions to multiple of 16 (macroblock size)
-      -- Use shiftR instead of div for speed
       !paddedW = ((w + 15) `shiftR` 4) `shiftL` 4
       !paddedH = ((h + 15) `shiftR` 4) `shiftL` 4
       !chromaW = paddedW `shiftR` 1
       !chromaH = paddedH `shiftR` 1
 
-  -- Allocate buffers (padded)
   yBuf <- VSM.replicate (paddedW * paddedH) 128
   uBuf <- VSM.replicate (chromaW * chromaH) 128
   vBuf <- VSM.replicate (chromaW * chromaH) 128
 
-  -- Convert RGB to YCbCr
+  -- Pass 1: Luma at full resolution
   forM_ [0 .. h - 1] $ \y ->
     forM_ [0 .. w - 1] $ \x -> do
       let PixelRGB8 r g b = pixelAt img x y
-          -- Full-range YCbCr (JPEG/VP8 style) per RFC 6386
-          -- Y  = 0.299*R + 0.587*G + 0.114*B
-          -- Cb = -0.169*R - 0.331*G + 0.500*B + 128
-          -- Cr = 0.500*R - 0.419*G - 0.081*B + 128
-          --
-          -- Using fixed-point arithmetic (scaled by 256):
-          -- Y  = (77*R + 150*G + 29*B + 128) >> 8
-          -- Cb = (-43*R - 85*G + 128*B + 128) >> 8 + 128
-          -- Cr = (128*R - 107*G - 21*B + 128) >> 8 + 128
-          r' = fromIntegral r :: Int
-          g' = fromIntegral g :: Int
-          b' = fromIntegral b :: Int
+          -- BT.601 fixed-point (scaled by 256):
+          -- Y = (77*R + 150*G + 29*B + 128) >> 8
+          !r' = fromIntegral r :: Int
+          !g' = fromIntegral g :: Int
+          !b' = fromIntegral b :: Int
+      VSM.write yBuf (y * paddedW + x) $!
+        clip255 $ (77 * r' + 150 * g' + 29 * b' + 128) `shiftR` 8
 
-          y' = clip255 $ (77 * r' + 150 * g' + 29 * b' + 128) `shiftR` 8
-          cb = clip255 $ ((-43 * r' - 85 * g' + 128 * b' + 128) `shiftR` 8) + 128
-          cr = clip255 $ ((128 * r' - 107 * g' - 21 * b' + 128) `shiftR` 8) + 128
-
-      -- Write Y (full resolution)
-      VSM.write yBuf (y * paddedW + x) y'
-
-      -- Subsample chroma (simple decimation: take every other pixel)
-      -- In a production encoder, you'd use a better filter (e.g., box filter or bilinear)
-      -- Use shiftR instead of div for speed
-      when (even x && even y) $ do
-        let !chromaX = x `shiftR` 1
-            !chromaY = y `shiftR` 1
-        VSM.write uBuf (chromaY * chromaW + chromaX) cb
-        VSM.write vBuf (chromaY * chromaW + chromaX) cr
+  -- Pass 2: Chroma with 2×2 box filter subsampling
+  -- Each chroma sample averages Cb/Cr over a 2×2 pixel block.
+  -- At image edges, clamp to the nearest valid pixel.
+  let !chromaRows = (h + 1) `shiftR` 1
+      !chromaCols = (w + 1) `shiftR` 1
+  forM_ [0 .. chromaRows - 1] $ \cy ->
+    forM_ [0 .. chromaCols - 1] $ \cx -> do
+      let !x0 = cx `shiftL` 1
+          !y0 = cy `shiftL` 1
+          !x1 = min (x0 + 1) (w - 1)
+          !y1 = min (y0 + 1) (h - 1)
+          -- Compute unbiased chroma per pixel (before +128 offset)
+          -- Cb_raw = (-43*R - 85*G + 128*B + 128) >> 8
+          -- Cr_raw = (128*R - 107*G - 21*B + 128) >> 8
+          getCbCr !px !py =
+            let PixelRGB8 r g b = pixelAt img px py
+                !r' = fromIntegral r :: Int
+                !g' = fromIntegral g :: Int
+                !b' = fromIntegral b :: Int
+                !cb = (-43 * r' - 85 * g' + 128 * b' + 128) `shiftR` 8
+                !cr = (128 * r' - 107 * g' - 21 * b' + 128) `shiftR` 8
+             in (cb, cr)
+          !(cb00, cr00) = getCbCr x0 y0
+          !(cb10, cr10) = getCbCr x1 y0
+          !(cb01, cr01) = getCbCr x0 y1
+          !(cb11, cr11) = getCbCr x1 y1
+          -- Average with rounding bias (+2 for round-half-up on >>2), then add offset
+          !avgCb = clip255 $ ((cb00 + cb10 + cb01 + cb11 + 2) `shiftR` 2) + 128
+          !avgCr = clip255 $ ((cr00 + cr10 + cr01 + cr11 + 2) `shiftR` 2) + 128
+      VSM.write uBuf (cy * chromaW + cx) avgCb
+      VSM.write vBuf (cy * chromaW + cx) avgCr
 
   return (yBuf, uBuf, vBuf)

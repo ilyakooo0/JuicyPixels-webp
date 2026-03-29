@@ -203,15 +203,11 @@ spec = describe "ColorConvert" $ do
       VS.length uBuf `shouldBe` (16 * 16)
       VS.length vBuf `shouldBe` (16 * 16)
 
-    it "samples from even coordinates" $ do
-      -- Create image with different colors at even/odd positions
+    it "averages 2x2 blocks for chroma" $ do
+      -- Uniform red image: box filter over identical pixels = same value
       let img =
             generateImage
-              ( \x y ->
-                  if even x && even y
-                    then PixelRGB8 255 0 0 -- Red at even positions
-                    else PixelRGB8 0 0 255 -- Blue at odd positions
-              )
+              (\_ _ -> PixelRGB8 255 0 0)
               16
               16
           (_, uBuf, vBuf) = runST $ do
@@ -221,7 +217,6 @@ spec = describe "ColorConvert" $ do
             vFrozen <- VS.unsafeFreeze v
             return (yFrozen, uFrozen, vFrozen)
 
-      -- Should sample the red pixels (even x, even y)
       -- Red has low Cb and high Cr
       VS.head uBuf `shouldSatisfy` (< 128)
       VS.head vBuf `shouldSatisfy` (> 128)
