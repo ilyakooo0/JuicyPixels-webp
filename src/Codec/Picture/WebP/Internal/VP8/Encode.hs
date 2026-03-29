@@ -17,10 +17,10 @@ import Codec.Picture.WebP.Internal.VP8.EncodeCoefficients
 import Codec.Picture.WebP.Internal.VP8.EncodeHeader
 import Codec.Picture.WebP.Internal.VP8.EncodeMode
 import Codec.Picture.WebP.Internal.VP8.IDCT
-import Codec.Picture.WebP.Internal.VP8.LoopFilter (applySimpleLoopFilterRow)
+import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow)
 import Codec.Picture.WebP.Internal.VP8.ModeSelection
 import Codec.Picture.WebP.Internal.VP8.Predict
-import Codec.Picture.WebP.Internal.VP8.Quantize
+import Codec.Picture.WebP.Internal.VP8.Quantize (applySharpen, qualityToYacQi, rdLambdaFromQi, trellisQuantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad (forM_, when)
 import Control.Monad.ST
@@ -47,14 +47,15 @@ data EncodeConfig = EncodeConfig
 -- | Default encoder configuration
 defaultEncodeConfig :: Int -> EncodeConfig
 defaultEncodeConfig quality =
-  EncodeConfig
-    { encQuality = quality,
-      -- Filter level derived from quality: lower quality = more blocking = higher filter
-      -- quality 100 → level 0, quality 50 → level 31, quality 0 → level 63
-      encFilterLevel = min 63 $ max 0 $ (100 - quality) * 63 `div` 100,
-      encFilterType = 1, -- Simple filter (faster, good enough for most cases)
-      encUseSegmentation = True -- Enable adaptive QP segmentation
-    }
+  let qi = qualityToYacQi quality
+   in EncodeConfig
+        { encQuality = quality,
+          -- Filter level derived from qi (not quality) so the non-linear
+          -- quality curve flows through: qi/2 maps [0,127] to [0,63].
+          encFilterLevel = min 63 $ max 0 $ qi `div` 2,
+          encFilterType = 0, -- Normal filter (filters Y+U+V, sub-block edges)
+          encUseSegmentation = True -- Enable adaptive QP segmentation
+        }
 
 -- | Encode an RGB8 image to VP8 bitstream
 -- Returns the raw VP8 data (without WebP container)
@@ -207,7 +208,7 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
         | mbX >= mbCols = do
             -- Apply per-row loop filter to completed row
             when (filterLevel > 0) $
-              applySimpleLoopFilterRow yRecon paddedW mbY mbCols filterLevel
+              applyNormalLoopFilterRow yRecon paddedW uRecon (paddedW `div` 2) vRecon (paddedW `div` 2) mbY mbCols filterLevel
             -- New row: reset left NZ and left B modes to 0
             loop (mbY + 1) 0 mEnc cEnc 0 0 0 0 0 0 0 0 0 0 0 0 0
         | otherwise = do
@@ -342,6 +343,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           mbYpix
           bpredModes
           dequantFactors
+          lambda
           coeffProbs
           cEnc
           aboveNzY
@@ -371,6 +373,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           chromaY
           uvPredMode
           dequantFactors
+          lambda
           coeffProbs
           cEnc1
           2
@@ -389,6 +392,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           chromaY
           uvPredMode
           dequantFactors
+          lambda
           coeffProbs
           cEnc2
           2
@@ -420,6 +424,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           mbYpix
           i16Mode
           dequantFactors
+          lambda
           coeffProbs
           cEnc
           aboveNzY
@@ -449,6 +454,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           chromaY
           uvPredMode
           dequantFactors
+          lambda
           coeffProbs
           cEnc1
           2
@@ -467,6 +473,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           chromaY
           uvPredMode
           dequantFactors
+          lambda
           coeffProbs
           cEnc2
           2
@@ -522,6 +529,7 @@ encodeYBlocks ::
   Int -> -- X, Y position
   Int -> -- Prediction mode (0-3)
   DequantFactors ->
+  Int -> -- RDO lambda for trellis quantization
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
   VSM.MVector s Word8 -> -- aboveNzY (mbCols*4, read top row, write bottom row)
@@ -534,7 +542,7 @@ encodeYBlocks ::
   Int -> -- aboveDcNz, leftDcNz
   Maybe (CoeffStats s) -> -- Optional coefficient statistics
   ST s (BoolEncoder, Bool, Int, Int, Int, Int)
-encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 aboveDcNz leftDcNz mStats = do
+encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 aboveDcNz leftDcNz mStats = do
   -- Create temporary buffer for prediction (don't overwrite reconstruction yet)
   predBuf <- VSM.clone yRecon
 
@@ -579,12 +587,12 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc abo
   -- Forward WHT on Y2 DCs
   fwht4x4 y2DCs
 
-  -- Quantize Y2
-  quantizeBlock dequantFactors 1 y2DCs
+  -- Quantize Y2 (trellis-optimized)
+  let !dcCtx = min 2 (aboveDcNz + leftDcNz)
+  _ <- trellisQuantizeBlock dequantFactors 1 y2DCs coeffProbs dcCtx 0 lambda
 
   -- ENCODE Y2 FIRST
   -- blockType=1 for Y2 (i16-DC per libwebp convention)
-  let !dcCtx = min 2 (aboveDcNz + leftDcNz)
   (enc1, y2nz) <- encodeCoefficients y2DCs coeffProbs 1 dcCtx 0 enc
   case mStats of
     Just s -> countCoefficients y2DCs 1 dcCtx 0 s
@@ -645,12 +653,18 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc abo
             -- DC was already extracted for Y2, clear it
             VSM.write residuals 0 0
 
-            -- Quantize AC coefficients
-            quantizeBlock dequantFactors 0 residuals
+            -- Sharpen + trellis-quantize AC coefficients
+            applySharpen dequantFactors 0 residuals
+            let !ctx = min 2 (aboveNz + leftNz)
+            _ <- trellisQuantizeBlock dequantFactors 0 residuals coeffProbs ctx 1 lambda
+
+            -- Save quantized values for reconstruction (avoid double-quantization)
+            forM_ [0 .. 15] $ \i -> do
+              q <- VSM.unsafeRead residuals i
+              VSM.unsafeWrite residualBlocks (blockIdx * 16 + i) q
 
             -- Encode AC coefficients with NZ context
             -- blockType=0 for Y AC (i16-AC per libwebp convention)
-            let !ctx = min 2 (aboveNz + leftNz)
             (e', hasNz) <- encodeCoefficients residuals coeffProbs 0 ctx 1 e
             case mStats of
               Just s -> countCoefficients residuals 0 ctx 1 s
@@ -684,17 +698,13 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors coeffProbs enc abo
     let subX = (blockIdx `mod` 4) * 4
         subY = (blockIdx `div` 4) * 4
 
-    -- Get stored residuals (AC only, DC will come from Y2)
+    -- Read trellis-quantized coefficients (stored during encoding pass above)
     residuals <- VSM.new 16
     forM_ [0 .. 15] $ \i -> do
-      r <- VSM.read residualBlocks (blockIdx * 16 + i)
-      VSM.write residuals i r
+      q <- VSM.unsafeRead residualBlocks (blockIdx * 16 + i)
+      VSM.unsafeWrite residuals i q
 
-    -- Clear DC (it's handled by Y2)
-    VSM.write residuals 0 0
-
-    -- Quantize and dequantize AC coefficients
-    quantizeBlock dequantFactors 0 residuals
+    -- Dequantize (already quantized by trellis)
     dequantizeBlock dequantFactors 0 residuals
 
     -- Add reconstructed DC from Y2 (after dequant, before IDCT)
@@ -729,6 +739,7 @@ encodeYBlocksBPred ::
   Int -> -- X, Y position
   VS.Vector Word8 -> -- 16 sub-block modes
   DequantFactors ->
+  Int -> -- RDO lambda for trellis quantization
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder -> -- Coefficient encoder (DCT partition)
   VSM.MVector s Word8 -> -- aboveNzY (mbCols*4)
@@ -739,7 +750,7 @@ encodeYBlocksBPred ::
   Int -> -- leftNzY[0..3]
   Maybe (CoeffStats s) -> -- Optional coefficient statistics
   ST s (BoolEncoder, Int, Int, Int, Int)
-encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 mStats = do
+encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 mStats = do
   -- NZ tracking grid for 16 sub-blocks
   nzGrid <- VSM.replicate 16 (0 :: Word8)
 
@@ -774,9 +785,6 @@ encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors coeffProbs 
             -- Forward DCT
             fdct4x4 residuals
 
-            -- Quantize (blockType=3: Y full with DC)
-            quantizeBlock dequantFactors 3 residuals
-
             -- Get NZ context
             aboveNz <-
               if row == 0
@@ -795,6 +803,10 @@ encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors coeffProbs 
                   _ -> leftNzY3
                 else fromIntegral <$> VSM.read nzGrid (row * 4 + col - 1)
             let !ctx = min 2 (aboveNz + leftNz)
+
+            -- Sharpen + trellis-quantize (blockType=3: Y full with DC)
+            applySharpen dequantFactors 3 residuals
+            _ <- trellisQuantizeBlock dequantFactors 3 residuals coeffProbs ctx 0 lambda
 
             -- Encode coefficients (blockType=3 for i4-AC, startPos=0 to include DC)
             (e', hasNz) <- encodeCoefficients residuals coeffProbs 3 ctx 0 e
@@ -848,6 +860,7 @@ encodeChromaBlocks ::
   Int -> -- X, Y position
   Int -> -- Prediction mode (0-3)
   DequantFactors ->
+  Int -> -- RDO lambda for trellis quantization
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
   Int -> -- Coefficient block type (2 for both U and V)
@@ -857,7 +870,7 @@ encodeChromaBlocks ::
   Int -> -- leftNz row 0, row 1
   Maybe (CoeffStats s) -> -- Optional coefficient statistics
   ST s (BoolEncoder, Int, Int)
-encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coeffProbs enc coeffBlockType aboveNz mbX leftNz0 leftNz1 mStats = do
+encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lambda coeffProbs enc coeffBlockType aboveNz mbX leftNz0 leftNz1 mStats = do
   -- Create temporary buffer for prediction
   predBuf <- VSM.clone chromaRecon
 
@@ -910,8 +923,8 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coe
             -- Forward DCT
             fdct4x4 residuals
 
-            -- Quantize (always use type 2 = UV quant for both U and V)
-            quantizeBlock dequantFactors 2 residuals
+            -- Trellis-quantize (always use type 2 = UV quant for both U and V)
+            _ <- trellisQuantizeBlock dequantFactors 2 residuals coeffProbs ctx 0 lambda
 
             -- Encode coefficients with NZ context
             (e', hasNz) <- encodeCoefficients residuals coeffProbs coeffBlockType ctx 0 e

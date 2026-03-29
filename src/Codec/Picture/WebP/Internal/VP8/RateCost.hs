@@ -8,6 +8,7 @@ module Codec.Picture.WebP.Internal.VP8.RateCost
   ( branchCost,
     branchCostTab,
     coeffBlockCost,
+    trellisLevelCost,
     i16ModeCost,
     bSubModeCost,
     uvModeCost,
@@ -50,6 +51,39 @@ branchCostTab =
     if p <= 0
       then 2048
       else min 2048 $ round (256.0 * negate (logBase 2.0 (fromIntegral p / 256.0 :: Double)) :: Double)
+
+-- ---------------------------------------------------------------------------
+-- Trellis per-coefficient cost
+-- ---------------------------------------------------------------------------
+
+-- | Cost of encoding a single quantized level for trellis optimization.
+-- probIdx must be pre-computed as: blockType * 264 + band * 33 + ctx * 11.
+-- Handles the skipEOB convention: ctx > 0 includes not-EOB cost; ctx = 0 omits it
+-- (caller must add it separately for the first position when initialCtx = 0).
+-- Includes sign bit cost (256 = 1 bit) for nonzero levels.
+{-# INLINE trellisLevelCost #-}
+trellisLevelCost :: VU.Vector Word8 -> Int -> Int -> Int -> Int
+trellisLevelCost !coeffProbs !probIdx !ctx !level
+  | level == 0 =
+      let !notEob = if ctx > 0 then branchCost (coeffProbs VU.! probIdx) True else 0
+          !zero = branchCost (coeffProbs VU.! (probIdx + 1)) False
+       in notEob + zero
+  | otherwise =
+      let !notEob = if ctx > 0 then branchCost (coeffProbs VU.! probIdx) True else 0
+          !nz = branchCost (coeffProbs VU.! (probIdx + 1)) True
+          !val =
+            valueBitCost
+              (coeffProbs VU.! (probIdx + 2))
+              (coeffProbs VU.! (probIdx + 3))
+              (coeffProbs VU.! (probIdx + 4))
+              (coeffProbs VU.! (probIdx + 5))
+              (coeffProbs VU.! (probIdx + 6))
+              (coeffProbs VU.! (probIdx + 7))
+              (coeffProbs VU.! (probIdx + 8))
+              (coeffProbs VU.! (probIdx + 9))
+              (coeffProbs VU.! (probIdx + 10))
+              level
+       in notEob + nz + val
 
 -- ---------------------------------------------------------------------------
 -- Coefficient block cost

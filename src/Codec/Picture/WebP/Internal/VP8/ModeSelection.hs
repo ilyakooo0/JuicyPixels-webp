@@ -15,7 +15,7 @@ import Codec.Picture.WebP.Internal.VP8.DCT (fdct4x4, fwht4x4)
 import Codec.Picture.WebP.Internal.VP8.Dequant (DequantFactors, dequantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.IDCT (idct4x4, iwht4x4)
 import Codec.Picture.WebP.Internal.VP8.Predict
-import Codec.Picture.WebP.Internal.VP8.Quantize (quantizeBlock)
+import Codec.Picture.WebP.Internal.VP8.Quantize (applySharpen, quantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.RateCost
   ( bPredYModeCost,
     bSubModeCost,
@@ -397,6 +397,7 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
                                 loadCoeffs (i + 1)
                       loadCoeffs 0
                       VSM.unsafeWrite residuals 0 0
+                      applySharpen dqFactors 0 residuals
                       quantizeBlock dqFactors 0 residuals
                       !blockBitCost <- coeffBlockCost residuals coeffProbs 0 0 1
                       dequantizeBlock dqFactors 0 residuals
@@ -487,6 +488,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                       fillRes 0
 
                       fdct4x4 residuals
+                      applySharpen dqFactors 3 residuals
                       quantizeBlock dqFactors 3 residuals -- type 3 = Y full (with DC)
                       !blockBitCost <- coeffBlockCost residuals coeffProbs 3 0 0
                       dequantizeBlock dqFactors 3 residuals
@@ -517,6 +519,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                       fillCol 0
             fillRes 0
             fdct4x4 residuals
+            applySharpen dqFactors 3 residuals
             quantizeBlock dqFactors 3 residuals
             dequantizeBlock dqFactors 3 residuals
             idct4x4 residuals
