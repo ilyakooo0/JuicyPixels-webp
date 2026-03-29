@@ -84,6 +84,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - Frame header generation
 - Quality parameter (0-100) mapping to quantizer values
 - Coefficient probability updates (two-pass: gather statistics, cost-benefit analysis, re-encode)
+- Adaptive QP segmentation (4 segments based on macroblock variance, per-segment quantization)
 - Padding to macroblock boundaries
 
 #### Alpha Encoding
@@ -118,7 +119,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 
 ### VP8 Encoding Optimizations
 - ~~**Coefficient probability updates**~~ - ✅ implemented (two-pass with cost-benefit analysis)
-- **Segmentation** - decoder supports it, encoder doesn't use it
+- ~~**Segmentation**~~ - ✅ implemented (adaptive QP: 4 segments by variance, per-segment quantization)
 - **Advanced mode selection** - currently uses simple heuristics
 
 ### Performance
@@ -132,6 +133,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 ### Current Limitations (by design)
 - VP8L encoder uses predictor transform + LZ77 but not color transform, color-indexing, or color cache
 - Simple linear quality→qi mapping
+- VP8 segmentation disabled at qi < 8 (quality > ~93) or images < 4 macroblocks
 
 ### Error Handling
 - Reserved fields read but not rejected (per RFC)

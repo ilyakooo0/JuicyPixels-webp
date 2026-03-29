@@ -183,16 +183,23 @@ parseSegmentation decoder = do
           then parseSegmentFilterStrengths d4
           else return (VU.replicate 4 0, d4)
 
+      -- Parse segment tree probabilities (if update_mb_segmentation_map)
+      (treeProbs, d6) <-
+        if updateMap
+          then parseSegmentTreeProbs d5
+          else return ((255, 255, 255), d5)
+
       let info =
             SegmentInfo
               { segmentEnabled = enabled,
                 segmentUpdateMap = updateMap,
                 segmentAbsoluteMode = absoluteMode,
                 segmentQuantizer = quantizers,
-                segmentFilterStrength = filterStrengths
+                segmentFilterStrength = filterStrengths,
+                segmentTreeProbs = treeProbs
               }
 
-      return (Just info, d5)
+      return (Just info, d6)
 
 -- | Parse segment quantizers
 parseSegmentQuantizers :: BoolDecoder -> Either String (VU.Vector Int, BoolDecoder)
@@ -227,6 +234,20 @@ parseSegmentFilterStrengths decoder = do
               else loop (0 : acc) (i + 1) d1
 
   loop [] 0 decoder
+
+-- | Parse 3 segment tree probabilities from the compressed header.
+-- Each probability: present flag L(1), if present: value L(8). Default = 255.
+parseSegmentTreeProbs :: BoolDecoder -> Either String ((Word8, Word8, Word8), BoolDecoder)
+parseSegmentTreeProbs decoder = do
+  let readProb d =
+        let (hasUpdate, d1) = boolRead 128 d
+         in if hasUpdate
+              then let (val, d2) = boolLiteral 8 d1 in (fromIntegral val, d2)
+              else (255 :: Word8, d1)
+      (p0, d1) = readProb decoder
+      (p1, d2) = readProb d1
+      (p2, d3) = readProb d2
+  return ((p0, p1, p2), d3)
 
 -- | Parse filter deltas
 parseFilterDeltas :: BoolDecoder -> Either String (Maybe FilterDeltas, BoolDecoder)

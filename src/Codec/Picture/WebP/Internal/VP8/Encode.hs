@@ -27,10 +27,12 @@ import Control.Monad.ST
 import Data.Bits
 import qualified Data.ByteString as B
 import Data.Int
+import Data.List (sort)
 import qualified Data.Vector as V
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as VU
+import qualified Data.Vector.Unboxed.Mutable as VUM
 import Data.Word
 
 -- | Encoder configuration
@@ -51,7 +53,7 @@ defaultEncodeConfig quality =
       -- quality 100 → level 0, quality 50 → level 31, quality 0 → level 63
       encFilterLevel = min 63 $ max 0 $ (100 - quality) * 63 `div` 100,
       encFilterType = 1, -- Simple filter (faster, good enough for most cases)
-      encUseSegmentation = False -- Disable segmentation
+      encUseSegmentation = True -- Enable adaptive QP segmentation
     }
 
 -- | Encode an RGB8 image to VP8 bitstream
@@ -85,29 +87,58 @@ encodeVP8 img quality = runST $ do
             qiUvdcDelta = 0,
             qiUvacDelta = 0
           }
-      dequantFactorsVec = computeDequantFactors quantIndices Nothing
-      dequantFactors = dequantFactorsVec V.! 0 -- Single segment
-      lambda = rdLambdaFromQi qi
 
-  -- Step 3: Allocate reconstruction buffers (for prediction)
+  -- Step 3: Adaptive QP segmentation analysis
+  let segDeltas = computeSegmentDeltas qi
+      useSegmentation =
+        encUseSegmentation config
+          && VU.any (/= 0) segDeltas
+          && mbRows * mbCols >= 4
+
+  (mSegHeaderInfo, dequantFactorsVec, segLambdas, mSegEncInfo) <-
+    if useSegmentation
+      then do
+        variances <- computeMBVariances yBuf paddedW mbRows mbCols
+        let (segMap, c0, c1, c2, c3) = classifySegments variances
+            (sp0, sp1, sp2) = computeSegmentProbs c0 c1 c2 c3
+            segInfo =
+              SegmentInfo
+                { segmentEnabled = True,
+                  segmentUpdateMap = True,
+                  segmentAbsoluteMode = False,
+                  segmentQuantizer = segDeltas,
+                  segmentFilterStrength = VU.fromList [0, 0, 0, 0],
+                  segmentTreeProbs = (sp0, sp1, sp2)
+                }
+            dqVec = computeDequantFactors quantIndices (Just segInfo)
+            lams =
+              VU.generate 4 $ \s ->
+                rdLambdaFromQi (max 0 (min 127 (qi + segDeltas VU.! s)))
+        return (Just (segInfo, sp0, sp1, sp2), dqVec, lams, Just (segMap, sp0, sp1, sp2))
+      else do
+        let dqVec = computeDequantFactors quantIndices Nothing
+            lams = VU.singleton (rdLambdaFromQi qi)
+        return (Nothing, dqVec, lams, Nothing)
+
+  -- Step 4: Allocate reconstruction buffers (for prediction)
   yRecon <- VSM.replicate (paddedW * paddedH) 128
   uRecon <- VSM.replicate ((paddedW `div` 2) * (paddedH `div` 2)) 128
   vRecon <- VSM.replicate ((paddedW `div` 2) * (paddedH `div` 2)) 128
 
-  -- Step 4: Pass 1 — encode with default probs, collect coefficient statistics
+  -- Step 5: Pass 1 — encode with default probs, collect coefficient statistics
   stats <- newCoeffStats
   let noUpdateFlags = VU.replicate 1056 False
-      compressedHeaderEnc1 = generateCompressedHeader quantIndices (encFilterLevel config) (encFilterType config) defaultCoeffProbs noUpdateFlags
+      compressedHeaderEnc1 = generateCompressedHeader quantIndices (encFilterLevel config) (encFilterType config) mSegHeaderInfo defaultCoeffProbs noUpdateFlags
 
   (modeEnc1, coeffEnc1) <-
     encodeMacroblocks
       yBuf uBuf vBuf yRecon uRecon vRecon
       paddedW paddedH mbRows mbCols
-      dequantFactors lambda defaultCoeffProbs
+      dequantFactorsVec segLambdas mSegEncInfo defaultCoeffProbs
       compressedHeaderEnc1 initBoolEncoder
       (encFilterLevel config) (Just stats)
 
-  -- Step 5: Compute optimal coefficient probabilities from statistics
+  -- Step 6: Compute optimal coefficient probabilities from statistics
   optimalProbs <- computeOptimalProbs stats
   (updatedProbs, updateFlags) <- decideUpdates stats optimalProbs
   let hasUpdates = VU.any id updateFlags
@@ -120,19 +151,19 @@ encodeVP8 img quality = runST $ do
           uncompHeader = generateUncompressedHeader width height (B.length partition0)
       return $ uncompHeader <> partition0 <> dctPartition
     else do
-      -- Step 6: Reset reconstruction buffers for pass 2
+      -- Step 7: Reset reconstruction buffers for pass 2
       VSM.set yRecon 128
       VSM.set uRecon 128
       VSM.set vRecon 128
 
-      -- Step 7: Pass 2 — re-encode with optimal probs
-      let compressedHeaderEnc2 = generateCompressedHeader quantIndices (encFilterLevel config) (encFilterType config) updatedProbs updateFlags
+      -- Step 8: Pass 2 — re-encode with optimal probs
+      let compressedHeaderEnc2 = generateCompressedHeader quantIndices (encFilterLevel config) (encFilterType config) mSegHeaderInfo updatedProbs updateFlags
 
       (modeEnc2, coeffEnc2) <-
         encodeMacroblocks
           yBuf uBuf vBuf yRecon uRecon vRecon
           paddedW paddedH mbRows mbCols
-          dequantFactors lambda updatedProbs
+          dequantFactorsVec segLambdas mSegEncInfo updatedProbs
           compressedHeaderEnc2 initBoolEncoder
           (encFilterLevel config) Nothing
 
@@ -153,15 +184,16 @@ encodeMacroblocks ::
   Int -> -- Padded width, height
   Int ->
   Int -> -- MB rows, cols
-  DequantFactors ->
-  Int -> -- RDO lambda
+  V.Vector DequantFactors -> -- Per-segment dequant factors (length 1 or 4)
+  VU.Vector Int -> -- Per-segment RDO lambdas
+  Maybe (VU.Vector Word8, Word8, Word8, Word8) -> -- Segment map + 3 tree probs (Nothing = no segments)
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder -> -- Mode encoder (partition 0)
   BoolEncoder -> -- Coefficient encoder (DCT partition)
   Int -> -- Filter level for per-row loop filter
   Maybe (CoeffStats s) -> -- Optional coefficient statistics accumulator
   ST s (BoolEncoder, BoolEncoder)
-encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dequantFactors lambda coeffProbs modeEnc coeffEnc filterLevel mStats = do
+encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dqVec segLambdas mSegEncInfo coeffProbs modeEnc coeffEnc filterLevel mStats = do
   -- Allocate above NZ tracking arrays (persist across MB rows)
   aboveNzY <- VSM.replicate (mbCols * 4) (0 :: Word8) -- 4 Y columns per MB
   aboveNzU <- VSM.replicate (mbCols * 2) (0 :: Word8) -- 2 U columns per MB
@@ -179,6 +211,14 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
             -- New row: reset left NZ and left B modes to 0
             loop (mbY + 1) 0 mEnc cEnc 0 0 0 0 0 0 0 0 0 0 0 0 0
         | otherwise = do
+            -- Segment handling: look up per-MB segment, write ID, select per-segment params
+            let (!segDq, !segLam, !mEncSeg) = case mSegEncInfo of
+                  Nothing ->
+                    (dqVec V.! 0, segLambdas VU.! 0, mEnc)
+                  Just (segMap, sp0, sp1, sp2) ->
+                    let !s = fromIntegral (segMap VU.! (mbY * mbCols + mbX))
+                     in (dqVec V.! s, segLambdas VU.! s, encodeSegmentId s sp0 sp1 sp2 mEnc)
+
             (mEnc', cEnc', lY0, lY1, lY2, lY3, lU0, lU1, lV0, lV1, lDC, lBM0, lBM1, lBM2, lBM3) <-
               encodeMacroblock
                 yOrig
@@ -191,10 +231,10 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
                 paddedH
                 mbY
                 mbX
-                dequantFactors
-                lambda
+                segDq
+                segLam
                 coeffProbs
-                mEnc
+                mEncSeg
                 cEnc
                 aboveNzY
                 aboveNzU
@@ -914,3 +954,120 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors coe
   newLeft1 <- fromIntegral <$> VSM.read nzGrid 3
 
   return (enc', newLeft0, newLeft1)
+
+-- ---------------------------------------------------------------------------
+-- Adaptive QP segmentation
+-- ---------------------------------------------------------------------------
+
+-- | Compute Y-plane variance for a single block
+{-# INLINE computeBlockVariance #-}
+computeBlockVariance :: VSM.MVector s Word8 -> Int -> Int -> Int -> ST s Int
+computeBlockVariance buf stride bx by = do
+  let n = 256 :: Int -- 16x16
+      go !i !sumVal !sumSq
+        | i >= n =
+            -- var = (n * sumSq - sumVal^2) / n^2
+            return $ (n * sumSq - sumVal * sumVal) `div` (n * n)
+        | otherwise = do
+            let !row = i `shiftR` 4
+                !col = i .&. 15
+                !idx = (by + row) * stride + (bx + col)
+            !px <- fromIntegral <$> VSM.unsafeRead buf idx
+            go (i + 1) (sumVal + px) (sumSq + px * px)
+  go 0 0 0
+
+-- | Compute Y-plane variance for all macroblocks
+computeMBVariances ::
+  VSM.MVector s Word8 -> -- Y buffer
+  Int -> -- Stride (padded width)
+  Int -> -- MB rows
+  Int -> -- MB cols
+  ST s (VU.Vector Int)
+computeMBVariances yBuf stride mbRows mbCols = do
+  let !n = mbRows * mbCols
+  result <- VUM.new n
+  let go !i
+        | i >= n = VU.unsafeFreeze result
+        | otherwise = do
+            let !r = i `div` mbCols
+                !c = i - r * mbCols
+            !var <- computeBlockVariance yBuf stride (c * 16) (r * 16)
+            VUM.unsafeWrite result i var
+            go (i + 1)
+  go 0
+
+-- | Classify macroblocks into 4 segments by variance quartiles.
+-- Returns (segment map, count per segment).
+classifySegments :: VU.Vector Int -> (VU.Vector Word8, Int, Int, Int, Int)
+classifySegments variances =
+  let n = VU.length variances
+      sorted = VU.fromList $ sort (VU.toList variances)
+      -- Quartile boundaries (use floor indices)
+      !q1 = sorted VU.! max 0 (n `div` 4 - 1)
+      !q2 = sorted VU.! max 0 (n `div` 2 - 1)
+      !q3 = sorted VU.! max 0 (3 * n `div` 4 - 1)
+      classify v
+        | v <= q1 = 0
+        | v <= q2 = 1
+        | v <= q3 = 2
+        | otherwise = 3
+      segMap = VU.map classify variances
+      !c0 = VU.foldl' (\acc s -> if s == 0 then acc + 1 else acc) 0 segMap
+      !c1 = VU.foldl' (\acc s -> if s == 1 then acc + 1 else acc) 0 segMap
+      !c2 = VU.foldl' (\acc s -> if s == 2 then acc + 1 else acc) 0 segMap
+      !c3 = n - c0 - c1 - c2
+   in (segMap, c0, c1, c2, c3)
+
+-- | Compute QP deltas for 4 segments based on base quantizer index.
+-- Smooth regions (low variance) get finer quantization (negative delta),
+-- busy regions (high variance) get coarser quantization (positive delta).
+computeSegmentDeltas :: Int -> VU.Vector Int
+computeSegmentDeltas qi
+  | qi < 8 = VU.fromList [0, 0, 0, 0] -- No benefit at very high quality
+  | otherwise =
+      let -- Scale deltas proportionally with qi
+          !d0 = negate $ qi * 15 `div` 100 -- smoothest: up to ~15% finer
+          !d1 = negate $ qi * 5 `div` 100 -- medium-smooth: up to ~5% finer
+          !d2 = 0 -- base
+          !d3 = qi * 10 `div` 100 -- busiest: up to ~10% coarser
+          -- Clamp so effective qi stays in [0, 127]
+          !d0' = max (negate qi) d0
+          !d3' = min (127 - qi) d3
+       in VU.fromList [d0', d1, d2, d3']
+
+-- | Compute 3 segment tree probabilities from segment counts.
+-- Balanced tree (matching libwebp): prob[0] splits {seg0,seg1} vs {seg2,seg3},
+-- prob[1] splits seg0 vs seg1, prob[2] splits seg2 vs seg3.
+-- Probability = P(go left / bit=False) = round(256 * count_left / total_at_node), clamped to [1,255].
+computeSegmentProbs :: Int -> Int -> Int -> Int -> (Word8, Word8, Word8)
+computeSegmentProbs c0 c1 c2 c3 =
+  let total = c0 + c1 + c2 + c3
+      clampProb p = fromIntegral (max 1 (min 255 p)) :: Word8
+      -- prob[0]: P(seg in {0,1}) = (c0+c1)/total
+      !left01 = c0 + c1
+      !p0 = clampProb $ if total > 0 then (256 * left01 + total `div` 2) `div` total else 255
+      -- prob[1]: P(seg=0 | seg in {0,1}) = c0/(c0+c1)
+      !p1 = clampProb $ if left01 > 0 then (256 * c0 + left01 `div` 2) `div` left01 else 255
+      -- prob[2]: P(seg=2 | seg in {2,3}) = c2/(c2+c3)
+      !right23 = c2 + c3
+      !p2 = clampProb $ if right23 > 0 then (256 * c2 + right23 `div` 2) `div` right23 else 255
+   in (p0, p1, p2)
+
+-- | Encode a segment ID (0-3) using the VP8 balanced segment tree.
+-- Tree (matching libwebp): prob[0] splits {0,1} vs {2,3},
+-- prob[1] splits 0 vs 1, prob[2] splits 2 vs 3.
+-- False = left / 0, True = right / 1.
+{-# INLINE encodeSegmentId #-}
+encodeSegmentId :: Int -> Word8 -> Word8 -> Word8 -> BoolEncoder -> BoolEncoder
+encodeSegmentId 0 p0 p1 _ enc =
+  let !e1 = boolWrite p0 False enc -- left: {0,1}
+   in boolWrite p1 False e1 -- left: 0
+encodeSegmentId 1 p0 p1 _ enc =
+  let !e1 = boolWrite p0 False enc -- left: {0,1}
+   in boolWrite p1 True e1 -- right: 1
+encodeSegmentId 2 p0 _ p2 enc =
+  let !e1 = boolWrite p0 True enc -- right: {2,3}
+   in boolWrite p2 False e1 -- left: 2
+encodeSegmentId _ p0 _ p2 enc =
+  let !e1 = boolWrite p0 True enc -- right: {2,3}
+   in boolWrite p2 True e1 -- right: 3

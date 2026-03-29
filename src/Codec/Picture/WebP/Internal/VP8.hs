@@ -56,7 +56,11 @@ decodeVP8 bs = do
         -- Partition 0 decoder: reads modes (positioned after compressed header)
         let modeDecoder = vp8Decoder header
             coeffProbs = vp8CoeffProbs header
-            dequantFact = computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0
+            dequantFactorsVec = computeDequantFactors (vp8QuantIndices header) (vp8Segments header)
+            -- Segmentation: do we need to read per-MB segment IDs?
+            segReadInfo = case vp8Segments header of
+              Just si | segmentEnabled si && segmentUpdateMap si -> Just (segmentTreeProbs si)
+              _ -> Nothing
 
         let !filterLevel = vp8FilterLevel header
             !filterType = vp8FilterType header
@@ -74,8 +78,14 @@ decodeVP8 bs = do
                     applySimpleLoopFilterRow yBuf (mbWidth * 16) mbY mbWidth filterLevel
                   decodeMacroblocks (mbY + 1) 0 modeDec coeffDec 0 0 0 0 0 0 0 0 0 0 0 0 0
               | otherwise = do
+                  -- Read segment ID from partition 0 (if segmentation enabled)
+                  let (!segId, !modeDec0) = case segReadInfo of
+                        Nothing -> (0, modeDec)
+                        Just (sp0, sp1, sp2) -> decodeSegmentId sp0 sp1 sp2 modeDec
+                      !dequantFact = dequantFactorsVec V.! segId
+
                   -- Read Y mode from partition 0
-                  let (yMode, modeDec1) = boolReadTree kfYModeTree kfYModeProbs modeDec
+                  let (yMode, modeDec1) = boolReadTree kfYModeTree kfYModeProbs modeDec0
 
                   -- Process macroblock, threading both decoders and NZ state
                   -- RFC 6386 §11.5: Y mode → (if B_PRED: sub-block modes) → UV mode
@@ -98,7 +108,7 @@ decodeVP8 bs = do
                             modeDec1
                             coeffDec
                             coeffProbs
-                            header
+                            dequantFact
                             aboveNzY
                             lY0
                             lY1
@@ -310,7 +320,7 @@ reconstructBPred ::
   BoolDecoder -> -- Mode decoder (partition 0) - for sub-block modes
   BoolDecoder -> -- Coefficient decoder (DCT partition)
   VU.Vector Word8 ->
-  VP8FrameHeader ->
+  DequantFactors ->
   VSM.MVector s Word8 -> -- aboveNzY (mbCols*4)
   Int ->
   Int ->
@@ -325,10 +335,9 @@ reconstructBPred ::
   Int ->
   Int -> -- leftBModes (from left MB's right column)
   ST s (BoolDecoder, BoolDecoder, Int, Int, Int, Int, VSM.MVector s Word8)
-reconstructBPred yBuf mbY mbX mbStride modeDecoder coeffDecoder coeffProbs header aboveNzY leftNzY0 leftNzY1 leftNzY2 leftNzY3 aBM0 aBM1 aBM2 aBM3 lBM0 lBM1 lBM2 lBM3 = do
+reconstructBPred yBuf mbY mbX mbStride modeDecoder coeffDecoder coeffProbs dequantFact aboveNzY leftNzY0 leftNzY1 leftNzY2 leftNzY3 aBM0 aBM1 aBM2 aBM3 lBM0 lBM1 lBM2 lBM3 = do
   let mbYBase = mbY * 16
       mbXBase = mbX * 16
-      dequantFact = computeDequantFactors (vp8QuantIndices header) (vp8Segments header) V.! 0
 
   -- NZ tracking grid for 16 sub-blocks
   nzGrid <- VSM.replicate 16 (0 :: Word8)
@@ -701,3 +710,18 @@ kfUVModeTree =
 -- Keyframe UV mode probabilities (3 probabilities for 3 decision points)
 kfUVModeProbs :: V.Vector Word8
 kfUVModeProbs = V.fromList [142, 114, 183]
+
+-- | Decode segment ID (0-3) using the VP8 balanced segment tree.
+-- Tree (matching libwebp): prob[0] splits {0,1} vs {2,3},
+-- prob[1] splits 0 vs 1, prob[2] splits 2 vs 3.
+{-# INLINE decodeSegmentId #-}
+decodeSegmentId :: Word8 -> Word8 -> Word8 -> BoolDecoder -> (Int, BoolDecoder)
+decodeSegmentId p0 p1 p2 dec =
+  let (bit0, d1) = boolRead p0 dec
+   in if not bit0
+        then -- left: segment 0 or 1
+          let (bit1, d2) = boolRead p1 d1
+           in if not bit1 then (0, d2) else (1, d2)
+        else -- right: segment 2 or 3
+          let (bit2, d2) = boolRead p2 d1
+           in if not bit2 then (2, d2) else (3, d2)

@@ -72,10 +72,11 @@ generateCompressedHeader ::
   QuantIndices -> -- Quantization indices
   Int -> -- Filter level (0-63)
   Int -> -- Filter type (0=normal, 1=simple)
+  Maybe (SegmentInfo, Word8, Word8, Word8) -> -- Segment info + 3 tree probs (Nothing = disabled)
   VU.Vector Word8 -> -- Coefficient probabilities (1056 entries, possibly updated)
   VU.Vector Bool -> -- Which positions to update (1056 flags)
   BoolEncoder
-generateCompressedHeader quantIndices filterLevel filterType updatedProbs updateFlags =
+generateCompressedHeader quantIndices filterLevel filterType mSegInfo updatedProbs updateFlags =
   let enc0 = initBoolEncoder
 
       -- Color space and clamping (key frame only)
@@ -83,7 +84,10 @@ generateCompressedHeader quantIndices filterLevel filterType updatedProbs update
       enc2 = boolWriteLiteral 1 0 enc1 -- clamping_type = 0 (clamping required)
 
       -- Segmentation
-      enc3 = boolWriteLiteral 1 0 enc2 -- segmentation_enabled = 0
+      enc3 = case mSegInfo of
+        Nothing -> boolWriteLiteral 1 0 enc2 -- segmentation_enabled = 0
+        Just (segInfo, sp0, sp1, sp2) ->
+          encodeSegmentationHeader segInfo sp0 sp1 sp2 enc2
 
       -- Filter type and parameters
       enc4 = boolWriteLiteral 1 (fromIntegral filterType) enc3 -- filter_type
@@ -145,3 +149,62 @@ writeCoeffProbUpdates updatedProbs updateFlags enc =
                     let e1 = boolWrite updateProb False e
                      in loop i j k (l + 1) e1
    in loop 0 0 0 0 enc
+
+-- | Encode the full segmentation header into the compressed header.
+-- Layout per RFC 6386 Section 9.3:
+--   segmentation_enabled L(1) = 1
+--   update_mb_segmentation_map L(1) = 1
+--   update_segment_feature_data L(1) = 1
+--   segment_feature_mode L(1) = 0 (delta mode, per reference decoder)
+--   4 quantizer deltas: present L(1), if present: magnitude L(7) + sign L(1)
+--   4 filter deltas: present L(1), if present: magnitude L(6) + sign L(1)
+--   3 segment tree probabilities: present L(1), prob L(8)
+encodeSegmentationHeader :: SegmentInfo -> Word8 -> Word8 -> Word8 -> BoolEncoder -> BoolEncoder
+encodeSegmentationHeader segInfo sp0 sp1 sp2 enc =
+  let -- segmentation_enabled = 1
+      enc1 = boolWriteLiteral 1 1 enc
+      -- update_mb_segmentation_map = 1 (always for keyframes)
+      enc2 = boolWriteLiteral 1 1 enc1
+      -- update_segment_feature_data = 1
+      enc3 = boolWriteLiteral 1 1 enc2
+      -- segment_feature_mode = 0 (delta mode)
+      enc4 = boolWriteLiteral 1 0 enc3
+
+      -- 4 quantizer deltas
+      enc5 = writeSegQuantizer (segmentQuantizer segInfo VU.! 0) enc4
+      enc6 = writeSegQuantizer (segmentQuantizer segInfo VU.! 1) enc5
+      enc7 = writeSegQuantizer (segmentQuantizer segInfo VU.! 2) enc6
+      enc8 = writeSegQuantizer (segmentQuantizer segInfo VU.! 3) enc7
+
+      -- 4 filter strength deltas
+      enc9 = writeSegFilter (segmentFilterStrength segInfo VU.! 0) enc8
+      enc10 = writeSegFilter (segmentFilterStrength segInfo VU.! 1) enc9
+      enc11 = writeSegFilter (segmentFilterStrength segInfo VU.! 2) enc10
+      enc12 = writeSegFilter (segmentFilterStrength segInfo VU.! 3) enc11
+
+      -- 3 segment tree probabilities (always signal update)
+      enc13 = boolWriteLiteral 1 1 enc12
+      enc14 = boolWriteLiteral 8 (fromIntegral sp0) enc13
+      enc15 = boolWriteLiteral 1 1 enc14
+      enc16 = boolWriteLiteral 8 (fromIntegral sp1) enc15
+      enc17 = boolWriteLiteral 1 1 enc16
+      enc18 = boolWriteLiteral 8 (fromIntegral sp2) enc17
+   in enc18
+
+-- | Write a segment quantizer delta: present flag + signed 7-bit value
+writeSegQuantizer :: Int -> BoolEncoder -> BoolEncoder
+writeSegQuantizer 0 enc = boolWriteLiteral 1 0 enc -- not present
+writeSegQuantizer delta enc =
+  let enc1 = boolWriteLiteral 1 1 enc -- present
+      enc2 = boolWriteLiteral 7 (fromIntegral (abs delta)) enc1 -- magnitude
+      enc3 = boolWriteLiteral 1 (if delta < 0 then 1 else 0) enc2 -- sign
+   in enc3
+
+-- | Write a segment filter strength delta: present flag + signed 6-bit value
+writeSegFilter :: Int -> BoolEncoder -> BoolEncoder
+writeSegFilter 0 enc = boolWriteLiteral 1 0 enc -- not present
+writeSegFilter delta enc =
+  let enc1 = boolWriteLiteral 1 1 enc -- present
+      enc2 = boolWriteLiteral 6 (fromIntegral (abs delta)) enc1 -- magnitude
+      enc3 = boolWriteLiteral 1 (if delta < 0 then 1 else 0) enc2 -- sign
+   in enc3

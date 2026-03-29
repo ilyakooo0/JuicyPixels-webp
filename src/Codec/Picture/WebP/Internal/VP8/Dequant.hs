@@ -37,7 +37,8 @@ data SegmentInfo = SegmentInfo
     segmentUpdateMap :: !Bool,
     segmentAbsoluteMode :: !Bool,
     segmentQuantizer :: !(VU.Vector Int),
-    segmentFilterStrength :: !(VU.Vector Int)
+    segmentFilterStrength :: !(VU.Vector Int),
+    segmentTreeProbs :: !(Word8, Word8, Word8) -- 3 segment tree probabilities (default 255)
   }
   deriving (Show, Eq)
 
