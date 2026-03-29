@@ -108,7 +108,9 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 ## Future Enhancements
 
 ### VP8L Encoding Optimizations
-- **Predictor transform** - predict pixels from neighbors to reduce entropy
+- ~~**Predictor transform**~~ - ✅ implemented (14 prediction modes, 16x16 blocks)
+- ~~**LZ77 back-references**~~ - ✅ implemented (hash-chain match finding, 2D distance map)
+- **Color cache** - hash-based recently-used color lookup
 - **Color transform** - reduce inter-channel correlation
 - **Color-indexing transform** - palette-based compression for low-color images
 - **Meta prefix codes** - entropy image support for better Huffman efficiency
@@ -127,7 +129,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 ## Design Notes
 
 ### Current Limitations (by design)
-- No transforms in VP8L encoding: encodes pixels directly (larger files, correct output)
+- VP8L encoder uses predictor transform + LZ77 but not color transform, color-indexing, or color cache
 - Fixed coefficient probabilities in VP8 encoder
 - Simple linear quality→qi mapping
 

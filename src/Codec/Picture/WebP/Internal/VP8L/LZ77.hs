@@ -7,7 +7,7 @@ module Codec.Picture.WebP.Internal.VP8L.LZ77
     lookupColor,
     decodeLZ77,
     PrefixCodeGroup (..),
-    kDistanceMap,
+    kDistanceMapXY,
     lengthPrefixTable,
     distancePrefixTable,
   )
@@ -83,134 +83,140 @@ colorCacheHash color bits =
   let hash = (0x1e35a7bd :: Word32) * color
    in fromIntegral (hash `shiftR` (32 - bits))
 
--- | Distance map for small distance codes (1-120)
-kDistanceMap :: VU.Vector Int
-kDistanceMap =
+-- | The 120 (xi, yi) offset pairs for VP8L 2D distance codes (RFC 9649 Section 4.2.2).
+-- Index i corresponds to distance code (i+1).
+-- Convert to scan-line distance: dist = xi + yi * image_width; if dist < 1 then dist = 1.
+kDistanceMapXY :: VU.Vector (Int, Int)
+kDistanceMapXY =
   VU.fromList
-    [ 0,
-      1,
-      2,
-      3,
-      4,
-      5,
-      6,
-      7,
-      8,
-      9,
-      10,
-      11,
-      12,
-      13,
-      14,
-      15,
-      16,
-      17,
-      18,
-      19,
-      20,
-      21,
-      22,
-      23,
-      24,
-      25,
-      26,
-      27,
-      28,
-      29,
-      30,
-      31,
-      32,
-      33,
-      34,
-      35,
-      36,
-      37,
-      38,
-      39,
-      40,
-      41,
-      42,
-      43,
-      44,
-      45,
-      46,
-      47,
-      48,
-      49,
-      50,
-      51,
-      52,
-      53,
-      54,
-      55,
-      56,
-      57,
-      58,
-      59,
-      60,
-      61,
-      62,
-      63,
-      64,
-      65,
-      66,
-      67,
-      68,
-      69,
-      70,
-      71,
-      72,
-      73,
-      74,
-      75,
-      76,
-      77,
-      78,
-      79,
-      80,
-      81,
-      82,
-      83,
-      84,
-      85,
-      86,
-      87,
-      88,
-      89,
-      90,
-      91,
-      92,
-      93,
-      94,
-      95,
-      96,
-      97,
-      98,
-      99,
-      100,
-      101,
-      102,
-      103,
-      104,
-      105,
-      106,
-      107,
-      108,
-      109,
-      110,
-      111,
-      112,
-      113,
-      114,
-      115,
-      116,
-      117,
-      118,
-      119,
-      120
+    [ (0, 1),
+      (1, 0),
+      (1, 1),
+      (-1, 1),
+      (0, 2),
+      (2, 0),
+      (1, 2),
+      (-1, 2),
+      (2, 1),
+      (-2, 1),
+      (2, 2),
+      (-2, 2),
+      (0, 3),
+      (3, 0),
+      (1, 3),
+      (-1, 3),
+      (3, 1),
+      (-3, 1),
+      (2, 3),
+      (-2, 3),
+      (3, 2),
+      (-3, 2),
+      (0, 4),
+      (4, 0),
+      (1, 4),
+      (-1, 4),
+      (4, 1),
+      (-4, 1),
+      (3, 3),
+      (-3, 3),
+      (2, 4),
+      (-2, 4),
+      (4, 2),
+      (-4, 2),
+      (0, 5),
+      (3, 4),
+      (-3, 4),
+      (4, 3),
+      (-4, 3),
+      (5, 0),
+      (1, 5),
+      (-1, 5),
+      (5, 1),
+      (-5, 1),
+      (2, 5),
+      (-2, 5),
+      (5, 2),
+      (-5, 2),
+      (4, 4),
+      (-4, 4),
+      (3, 5),
+      (-3, 5),
+      (5, 3),
+      (-5, 3),
+      (0, 6),
+      (6, 0),
+      (1, 6),
+      (-1, 6),
+      (6, 1),
+      (-6, 1),
+      (2, 6),
+      (-2, 6),
+      (6, 2),
+      (-6, 2),
+      (4, 5),
+      (-4, 5),
+      (5, 4),
+      (-5, 4),
+      (3, 6),
+      (-3, 6),
+      (6, 3),
+      (-6, 3),
+      (0, 7),
+      (7, 0),
+      (1, 7),
+      (-1, 7),
+      (5, 5),
+      (-5, 5),
+      (7, 1),
+      (-7, 1),
+      (4, 6),
+      (-4, 6),
+      (6, 4),
+      (-6, 4),
+      (2, 7),
+      (-2, 7),
+      (7, 2),
+      (-7, 2),
+      (3, 7),
+      (-3, 7),
+      (7, 3),
+      (-7, 3),
+      (5, 6),
+      (-5, 6),
+      (6, 5),
+      (-6, 5),
+      (8, 0),
+      (4, 7),
+      (-4, 7),
+      (7, 4),
+      (-7, 4),
+      (8, 1),
+      (8, 2),
+      (6, 6),
+      (-6, 6),
+      (8, 3),
+      (5, 7),
+      (-5, 7),
+      (7, 5),
+      (-7, 5),
+      (8, 4),
+      (6, 7),
+      (-6, 7),
+      (7, 6),
+      (-7, 6),
+      (8, 5),
+      (7, 7),
+      (-7, 7),
+      (8, 6),
+      (8, 7)
     ]
 
 -- | Length prefix table: (base_length, extra_bits)
+-- Indexed by green symbol (0-279). Symbols 0-255 are literals.
+-- Symbols 256-279 are LZ77 length codes (prefix codes 0-23).
+-- Formula from RFC 9649 Section 4.2.1:
+--   if code < 4: value = code + 1
+--   else: extra_bits = (code-2)>>1; offset = (2 + (code&1)) << extra_bits; value = offset + extra + 1
 lengthPrefixTable :: VU.Vector (Int, Int)
 lengthPrefixTable = VU.generate 280 $ \sym ->
   if sym < 256
@@ -221,11 +227,7 @@ lengthPrefixTable = VU.generate 280 $ \sym ->
             then (code + 1, 0)
             else
               let extraBits = (code - 2) `shiftR` 1
-                  -- Prevent overflow during shift
-                  base =
-                    if extraBits > 20
-                      then error $ "Length extraBits overflow: " ++ show extraBits ++ " for code " ++ show code
-                      else 2 + ((code + 2) .&. complement 1) `shiftL` extraBits
+                  base = (2 + (code .&. 1)) `shiftL` extraBits
                in (base + 1, extraBits)
 
 -- | Distance prefix table: extra bits for each distance code
@@ -314,36 +316,33 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
                       error $
                         "Length too large: " ++ show len
 
+                    -- Decode distance symbol (0-39) and apply prefix decoding
+                    -- to get the actual distance code, then use 2D map or 1D offset.
                     let (distSym, r3) = decodeSymbol (pcgDistance codeGroup) r2
+                        !distPrefixCode = fromIntegral distSym :: Int
 
-                    dist <-
-                      if distSym < 120
-                        then return $ kDistanceMap VU.! fromIntegral distSym
-                        else do
-                          let distCode = fromIntegral distSym - 120
-                          when (distCode < 0 || distCode >= 40) $
-                            error $
-                              "Invalid distance code: " ++ show distCode ++ " (distSym=" ++ show distSym ++ ")"
+                    let (!distCode, !r4) =
+                          if distPrefixCode < 4
+                            then (distPrefixCode + 1, r3)
+                            else
+                              let !distExtraBits = (distPrefixCode - 2) `shiftR` 1
+                                  !distOffset = (2 + (distPrefixCode .&. 1)) `shiftL` distExtraBits
+                                  (!distExtra, !r3') = readBits distExtraBits r3
+                               in (distOffset + fromIntegral distExtra + 1, r3')
 
-                          let extraBits2 = distancePrefixTable VU.! distCode
-                          when (extraBits2 > 20) $
-                            error $
-                              "Extra bits too large: " ++ show extraBits2
-
-                          -- Use Int64 instead of Integer for better performance
-                          let (extra2, _) = readBits extraBits2 r3
-                              !base =
-                                if distCode < 4
-                                  then distCode + 1
-                                  else 5 + ((distCode - 2) .&. complement 1) `shiftL` extraBits2
-                              !dist' = base + fromIntegral extra2 + 1
-                          return dist'
+                    -- Convert distance code to scan-line pixel distance
+                    let !dist =
+                          if distCode <= 120
+                            then
+                              let (!xi, !yi) = kDistanceMapXY VU.! (distCode - 1)
+                               in max 1 (xi + yi * width)
+                            else distCode - 120
 
                     when (dist > pos) $
                       error $
                         "Distance " ++ show dist ++ " exceeds position " ++ show pos
 
-                    copyLoop pos dist len output mutableCache useCache r3
+                    copyLoop pos dist len output mutableCache useCache r4
                   else do
                     let cacheIdx = fromIntegral greenSym - 280
                     if not useCache

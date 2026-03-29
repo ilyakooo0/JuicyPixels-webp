@@ -13,6 +13,7 @@ dependencies:
   - vector-algorithms
   - primitive
   - binary
+  - containers
 
 library:
   source-dirs: src

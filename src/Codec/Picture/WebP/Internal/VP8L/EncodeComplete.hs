@@ -1,6 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 
--- | Complete VP8L encoder with proper Huffman coding
+-- | Complete VP8L encoder with proper Huffman coding and LZ77 compression
 module Codec.Picture.WebP.Internal.VP8L.EncodeComplete
   ( encodeVP8LComplete,
   )
@@ -8,13 +8,16 @@ where
 
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.BitWriter
+import Codec.Picture.WebP.Internal.VP8L.LZ77Encode
 import Codec.Picture.WebP.Internal.VP8L.PredictorEncode
 import Codec.Picture.WebP.Internal.VP8L.SubresolutionEncode
 import Control.Monad.ST
 import Data.Bits
 import qualified Data.ByteString as B
+import qualified Data.IntMap.Strict as IM
 import Data.List (sortBy)
 import Data.Ord (comparing)
+import qualified Data.Vector as V
 import qualified Data.Vector.Algorithms.Intro as VA
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
@@ -25,7 +28,7 @@ import Data.Word
 maxCodeLength :: Int
 maxCodeLength = 15
 
--- | Complete VP8L encoder with proper Huffman coding
+-- | Complete VP8L encoder with proper Huffman coding and LZ77 compression
 encodeVP8LComplete :: Image PixelRGBA8 -> B.ByteString
 encodeVP8LComplete img =
   let width = imageWidth img
@@ -53,10 +56,14 @@ encodeVP8LComplete img =
              in (prResiduals pr, Just pr)
           else (argbPixels, Nothing)
 
-      -- Build histograms
-      hists = buildHistograms pixelsToEncode
+      -- LZ77 compress the pixel data
+      tokens = lz77Compress width height pixelsToEncode
 
-      -- Generate Huffman codes from histograms
+      -- Build histograms from LZ77 tokens
+      reverseDistMap = buildReverseDistanceMap width
+      hists = buildHistogramsFromTokens reverseDistMap tokens
+
+      -- Generate Huffman codes from extended histograms
       codes = generateHuffmanCodes hists
 
       -- Build the VP8L bitstream
@@ -74,8 +81,8 @@ encodeVP8LComplete img =
           |> writeHuffmanCode (cRed codes) 256 -- Red: 256 symbols
           |> writeHuffmanCode (cBlue codes) 256 -- Blue: 256 symbols
           |> writeHuffmanCode (cAlpha codes) 256 -- Alpha: 256 symbols
-          |> writeHuffmanCode (cDist codes) 40 -- Distance: 40 symbols (not used, but required)
-          |> encodePixels pixelsToEncode codes
+          |> writeHuffmanCode (cDist codes) 40 -- Distance: 40 symbols
+          |> encodeTokens reverseDistMap tokens codes
           |> finalizeBitWriter
    in bitWriterToByteString w
   where
@@ -98,12 +105,13 @@ writeTransformHeader (Just predResult) sizeBits w =
       w5 = writeBit False w4 -- no more transforms
    in w5
 
--- | Histogram data for all channels
+-- | Histogram data for all channels (extended for LZ77)
 data Histograms = Histograms
-  { hGreen :: !(VU.Vector Int),
-    hRed :: !(VU.Vector Int),
-    hBlue :: !(VU.Vector Int),
-    hAlpha :: !(VU.Vector Int)
+  { hGreen :: !(VU.Vector Int), -- 280 entries: 256 literals + 24 length codes
+    hRed :: !(VU.Vector Int), -- 256 entries
+    hBlue :: !(VU.Vector Int), -- 256 entries
+    hAlpha :: !(VU.Vector Int), -- 256 entries
+    hDist :: !(VU.Vector Int) -- 40 entries
   }
 
 -- | Huffman codes for all channels
@@ -113,33 +121,53 @@ data HuffmanCodes = HuffmanCodes
     cRed :: !(VU.Vector (Int, Word32, Int)),
     cBlue :: !(VU.Vector (Int, Word32, Int)),
     cAlpha :: !(VU.Vector (Int, Word32, Int)),
-    cDist :: !(VU.Vector (Int, Word32, Int)), -- Distance codes (all zero for literals only)
-    -- Lookup tables for fast encoding (256 entries each)
-    lGreen :: !(VU.Vector (Word32, Int)),
-    lRed :: !(VU.Vector (Word32, Int)),
-    lBlue :: !(VU.Vector (Word32, Int)),
-    lAlpha :: !(VU.Vector (Word32, Int))
+    cDist :: !(VU.Vector (Int, Word32, Int)),
+    -- Lookup tables for fast encoding
+    lGreen :: !(VU.Vector (Word32, Int)), -- 280 entries (indexed by green symbol)
+    lRed :: !(VU.Vector (Word32, Int)), -- 256 entries
+    lBlue :: !(VU.Vector (Word32, Int)), -- 256 entries
+    lAlpha :: !(VU.Vector (Word32, Int)), -- 256 entries
+    lDist :: !(VU.Vector (Word32, Int)) -- 40 entries (indexed by distance prefix code)
   }
 
--- | Build frequency histograms for each channel
-buildHistograms :: VS.Vector Word32 -> Histograms
-buildHistograms pixels = runST $ do
-  gHist <- VUM.replicate 256 0
+-- | Build frequency histograms from LZ77 tokens
+buildHistogramsFromTokens :: IM.IntMap Int -> V.Vector Token -> Histograms
+buildHistogramsFromTokens reverseDistMap tokens = runST $ do
+  gHist <- VUM.replicate 280 0
   rHist <- VUM.replicate 256 0
   bHist <- VUM.replicate 256 0
   aHist <- VUM.replicate 256 0
+  dHist <- VUM.replicate 40 0
 
-  VS.forM_ pixels $ \px -> do
-    VUM.modify gHist (+ 1) (fromIntegral $ (px `shiftR` 8) .&. 0xFF)
-    VUM.modify rHist (+ 1) (fromIntegral $ (px `shiftR` 16) .&. 0xFF)
-    VUM.modify bHist (+ 1) (fromIntegral $ px .&. 0xFF)
-    VUM.modify aHist (+ 1) (fromIntegral $ (px `shiftR` 24) .&. 0xFF)
+  V.forM_ tokens $ \tok -> case tok of
+    TLiteral px -> do
+      VUM.unsafeModify gHist (+ 1) (fromIntegral $ (px `shiftR` 8) .&. 0xFF)
+      VUM.unsafeModify rHist (+ 1) (fromIntegral $ (px `shiftR` 16) .&. 0xFF)
+      VUM.unsafeModify bHist (+ 1) (fromIntegral $ px .&. 0xFF)
+      VUM.unsafeModify aHist (+ 1) (fromIntegral $ (px `shiftR` 24) .&. 0xFF)
+    TBackRef len dist -> do
+      -- Length prefix code -> green symbol 256..279
+      let (!lenPC, _, _) = valueToPrefixCode len
+      VUM.unsafeModify gHist (+ 1) (256 + lenPC)
+      -- Distance -> distance code -> distance prefix code -> symbol 0..39
+      let !distCode = distToDistCode reverseDistMap dist
+          (!distPC, _, _) = valueToPrefixCode distCode
+      VUM.unsafeModify dHist (+ 1) distPC
 
   g <- VU.unsafeFreeze gHist
   r <- VU.unsafeFreeze rHist
   b <- VU.unsafeFreeze bHist
   a <- VU.unsafeFreeze aHist
-  return $ Histograms g r b a
+  d <- VU.unsafeFreeze dHist
+  return $ Histograms g r b a d
+
+-- | Convert a scan-line distance to a VP8L distance code.
+{-# INLINE distToDistCode #-}
+distToDistCode :: IM.IntMap Int -> Int -> Int
+distToDistCode reverseMap dist =
+  case IM.lookup dist reverseMap of
+    Just code2d -> code2d
+    Nothing -> dist + 120
 
 -- | Generate Huffman codes from histograms
 generateHuffmanCodes :: Histograms -> HuffmanCodes
@@ -148,29 +176,76 @@ generateHuffmanCodes hists =
       rCodes = huffmanFromHistogram (hRed hists)
       bCodes = huffmanFromHistogram (hBlue hists)
       aCodes = huffmanFromHistogram (hAlpha hists)
-      -- Distance codes: single symbol 0 (no backward references used)
-      dCodes = VU.singleton (0, 0, 1)
+      dCodes = huffmanFromHistogram (hDist hists)
    in HuffmanCodes
         { cGreen = gCodes,
           cRed = rCodes,
           cBlue = bCodes,
           cAlpha = aCodes,
           cDist = dCodes,
-          lGreen = buildLookup gCodes,
-          lRed = buildLookup rCodes,
-          lBlue = buildLookup bCodes,
-          lAlpha = buildLookup aCodes
+          lGreen = buildLookup 280 gCodes,
+          lRed = buildLookup 256 rCodes,
+          lBlue = buildLookup 256 bCodes,
+          lAlpha = buildLookup 256 aCodes,
+          lDist = buildLookup 40 dCodes
         }
 
 -- | Build lookup table from codes for fast encoding
 {-# INLINE buildLookup #-}
-buildLookup :: VU.Vector (Int, Word32, Int) -> VU.Vector (Word32, Int)
-buildLookup codes = runST $ do
-  lookup <- VUM.replicate 256 (0, 0)
+buildLookup :: Int -> VU.Vector (Int, Word32, Int) -> VU.Vector (Word32, Int)
+buildLookup size codes = runST $ do
+  tbl <- VUM.replicate size (0, 0)
   VU.forM_ codes $ \(sym, code, len) ->
-    when (sym < 256) $
-      VUM.write lookup sym (code, len)
-  VU.unsafeFreeze lookup
+    when (sym < size) $
+      VUM.write tbl sym (code, len)
+  VU.unsafeFreeze tbl
+
+-- | Encode LZ77 tokens using Huffman codes
+encodeTokens :: IM.IntMap Int -> V.Vector Token -> HuffmanCodes -> BitWriter -> BitWriter
+encodeTokens reverseDistMap tokens codes w0 =
+  let !greenLookup = lGreen codes
+      !redLookup = lRed codes
+      !blueLookup = lBlue codes
+      !alphaLookup = lAlpha codes
+      !distLookup = lDist codes
+   in V.foldl'
+        ( \wa tok -> case tok of
+            TLiteral px ->
+              let !g = fromIntegral ((px `shiftR` 8) .&. 0xFF) :: Int
+                  !r = fromIntegral ((px `shiftR` 16) .&. 0xFF) :: Int
+                  !b = fromIntegral (px .&. 0xFF) :: Int
+                  !a = fromIntegral ((px `shiftR` 24) .&. 0xFF) :: Int
+                  !wa1 = writeHuffSym greenLookup g wa
+                  !wa2 = writeHuffSym redLookup r wa1
+                  !wa3 = writeHuffSym blueLookup b wa2
+                  !wa4 = writeHuffSym alphaLookup a wa3
+               in wa4
+            TBackRef len dist ->
+              let -- Encode length: prefix code goes into green symbol 256+
+                  (!lenPC, !lenExtra, !lenExtraVal) = valueToPrefixCode len
+                  !greenSym = 256 + lenPC
+                  !wa1 = writeHuffSym greenLookup greenSym wa
+                  !wa2 =
+                    if lenExtra > 0
+                      then writeBits lenExtra (fromIntegral lenExtraVal) wa1
+                      else wa1
+                  -- Encode distance: convert to distance code, then prefix code
+                  !dc = distToDistCode reverseDistMap dist
+                  (!distPC, !distExtra, !distExtraVal) = valueToPrefixCode dc
+                  !wa3 = writeHuffSym distLookup distPC wa2
+                  !wa4 =
+                    if distExtra > 0
+                      then writeBits distExtra (fromIntegral distExtraVal) wa3
+                      else wa3
+               in wa4
+        )
+        w0
+        tokens
+  where
+    {-# INLINE writeHuffSym #-}
+    writeHuffSym lut sym wa =
+      let (!code, !len) = lut `VU.unsafeIndex` sym
+       in if len > 0 then writeBitsReversed len (fromIntegral code) wa else wa
 
 -- | Generate Huffman codes from a histogram
 -- Returns vector of (symbol, codeValue, codeLength)
@@ -346,18 +421,19 @@ writeHuffmanCode codes alphabetSize w
   | VU.null codes =
       -- Empty: encode as single symbol 0
       writeSimpleCode1 0 w
-  | VU.length codes == 1 =
-      -- Single symbol
-      let (sym, _, _) = codes VU.! 0
-       in writeSimpleCode1 sym w
-  | VU.length codes == 2 =
-      -- Two symbols
+  | VU.length codes == 1 && maxSym <= 255 =
+      -- Single symbol that fits in simple code
+      writeSimpleCode1 maxSym w
+  | VU.length codes == 2 && maxSym <= 255 =
+      -- Two symbols that both fit in simple code (8-bit max)
       let (s1, _, _) = codes VU.! 0
           (s2, _, _) = codes VU.! 1
        in writeSimpleCode2 s1 s2 w
   | otherwise =
-      -- 3+ symbols: use normal code length encoding
+      -- 3+ symbols or symbols > 255: use normal code length encoding
       writeNormalCode codes alphabetSize w
+  where
+    maxSym = if VU.null codes then 0 else VU.maximum $ VU.map (\(s, _, _) -> s) codes
 
 -- | Write simple code for 1 symbol
 {-# INLINE writeSimpleCode1 #-}
@@ -468,138 +544,6 @@ buildCodeLengthArray codes size = runST $ do
 {-# INLINE findMaxSymbol #-}
 findMaxSymbol :: VU.Vector (Int, Word32, Int) -> Int
 findMaxSymbol codes = VU.maximum $ VU.map (\(sym, _, _) -> sym) codes
-
--- | Build code length code (CLC) symbols and lengths
--- Returns (run-length encoded symbols, CLC alphabet lengths)
-buildCLC :: VU.Vector Int -> Int -> ([(Int, Int)], VU.Vector Int)
-buildCLC codeLengths maxSym =
-  let -- Run-length encode the code lengths
-      rle = runLengthEncode $ VU.toList $ VU.take (maxSym + 1) codeLengths
-
-      -- Count CLC symbol frequencies
-      clcFreqs = runST $ do
-        freqs <- VUM.replicate 19 (0 :: Int)
-        mapM_ (\(sym, _) -> VUM.modify freqs (+ 1) sym) rle
-        VU.unsafeFreeze freqs
-
-      -- Assign CLC lengths (simple approach: use frequency-based lengths)
-      clcLengths = assignClcLengths clcFreqs
-   in (rle, clcLengths)
-
--- | Run-length encode code lengths using symbols 0-18
--- Simply output each code length as a literal (no run-length encoding for now)
--- This is simpler and guaranteed correct, though less compressed
-runLengthEncode :: [Int] -> [(Int, Int)]
-runLengthEncode = map (\len -> (len, 0))
-
--- | Assign CLC lengths based on frequencies
-assignClcLengths :: VU.Vector Int -> VU.Vector Int
-assignClcLengths freqs =
-  let -- Count non-zero symbols
-      numNonZero = VU.length $ VU.filter (> 0) freqs
-   in if numNonZero <= 1
-        then -- All zeros or single symbol: assign length 1 to all used
-          VU.generate 19 $ \i -> if freqs VU.! i > 0 then 1 else 0
-        else -- Multiple symbols: use frequency-based lengths
-          VU.imap
-            ( \_ f ->
-                if f == 0
-                  then 0
-                  else min 7 $ max 1 $ 8 - ceilLog2 (max 1 f)
-            )
-            freqs
-
--- | Find how many CLC entries to write (minimum 4)
-findNumClcToWrite :: VU.Vector Int -> [Int] -> Int
-findNumClcToWrite clcLengths order =
-  let -- Find last non-zero in order
-      indexed = zip [0 ..] order
-      lastNonZero =
-        foldl
-          ( \acc (i, sym) ->
-              if clcLengths VU.! sym > 0 then i + 1 else acc
-          )
-          4
-          indexed
-   in max 4 lastNonZero
-
--- | Build canonical codes for CLC
-buildClcCanonicalCodes :: VU.Vector Int -> VU.Vector (Word32, Int)
-buildClcCanonicalCodes clcLengths = runST $ do
-  -- Count at each length
-  blCount <- VUM.replicate 8 (0 :: Int)
-  VU.iforM_ clcLengths $ \_ len ->
-    when (len > 0 && len <= 7) $
-      VUM.modify blCount (+ 1) len
-
-  -- Compute next_code
-  nextCode <- VUM.replicate 8 (0 :: Int)
-  code <- VUM.new 1
-  VUM.write code 0 0
-
-  forM_ [1 .. 7] $ \bits -> do
-    c <- VUM.read code 0
-    prevCount <- VUM.read blCount (bits - 1)
-    let newCode = (c + prevCount) `shiftL` 1
-    VUM.write nextCode bits newCode
-    VUM.write code 0 newCode
-
-  -- Assign codes
-  result <- VUM.replicate 19 (0, 0)
-  VU.iforM_ clcLengths $ \sym len ->
-    when (len > 0) $ do
-      c <- VUM.read nextCode len
-      VUM.write nextCode len (c + 1)
-      VUM.write result sym (fromIntegral c, len)
-
-  VU.unsafeFreeze result
-
--- | Write code lengths using the CLC
-writeCodeLengthsWithCLC :: VU.Vector Int -> Int -> [(Int, Int)] -> VU.Vector (Word32, Int) -> BitWriter -> BitWriter
-writeCodeLengthsWithCLC _codeLengths _numSymbols rleSymbols clcCodes w =
-  foldl
-    ( \wa (sym, extra) ->
-        let (code, len) = clcCodes VU.! sym
-            wa' = writeBitsReversed len (fromIntegral code) wa
-         in case sym of
-              16 -> writeBits 2 (fromIntegral extra) wa' -- repeat: 2 extra bits
-              17 -> writeBits 3 (fromIntegral extra) wa' -- short zero run: 3 extra bits
-              18 -> writeBits 7 (fromIntegral extra) wa' -- long zero run: 7 extra bits
-              _ -> wa' -- literal length: no extra bits
-    )
-    w
-    rleSymbols
-
--- | Encode pixels using Huffman codes
-{-# INLINE encodePixels #-}
-encodePixels :: VS.Vector Word32 -> HuffmanCodes -> BitWriter -> BitWriter
-encodePixels pixels codes w =
-  let !greenLookup = lGreen codes
-      !redLookup = lRed codes
-      !blueLookup = lBlue codes
-      !alphaLookup = lAlpha codes
-   in VS.foldl'
-        ( \wa px ->
-            let !g = fromIntegral ((px `shiftR` 8) .&. 0xFF) :: Int
-                !r = fromIntegral ((px `shiftR` 16) .&. 0xFF) :: Int
-                !b = fromIntegral (px .&. 0xFF) :: Int
-                !a = fromIntegral ((px `shiftR` 24) .&. 0xFF) :: Int
-
-                -- Use unsafe indexing - indices are guaranteed valid (0-255 from 8-bit components)
-                !gEntry = greenLookup `VU.unsafeIndex` g
-                !rEntry = redLookup `VU.unsafeIndex` r
-                !bEntry = blueLookup `VU.unsafeIndex` b
-                !aEntry = alphaLookup `VU.unsafeIndex` a
-
-                -- Only write bits if length > 0
-                !wa1 = if snd gEntry > 0 then writeBitsReversed (snd gEntry) (fromIntegral (fst gEntry)) wa else wa
-                !wa2 = if snd rEntry > 0 then writeBitsReversed (snd rEntry) (fromIntegral (fst rEntry)) wa1 else wa1
-                !wa3 = if snd bEntry > 0 then writeBitsReversed (snd bEntry) (fromIntegral (fst bEntry)) wa2 else wa2
-                !wa4 = if snd aEntry > 0 then writeBitsReversed (snd aEntry) (fromIntegral (fst aEntry)) wa3 else wa3
-             in wa4
-        )
-        w
-        pixels
 
 -- Helper functions
 

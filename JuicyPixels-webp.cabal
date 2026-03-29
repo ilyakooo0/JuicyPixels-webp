@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.38.1.
+-- This file has been generated from package.yaml by hpack version 0.39.1.
 --
 -- see: https://github.com/sol/hpack
 
@@ -55,6 +55,7 @@ library
       Codec.Picture.WebP.Internal.VP8L.EncodeUncompressed
       Codec.Picture.WebP.Internal.VP8L.EncodeWorking
       Codec.Picture.WebP.Internal.VP8L.LZ77
+      Codec.Picture.WebP.Internal.VP8L.LZ77Encode
       Codec.Picture.WebP.Internal.VP8L.PredictorEncode
       Codec.Picture.WebP.Internal.VP8L.PrefixCode
       Codec.Picture.WebP.Internal.VP8L.SubresolutionEncode
@@ -70,6 +71,7 @@ library
     , base >=4.7 && <5
     , binary
     , bytestring
+    , containers
     , primitive
     , vector
     , vector-algorithms
@@ -118,6 +120,7 @@ test-suite JuicyPixels-webp-test
     , base >=4.7 && <5
     , binary
     , bytestring
+    , containers
     , directory
     , filepath
     , hspec
@@ -142,6 +145,7 @@ benchmark JuicyPixels-webp-bench
     , base >=4.7 && <5
     , binary
     , bytestring
+    , containers
     , criterion
     , deepseq
     , directory

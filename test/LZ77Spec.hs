@@ -3,13 +3,15 @@
 
 module LZ77Spec (spec) where
 
-import Codec.Picture.WebP.Internal.VP8L.LZ77
+import Codec.Picture.WebP.Internal.VP8L.LZ77 hiding (kDistanceMapXY)
+import Codec.Picture.WebP.Internal.VP8L.LZ77Encode
 import Data.Bits
+import qualified Data.Vector as V
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import Data.Word
 import Test.Hspec
-import Test.QuickCheck
+import Test.QuickCheck hiding ((.&.))
 
 spec :: Spec
 spec = describe "LZ77" $ do
@@ -89,18 +91,17 @@ spec = describe "LZ77" $ do
       nonZero `shouldSatisfy` (> 10)
 
   describe "Distance Map" $ do
-    it "has 121 entries (0-120)" $ do
-      VU.length kDistanceMap `shouldBe` 121
+    it "has 120 entries" $ do
+      VU.length kDistanceMapXY `shouldBe` 120
 
-    it "first entry is 0" $ do
-      kDistanceMap VU.! 0 `shouldBe` 0
+    it "first entry is (0,1) -- pixel directly above" $ do
+      kDistanceMapXY VU.! 0 `shouldBe` (0, 1)
 
-    it "entry 1 is 1" $ do
-      kDistanceMap VU.! 1 `shouldBe` 1
+    it "second entry is (1,0) -- pixel to the left" $ do
+      kDistanceMapXY VU.! 1 `shouldBe` (1, 0)
 
-    it "all entries are sequential (identity map)" $ do
-      let expected = VU.fromList [0 .. 120]
-      kDistanceMap `shouldBe` expected
+    it "last entry is (8,7)" $ do
+      kDistanceMapXY VU.! 119 `shouldBe` (8, 7)
 
   describe "Length Prefix Table" $ do
     it "has 280 entries" $ do
@@ -124,6 +125,18 @@ spec = describe "LZ77" $ do
       snd (lengthPrefixTable VU.! 259) `shouldBe` 0
       -- Later codes have more extra bits
       snd (lengthPrefixTable VU.! 260) `shouldSatisfy` (> 0)
+
+    it "code 4 (sym 260) has base 5, 1 extra bit" $
+      lengthPrefixTable VU.! 260 `shouldBe` (5, 1)
+
+    it "code 5 (sym 261) has base 7, 1 extra bit" $
+      lengthPrefixTable VU.! 261 `shouldBe` (7, 1)
+
+    it "code 6 (sym 262) has base 9, 2 extra bits" $
+      lengthPrefixTable VU.! 262 `shouldBe` (9, 2)
+
+    it "code 23 (sym 279) has base 3073, 10 extra bits" $
+      lengthPrefixTable VU.! 279 `shouldBe` (3073, 10)
 
   describe "Distance Prefix Table" $ do
     it "has 40 entries" $ do
@@ -195,6 +208,64 @@ spec = describe "LZ77" $ do
           cache = foldr insertColor (createColorCache 11) colors
       -- Verify cache has been modified
       VS.any (/= 0) (ccColors cache) `shouldBe` True
+
+  describe "LZ77 Encoder" $ do
+    describe "valueToPrefixCode" $ do
+      it "value 1 -> code 0, 0 extra" $
+        valueToPrefixCode 1 `shouldBe` (0, 0, 0)
+
+      it "value 2 -> code 1, 0 extra" $
+        valueToPrefixCode 2 `shouldBe` (1, 0, 0)
+
+      it "value 4 -> code 3, 0 extra" $
+        valueToPrefixCode 4 `shouldBe` (3, 0, 0)
+
+      it "value 5 -> code 4, 1 extra bit, extra=0" $
+        valueToPrefixCode 5 `shouldBe` (4, 1, 0)
+
+      it "value 6 -> code 4, 1 extra bit, extra=1" $
+        valueToPrefixCode 6 `shouldBe` (4, 1, 1)
+
+      it "value 7 -> code 5, 1 extra bit, extra=0" $
+        valueToPrefixCode 7 `shouldBe` (5, 1, 0)
+
+      it "value 9 -> code 6, 2 extra bits, extra=0" $
+        valueToPrefixCode 9 `shouldBe` (6, 2, 0)
+
+      it "roundtrips with spec formula" $
+        property $ \(Positive n) ->
+          let val = (n `mod` 4096) + 1
+              (pc, eb, ev) = valueToPrefixCode val
+              reconstructed =
+                if pc < 4
+                  then pc + 1
+                  else
+                    let off = (2 + (pc .&. 1)) `shiftL` eb
+                     in off + ev + 1
+           in reconstructed == val
+
+    describe "lz77Compress" $ do
+      it "all-same pixels produce backrefs" $ do
+        let px = 0xFF808080
+            pixels = VS.replicate 100 px
+            tokens = lz77Compress 10 10 pixels
+        -- Should be fewer tokens than pixels (backrefs compress runs)
+        V.length tokens `shouldSatisfy` (< 100)
+
+      it "all-unique pixels produce only literals" $ do
+        let pixels = VS.generate 16 (\i -> fromIntegral i * 0x01010101)
+            tokens = lz77Compress 4 4 pixels
+        V.length tokens `shouldBe` 16
+
+      it "token pixel count matches input" $ do
+        let pixels = VS.replicate 50 0xFF000000 VS.++ VS.generate 50 fromIntegral
+            tokens = lz77Compress 10 10 pixels
+            tokenPixels = V.sum $ V.map (\t -> case t of TLiteral _ -> 1; TBackRef l _ -> l) tokens
+        tokenPixels `shouldBe` 100
+
+    describe "kDistanceMapXY" $ do
+      it "has 120 entries (same in both modules)" $
+        VU.length kDistanceMapXY `shouldBe` 120
 
 -- Helper function matching the internal implementation
 packARGB :: Word8 -> Word8 -> Word8 -> Word8 -> Word32
