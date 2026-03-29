@@ -46,6 +46,7 @@ library
       Codec.Picture.WebP.Internal.VP8.ModeSelection
       Codec.Picture.WebP.Internal.VP8.Predict
       Codec.Picture.WebP.Internal.VP8.Quantize
+      Codec.Picture.WebP.Internal.VP8.RateCost
       Codec.Picture.WebP.Internal.VP8.Tables
       Codec.Picture.WebP.Internal.VP8L
       Codec.Picture.WebP.Internal.VP8L.ColorIndexingEncode

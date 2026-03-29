@@ -302,37 +302,34 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
   let mbXpix = mbX * 16
       mbYpix = mbY * 16
 
+  -- Read above B-modes early (needed for B_PRED RDO and encoding)
+  aBM0 <- VSM.read aboveBModes (mbX * 4)
+  aBM1 <- VSM.read aboveBModes (mbX * 4 + 1)
+  aBM2 <- VSM.read aboveBModes (mbX * 4 + 2)
+  aBM3 <- VSM.read aboveBModes (mbX * 4 + 3)
+
   -- Step 1: Select best i16 Y mode using RDO
-  (i16Mode, i16Cost) <- selectIntra16x16ModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda
+  (i16Mode, i16Cost) <- selectIntra16x16ModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda coeffProbs
 
   -- Step 2: Select best B_PRED modes using RDO (modifies yRecon's MB area)
-  (bpredModes, bpredCost) <- selectBPredModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda
+  (bpredModes, bpredCost) <- selectBPredModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda coeffProbs (fromIntegral aBM0) (fromIntegral aBM1) (fromIntegral aBM2) (fromIntegral aBM3) leftBM0 leftBM1 leftBM2 leftBM3
   -- yRecon now has B_PRED reconstruction; if i16 wins, encodeYBlocks will overwrite it
 
-  -- B_PRED uses ~46 more bits for mode encoding (16 sub-block modes vs 1 Y mode).
-  -- Each sub-block also has its own DC (vs shared Y2 for i16).
-  -- Penalize to avoid choosing B_PRED when it barely wins on SSE.
-  let !modeCostPenalty = lambda * 32
-      useBPred = bpredCost + modeCostPenalty < i16Cost
+  -- True RDO: mode encoding costs already included in i16Cost and bpredCost
+  let useBPred = bpredCost < i16Cost
 
   -- Step 3: Select best UV mode using RDO (both U and V)
   let chromaX = mbX * 8
       chromaY = mbY * 8
-  (uvPredMode, _) <- selectChromaModeRDO uOrig uRecon vOrig vRecon (paddedW `div` 2) chromaX chromaY dequantFactors lambda
+  (uvPredMode, _) <- selectChromaModeRDO uOrig uRecon vOrig vRecon (paddedW `div` 2) chromaX chromaY dequantFactors lambda coeffProbs
 
   if useBPred
     then do
       -- === B_PRED path ===
       -- Write B_PRED Y mode to partition 0
       let mEnc1 = encodeYModeBPred mEnc
-
-      -- Write 16 sub-block modes to partition 0 with above/left context
-      aBM0 <- VSM.read aboveBModes (mbX * 4)
-      aBM1 <- VSM.read aboveBModes (mbX * 4 + 1)
-      aBM2 <- VSM.read aboveBModes (mbX * 4 + 2)
-      aBM3 <- VSM.read aboveBModes (mbX * 4 + 3)
-
-      let mEnc2 = encodeBPredModesToStream bpredModes aBM0 aBM1 aBM2 aBM3 leftBM0 leftBM1 leftBM2 leftBM3 mEnc1
+          -- aBM0..3 already read above for RDO
+          mEnc2 = encodeBPredModesToStream bpredModes aBM0 aBM1 aBM2 aBM3 leftBM0 leftBM1 leftBM2 leftBM3 mEnc1
           mEnc3 = encodeUVMode uvPredMode mEnc2
 
       -- Encode Y blocks (B_PRED: blockType=3, no Y2)

@@ -12,6 +12,7 @@ module Codec.Picture.WebP.Internal.VP8.CoeffStats
   )
 where
 
+import Codec.Picture.WebP.Internal.VP8.RateCost (branchCost)
 import Codec.Picture.WebP.Internal.VP8.Tables (coeffUpdateProbs, defaultCoeffProbs)
 import Control.Monad.ST
 import qualified Data.Vector.Storable.Mutable as VSM
@@ -91,20 +92,3 @@ decideUpdates stats optimalProbs = do
               then (newProb, True)
               else (oldProb, False)
 
--- | Cost of coding a bit with a given probability, in 256ths of a bit.
--- VP8 probability p means P(bit=False) = p/256.
-{-# INLINE branchCost #-}
-branchCost :: Word8 -> Bool -> Int
-branchCost !prob !bit =
-  let !p = if bit then 256 - fromIntegral prob else fromIntegral prob :: Int
-      !idx = max 0 (min 255 p)
-   in branchCostTab VU.! idx
-
--- | Precomputed branch cost lookup table.
--- branchCostTab[p] = round(256 * -log2(p/256)) for p in 0..255.
-branchCostTab :: VU.Vector Int
-branchCostTab =
-  VU.generate 256 $ \p ->
-    if p <= 0
-      then 2048
-      else min 2048 $ round (256.0 * negate (logBase 2.0 (fromIntegral p / 256.0 :: Double)) :: Double)

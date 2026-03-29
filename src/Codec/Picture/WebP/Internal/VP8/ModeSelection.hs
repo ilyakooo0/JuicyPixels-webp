@@ -16,11 +16,19 @@ import Codec.Picture.WebP.Internal.VP8.Dequant (DequantFactors, dequantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.IDCT (idct4x4, iwht4x4)
 import Codec.Picture.WebP.Internal.VP8.Predict
 import Codec.Picture.WebP.Internal.VP8.Quantize (quantizeBlock)
+import Codec.Picture.WebP.Internal.VP8.RateCost
+  ( bPredYModeCost,
+    bSubModeCost,
+    coeffBlockCost,
+    i16ModeCost,
+    uvModeCost,
+  )
 import Control.Monad.ST
 import Data.Bits (shiftR, (.&.))
 import Data.Int (Int16)
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
+import qualified Data.Vector.Unboxed as VU
 import Data.Word
 
 -- Prediction modes (from Tables.hs and Predict.hs)
@@ -307,8 +315,9 @@ computeSAD4x4Fast orig pred_ stride x y = do
 -- ---------------------------------------------------------------------------
 
 -- | Select best 16x16 mode using Rate-Distortion Optimization.
--- For each candidate mode: predict → DCT → quant → dequant → IDCT → SSE.
--- Score = SSE + lambda * nonZeroCount.
+-- For each candidate mode: predict → DCT → quant → estimate bits → dequant → IDCT → SSE.
+-- Score = SSE + (lambda * totalBitCost) / 256, where totalBitCost includes
+-- coefficient encoding cost (from coeffBlockCost) and mode signaling cost.
 {-# INLINE selectIntra16x16ModeRDO #-}
 selectIntra16x16ModeRDO ::
   VSM.MVector s Word8 -> -- Y plane original buffer
@@ -318,8 +327,9 @@ selectIntra16x16ModeRDO ::
   Int -> -- Macroblock Y position (pixels)
   DequantFactors -> -- Quantization parameters
   Int -> -- Lambda (rate-distortion tradeoff)
+  VU.Vector Word8 -> -- Coefficient probabilities (1056 flat entries)
   ST s (Int, Int) -- (mode, rdCost)
-selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda = do
+selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs = do
   predBuf <- VSM.clone yRecon
   y2DCs <- VSM.new 16
   residuals <- VSM.new 16
@@ -361,17 +371,18 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda = do
                       storeCoeffs 0
             collectDC 0
 
-            -- Y2: WHT → quantize → count NZ → dequant → inverse WHT
+            -- Y2: WHT → quantize → estimate bit cost → dequant → inverse WHT
             fwht4x4 y2DCs
             quantizeBlock dqFactors 1 y2DCs
-            !nnzY2 <- countNonZeroM y2DCs 0 16
+            !y2BitCost <- coeffBlockCost y2DCs coeffProbs 1 0 0
             dequantizeBlock dqFactors 1 y2DCs
             reconDCsV <- iwht4x4 y2DCs
 
-            -- Second pass: quantize AC, reconstruct, compute SSE
-            let processBlock !bi !sse !nnz
+            -- Second pass: quantize AC, estimate bits, reconstruct, compute SSE
+            let processBlock !bi !sse !rateCost
                   | bi >= 16 = do
-                      let !rdCost = sse + lambda * nnz
+                      let !modeBitCost = i16ModeCost mode
+                          !rdCost = sse + (lambda * (rateCost + modeBitCost)) `div` 256
                       if rdCost < bestCost
                         then tryMode (mode + 1) mode rdCost
                         else tryMode (mode + 1) bestMode bestCost
@@ -387,22 +398,22 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda = do
                       loadCoeffs 0
                       VSM.unsafeWrite residuals 0 0
                       quantizeBlock dqFactors 0 residuals
-                      !blockNnz <- countNonZeroM residuals 1 16
+                      !blockBitCost <- coeffBlockCost residuals coeffProbs 0 0 1
                       dequantizeBlock dqFactors 0 residuals
                       VSM.unsafeWrite residuals 0 (reconDCsV VS.! bi)
                       idct4x4 residuals
                       !blockSSE <- computeBlockSSEM yOrig predBuf residuals stride (mbX + subX) (mbY + subY)
-                      processBlock (bi + 1) (sse + blockSSE) (nnz + blockNnz)
+                      processBlock (bi + 1) (sse + blockSSE) (rateCost + blockBitCost)
 
-            processBlock 0 0 nnzY2
+            processBlock 0 0 y2BitCost
 
   tryMode 0 0 maxBound
 
 -- | Select best 4x4 modes for all 16 sub-blocks of a B_PRED macroblock.
--- For each sub-block (in raster order): tries all 10 modes with RDO,
--- picks the best, then reconstructs into yRecon so subsequent blocks
--- can predict from it.
--- Returns (16 modes as Word8, total RD cost).
+-- For each sub-block (in raster order): tries all 10 modes with true RDO
+-- (coefficient bit cost + mode signaling cost), picks the best, then
+-- reconstructs into yRecon so subsequent blocks can predict from it.
+-- Returns (16 modes as Word8, total RD cost including B_PRED Y mode signal).
 -- WARNING: Modifies yRecon in place!
 selectBPredModeRDO ::
   VSM.MVector s Word8 -> -- Y plane original
@@ -412,10 +423,22 @@ selectBPredModeRDO ::
   Int -> -- MB Y position (pixels)
   DequantFactors ->
   Int -> -- Lambda
+  VU.Vector Word8 -> -- Coefficient probabilities (1056 flat entries)
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- Above B-modes from MB above (cols 0-3)
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- Left B-modes from MB to the left (rows 0-3)
   ST s (VS.Vector Word8, Int) -- (16 modes, total RD cost)
-selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda = do
+selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAbove0 extAbove1 extAbove2 extAbove3 extLeft0 extLeft1 extLeft2 extLeft3 = do
   modesMut <- VSM.new 16 :: ST s (VSM.MVector s Word8)
   residuals <- VSM.new 16 :: ST s (VSM.MVector s Int16)
+
+  -- Start with the cost of signaling B_PRED in the Y mode tree
+  let !bpredSignalCost = (lambda * bPredYModeCost) `div` 256
 
   let processSB !bi !totalCost
         | bi >= 16 = do
@@ -424,6 +447,22 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda = do
         | otherwise = do
             let !subX = mbX + (bi .&. 3) * 4
                 !subY = mbY + (bi `shiftR` 2) * 4
+                !row = bi `shiftR` 2
+                !col = bi .&. 3
+
+            -- Determine above/left mode context for this sub-block
+            !aboveMode <-
+              if row == 0
+                then return $ case col of 0 -> extAbove0; 1 -> extAbove1; 2 -> extAbove2; _ -> extAbove3
+                else do
+                  !m <- VSM.unsafeRead modesMut ((row - 1) * 4 + col)
+                  return (fromIntegral m)
+            !leftMode <-
+              if col == 0
+                then return $ case row of 0 -> extLeft0; 1 -> extLeft1; 2 -> extLeft2; _ -> extLeft3
+                else do
+                  !m <- VSM.unsafeRead modesMut (row * 4 + col - 1)
+                  return (fromIntegral m)
 
             -- Try all 10 modes, pick best by RD cost
             let tryMode !m !bestMode !bestCost
@@ -449,17 +488,15 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda = do
 
                       fdct4x4 residuals
                       quantizeBlock dqFactors 3 residuals -- type 3 = Y full (with DC)
-                      !nz <- countNonZeroM residuals 0 16
+                      !blockBitCost <- coeffBlockCost residuals coeffProbs 3 0 0
                       dequantizeBlock dqFactors 3 residuals
                       idct4x4 residuals
                       !sse <- computeBlockSSEM yOrig yRecon residuals stride subX subY
 
-                      let !cost = sse + lambda * nz
+                      let !modeBitCost = bSubModeCost aboveMode leftMode m
+                          !cost = sse + (lambda * (blockBitCost + modeBitCost)) `div` 256
                       if cost < bestCost
-                        then
-                          if cost < earlyExitThreshold4x4
-                            then return (m, cost) -- Early exit
-                            else tryMode (m + 1) m cost
+                        then tryMode (m + 1) m cost
                         else tryMode (m + 1) bestMode bestCost
 
             (!bestMode, !bestCost) <- tryMode 0 0 maxBound
@@ -502,10 +539,10 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda = do
             VSM.unsafeWrite modesMut bi (fromIntegral bestMode)
             processSB (bi + 1) (totalCost + bestCost)
 
-  processSB 0 0
+  processSB 0 bpredSignalCost
 
--- | Select best chroma mode using RDO over both U and V planes.
--- Score = (SSE_U + SSE_V) + lambda * (NNZ_U + NNZ_V).
+-- | Select best chroma mode using true RDO over both U and V planes.
+-- Score = (SSE_U + SSE_V) + (lambda * (bitCost_U + bitCost_V + modeCost)) / 256.
 {-# INLINE selectChromaModeRDO #-}
 selectChromaModeRDO ::
   VSM.MVector s Word8 -> -- U original
@@ -517,8 +554,9 @@ selectChromaModeRDO ::
   Int -> -- Y position (chroma coords)
   DequantFactors ->
   Int -> -- Lambda
+  VU.Vector Word8 -> -- Coefficient probabilities (1056 flat entries)
   ST s (Int, Int) -- (mode, rdCost)
-selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda = do
+selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda coeffProbs = do
   uPredBuf <- VSM.clone uRecon
   vPredBuf <- VSM.clone vRecon
   residuals <- VSM.new 16
@@ -528,9 +566,10 @@ selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda = do
         | otherwise = do
             predict8x8 mode uPredBuf stride x y
             predict8x8 mode vPredBuf stride x y
-            (!sseU, !nnzU) <- trialEncodeChroma8x8 uOrig uPredBuf residuals stride x y dqFactors
-            (!sseV, !nnzV) <- trialEncodeChroma8x8 vOrig vPredBuf residuals stride x y dqFactors
-            let !rdCost = (sseU + sseV) + lambda * (nnzU + nnzV)
+            (!sseU, !bitCostU) <- trialEncodeChroma8x8 uOrig uPredBuf residuals stride x y dqFactors coeffProbs
+            (!sseV, !bitCostV) <- trialEncodeChroma8x8 vOrig vPredBuf residuals stride x y dqFactors coeffProbs
+            let !modeBitCost = uvModeCost mode
+                !rdCost = (sseU + sseV) + (lambda * (bitCostU + bitCostV + modeBitCost)) `div` 256
             if rdCost < bestCost
               then tryMode (mode + 1) mode rdCost
               else tryMode (mode + 1) bestMode bestCost
@@ -538,7 +577,7 @@ selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda = do
   tryMode 0 0 maxBound
 
 -- | Trial-encode a single 8x8 chroma plane (4 blocks of 4x4).
--- Returns (SSE, nonZeroCount) without writing to any bool encoder.
+-- Returns (SSE, bitCost) where bitCost is in 256ths of a bit.
 {-# INLINE trialEncodeChroma8x8 #-}
 trialEncodeChroma8x8 ::
   VSM.MVector s Word8 -> -- Chroma original
@@ -548,10 +587,11 @@ trialEncodeChroma8x8 ::
   Int -> -- X position
   Int -> -- Y position
   DequantFactors ->
-  ST s (Int, Int) -- (SSE, nonZeroCount)
-trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors = do
-  let processBlock !bi !sse !nnz
-        | bi >= 4 = return (sse, nnz)
+  VU.Vector Word8 -> -- Coefficient probabilities
+  ST s (Int, Int) -- (SSE, bitCost in 256ths)
+trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors coeffProbs = do
+  let processBlock !bi !sse !rate
+        | bi >= 4 = return (sse, rate)
         | otherwise = do
             let !row = bi `shiftR` 1
                 !col = bi .&. 1
@@ -572,27 +612,16 @@ trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors = do
             fillRes 0
             fdct4x4 residuals
             quantizeBlock dqFactors 2 residuals
-            !blockNnz <- countNonZeroM residuals 0 16
+            !blockBitCost <- coeffBlockCost residuals coeffProbs 2 0 0
             dequantizeBlock dqFactors 2 residuals
             idct4x4 residuals
             !blockSSE <- computeBlockSSEM chromaOrig predBuf residuals stride (x + subX) (y + subY)
-            processBlock (bi + 1) (sse + blockSSE) (nnz + blockNnz)
+            processBlock (bi + 1) (sse + blockSSE) (rate + blockBitCost)
   processBlock 0 0 0
 
 -- ---------------------------------------------------------------------------
 -- RDO helpers
 -- ---------------------------------------------------------------------------
-
--- | Count non-zero coefficients in range [start, end)
-{-# INLINE countNonZeroM #-}
-countNonZeroM :: VSM.MVector s Int16 -> Int -> Int -> ST s Int
-countNonZeroM coeffs start end = go start 0
-  where
-    go !i !count
-      | i >= end = return count
-      | otherwise = do
-          !c <- VSM.unsafeRead coeffs i
-          go (i + 1) (if c /= 0 then count + 1 else count)
 
 -- | Compute SSE for one 4x4 block: original vs (prediction + IDCT residuals)
 {-# INLINE computeBlockSSEM #-}
