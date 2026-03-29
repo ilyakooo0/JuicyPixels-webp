@@ -72,8 +72,10 @@ generateCompressedHeader ::
   QuantIndices -> -- Quantization indices
   Int -> -- Filter level (0-63)
   Int -> -- Filter type (0=normal, 1=simple)
+  VU.Vector Word8 -> -- Coefficient probabilities (1056 entries, possibly updated)
+  VU.Vector Bool -> -- Which positions to update (1056 flags)
   BoolEncoder
-generateCompressedHeader quantIndices filterLevel filterType =
+generateCompressedHeader quantIndices filterLevel filterType updatedProbs updateFlags =
   let enc0 = initBoolEncoder
 
       -- Color space and clamping (key frame only)
@@ -108,10 +110,8 @@ generateCompressedHeader quantIndices filterLevel filterType =
       enc15 = boolWriteLiteral 1 1 enc14 -- refresh_entropy_probs = 1 (use defaults)
 
       -- Coefficient probability updates
-      -- For simple encoder, don't update probabilities (write 0 for all update flags)
-      -- There are 4 block types × 8 bands × 3 contexts × 11 tokens = 1056 probabilities
-      -- Each has an update flag, so we need to write 1056 bits of 0
-      enc16 = writeCoeffProbUpdates enc15
+      -- 4 block types × 8 bands × 3 contexts × 11 tokens = 1056 probabilities
+      enc16 = writeCoeffProbUpdates updatedProbs updateFlags enc15
 
       -- Macroblock skip mode
       -- mb_no_skip_coeff: 0 = skip mode disabled (all MBs have coefficients)
@@ -120,13 +120,12 @@ generateCompressedHeader quantIndices filterLevel filterType =
       enc17 = boolWriteLiteral 1 0 enc16 -- mb_no_skip_coeff = 0 (skip mode disabled)
    in enc17
 
--- | Write coefficient probability updates (all zeros for simple encoder)
--- IMPORTANT: Must use the same probabilities as the decoder (coeffUpdateProbs)
-writeCoeffProbUpdates :: BoolEncoder -> BoolEncoder
-writeCoeffProbUpdates enc =
-  -- 4 block types × 8 bands × 3 contexts × 11 tokens = 1056 update flags
-  -- For simple encoder, write False (0) for all (don't update, use defaults)
-  -- The decoder reads each flag using coeffUpdateProbs[idx], so we must write with the same probabilities
+-- | Write coefficient probability updates to the compressed header.
+-- For each of the 1056 positions, writes a flag (using coeffUpdateProbs)
+-- indicating whether the probability is updated. If updated, writes the
+-- new 8-bit probability value as a literal.
+writeCoeffProbUpdates :: VU.Vector Word8 -> VU.Vector Bool -> BoolEncoder -> BoolEncoder
+writeCoeffProbUpdates updatedProbs updateFlags enc =
   let loop !i !j !k !l !e
         | i >= 4 = e
         | j >= 8 = loop (i + 1) 0 k l e
@@ -135,6 +134,14 @@ writeCoeffProbUpdates enc =
         | otherwise =
             let idx = i * 264 + j * 33 + k * 11 + l
                 updateProb = coeffUpdateProbs VU.! idx
-                e' = boolWrite updateProb False e -- write False (no update)
-             in loop i j k (l + 1) e'
+             in if updateFlags VU.! idx
+                  then
+                    -- Signal update: True flag + 8-bit probability value
+                    let e1 = boolWrite updateProb True e
+                        e2 = boolWriteLiteral 8 (fromIntegral $ updatedProbs VU.! idx) e1
+                     in loop i j k (l + 1) e2
+                  else
+                    -- No update: False flag
+                    let e1 = boolWrite updateProb False e
+                     in loop i j k (l + 1) e1
    in loop 0 0 0 0 enc

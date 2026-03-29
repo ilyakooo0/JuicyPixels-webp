@@ -2,10 +2,12 @@
 
 module Codec.Picture.WebP.Internal.VP8.EncodeCoefficients
   ( encodeCoefficients,
+    countCoefficients,
   )
 where
 
 import Codec.Picture.WebP.Internal.VP8.BoolEncoder
+import Codec.Picture.WebP.Internal.VP8.CoeffStats (CoeffStats, recordBranch)
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad.ST
 import Data.Bits
@@ -285,3 +287,124 @@ encodeValue !p2 !p3 !p4 !p5 !p6 !p7 !p8 !p9 !p10 !absVal !coeff !enc
           e15 = boolWrite (probs VU.! 9) (testBit extra 1) e14
           e16 = boolWrite (probs VU.! 10) (testBit extra 0) e15
        in boolWrite 128 (coeff < 0) e16
+
+-- | Count coefficient branch statistics for probability optimization.
+-- Mirrors encodeCoefficients exactly but records branch decisions
+-- to a statistics accumulator instead of writing to a BoolEncoder.
+countCoefficients ::
+  VSM.MVector s Int16 -> -- Quantized coefficients (in raster scan order from FDCT)
+  Int -> -- Block type (libwebp: 0=i16-AC/Y-AC, 1=i16-DC/Y2, 2=chroma, 3=i4-AC)
+  Int -> -- Initial context (0, 1, or 2)
+  Int -> -- Start position (0 or 1)
+  CoeffStats s -> -- Statistics accumulator
+  ST s ()
+countCoefficients coeffs blockType initialCtx startPos stats = do
+  lastNzPos <- findLastNonzero coeffs startPos
+  case lastNzPos of
+    Nothing -> do
+      let !band = coeffBands VU.! startPos
+          !probIdx = blockType * 264 + band * 33 + initialCtx * 11
+      recordBranch stats probIdx False -- EOB
+    Just lastNz -> do
+      let loop !pos !ctx !skipEOB
+            | pos > lastNz =
+                if pos < 16 && not skipEOB
+                  then do
+                    let !band = coeffBands VU.! pos
+                        !probIdx = blockType * 264 + band * 33 + ctx * 11
+                    recordBranch stats probIdx False -- EOB
+                  else return ()
+            | otherwise = do
+                let !zigzagIdx = zigzag VU.! pos
+                coeff <- VSM.read coeffs zigzagIdx
+                let !band = coeffBands VU.! pos
+                    !probIdx = blockType * 264 + band * 33 + ctx * 11
+                if coeff == 0
+                  then do
+                    if skipEOB
+                      then recordBranch stats (probIdx + 1) False -- p[1]=False
+                      else do
+                        recordBranch stats probIdx True -- p[0]=True (not EOB)
+                        recordBranch stats (probIdx + 1) False -- p[1]=False (zero)
+                    loop (pos + 1) 0 True
+                  else do
+                    let !absCoeff = abs (fromIntegral coeff :: Int)
+                    if skipEOB
+                      then return ()
+                      else recordBranch stats probIdx True -- p[0]=True (not EOB)
+                    recordBranch stats (probIdx + 1) True -- p[1]=True (nonzero)
+                    countValue stats probIdx absCoeff
+                    let !newCtx = if absCoeff == 1 then 1 else 2
+                    loop (pos + 1) newCtx False
+      loop startPos initialCtx False
+  where
+    findLastNonzero cs start = go Nothing start
+      where
+        go lastFound pos
+          | pos >= 16 = return lastFound
+          | otherwise = do
+              let !zigzagIdx = zigzag VU.! pos
+              coeff <- VSM.read cs zigzagIdx
+              let !newLast = if coeff /= 0 then Just pos else lastFound
+              go newLast (pos + 1)
+
+-- | Count value-encoding branches, mirroring encodeValue exactly.
+{-# INLINE countValue #-}
+countValue :: CoeffStats s -> Int -> Int -> ST s ()
+countValue !stats !probIdx !absVal
+  | absVal == 1 =
+      recordBranch stats (probIdx + 2) False -- p[2]=False (value is 1)
+  | absVal == 2 = do
+      recordBranch stats (probIdx + 2) True
+      recordBranch stats (probIdx + 3) False
+      recordBranch stats (probIdx + 4) False
+  | absVal == 3 = do
+      recordBranch stats (probIdx + 2) True
+      recordBranch stats (probIdx + 3) False
+      recordBranch stats (probIdx + 4) True
+      recordBranch stats (probIdx + 5) False
+  | absVal == 4 = do
+      recordBranch stats (probIdx + 2) True
+      recordBranch stats (probIdx + 3) False
+      recordBranch stats (probIdx + 4) True
+      recordBranch stats (probIdx + 5) True
+  | absVal <= 6 = do
+      -- CAT1 (5-6)
+      recordBranch stats (probIdx + 2) True
+      recordBranch stats (probIdx + 3) True
+      recordBranch stats (probIdx + 6) False
+      recordBranch stats (probIdx + 7) False
+  | absVal <= 10 = do
+      -- CAT2 (7-10)
+      recordBranch stats (probIdx + 2) True
+      recordBranch stats (probIdx + 3) True
+      recordBranch stats (probIdx + 6) False
+      recordBranch stats (probIdx + 7) True
+  | absVal <= 18 = do
+      -- CAT3 (11-18)
+      recordBranch stats (probIdx + 2) True
+      recordBranch stats (probIdx + 3) True
+      recordBranch stats (probIdx + 6) True
+      recordBranch stats (probIdx + 8) False
+      recordBranch stats (probIdx + 9) False
+  | absVal <= 34 = do
+      -- CAT4 (19-34)
+      recordBranch stats (probIdx + 2) True
+      recordBranch stats (probIdx + 3) True
+      recordBranch stats (probIdx + 6) True
+      recordBranch stats (probIdx + 8) False
+      recordBranch stats (probIdx + 9) True
+  | absVal <= 66 = do
+      -- CAT5 (35-66)
+      recordBranch stats (probIdx + 2) True
+      recordBranch stats (probIdx + 3) True
+      recordBranch stats (probIdx + 6) True
+      recordBranch stats (probIdx + 8) True
+      recordBranch stats (probIdx + 10) False
+  | otherwise = do
+      -- CAT6 (67-2048)
+      recordBranch stats (probIdx + 2) True
+      recordBranch stats (probIdx + 3) True
+      recordBranch stats (probIdx + 6) True
+      recordBranch stats (probIdx + 8) True
+      recordBranch stats (probIdx + 10) True

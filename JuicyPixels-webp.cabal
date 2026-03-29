@@ -32,6 +32,7 @@ library
       Codec.Picture.WebP.Internal.VP8.BoolDecoder
       Codec.Picture.WebP.Internal.VP8.BoolEncoder
       Codec.Picture.WebP.Internal.VP8.Coefficients
+      Codec.Picture.WebP.Internal.VP8.CoeffStats
       Codec.Picture.WebP.Internal.VP8.ColorConvert
       Codec.Picture.WebP.Internal.VP8.DCT
       Codec.Picture.WebP.Internal.VP8.Dequant

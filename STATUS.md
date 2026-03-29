@@ -2,7 +2,7 @@
 
 Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 
-**Total Implementation:** ~11,273 lines of Haskell code across 40 modules
+**Total Implementation:** ~11,450 lines of Haskell code across 41 modules
 **Test Status:** 421 tests - all passing
 
 ---
@@ -83,6 +83,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - Boolean arithmetic encoding
 - Frame header generation
 - Quality parameter (0-100) mapping to quantizer values
+- Coefficient probability updates (two-pass: gather statistics, cost-benefit analysis, re-encode)
 - Padding to macroblock boundaries
 
 #### Alpha Encoding
@@ -116,7 +117,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - **Meta prefix codes** - entropy image support for better Huffman efficiency
 
 ### VP8 Encoding Optimizations
-- **Coefficient probability updates** - currently uses fixed defaults
+- ~~**Coefficient probability updates**~~ - ✅ implemented (two-pass with cost-benefit analysis)
 - **Segmentation** - decoder supports it, encoder doesn't use it
 - **Advanced mode selection** - currently uses simple heuristics
 
@@ -130,7 +131,6 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 
 ### Current Limitations (by design)
 - VP8L encoder uses predictor transform + LZ77 but not color transform, color-indexing, or color cache
-- Fixed coefficient probabilities in VP8 encoder
 - Simple linear quality→qi mapping
 
 ### Error Handling
@@ -223,7 +223,8 @@ Internal/
 │   ├── EncodeCoefficients.hs                 -- Coefficient encoding
 │   ├── EncodeHeader.hs                       -- Frame header encoding
 │   ├── EncodeMode.hs                         -- Mode encoding
-│   └── ModeSelection.hs                      -- Mode selection heuristics
+│   ├── ModeSelection.hs                      -- Mode selection heuristics
+│   └── CoeffStats.hs                         -- Coefficient probability optimization
 │
 ├── Alpha.hs                                  -- ALPH chunk decoder
 ├── AlphaEncode.hs                            -- ALPH chunk encoder

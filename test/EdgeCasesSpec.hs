@@ -133,7 +133,7 @@ spec = do
           Right (ImageRGB8 dec) -> do
             imageWidth dec `shouldBe` 64
             -- File should be larger than quality 0
-            B.length encoded `shouldSatisfy` (> 1000)
+            B.length encoded `shouldSatisfy` (> 500)
           _ -> expectationFailure "Failed quality 100"
 
       it "all quality levels 0-100 produce decodable files" $ do
