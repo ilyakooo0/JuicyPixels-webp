@@ -9,6 +9,7 @@ where
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.BitWriter
 import Codec.Picture.WebP.Internal.VP8L.ColorIndexingEncode
+import Codec.Picture.WebP.Internal.VP8L.ColorTransformEncode
 import Codec.Picture.WebP.Internal.VP8L.LZ77Encode
 import Codec.Picture.WebP.Internal.VP8L.PredictorEncode
 import Codec.Picture.WebP.Internal.VP8L.SubresolutionEncode
@@ -65,16 +66,29 @@ encodeVP8LComplete img =
              in (prResiduals pr, Just pr)
           else (effectivePixels, Nothing)
 
-      -- Apply forward subtract-green to residuals (only when not using color indexing)
-      -- This subtracts the green channel from red and blue, decorrelating them.
-      -- Applied after predictor (same as libwebp): residuals benefit from channel decorrelation.
-      useSubtractGreen = case maybeColorIndex of
-        Nothing -> True
+      -- Channel decorrelation: use color transform (preferred) or subtract-green (fallback).
+      -- Color transform is a strict generalization of subtract-green with per-block
+      -- coefficients via least-squares regression. Use it when not using color indexing
+      -- and image is large enough to justify the subresolution image overhead.
+      useColorTransform = case maybeColorIndex of
+        Nothing -> usePredictorTransform
         Just _ -> False
-      pixelsForLZ77 =
-        if useSubtractGreen
-          then applyForwardSubtractGreen pixelsToEncode
-          else pixelsToEncode
+
+      useSubtractGreen = case maybeColorIndex of
+        Nothing -> not useColorTransform
+        Just _ -> False
+
+      (pixelsForLZ77, maybeColorResult) =
+        if useColorTransform
+          then
+            let cr = computeColorTransform sizeBits effectiveWidth height pixelsToEncode
+             in (ctTransformedPixels cr, Just cr)
+          else
+            ( if useSubtractGreen
+                then applyForwardSubtractGreen pixelsToEncode
+                else pixelsToEncode,
+              Nothing
+            )
 
       -- LZ77 compress the pixel data (at effective width)
       tokens = lz77Compress effectiveWidth height pixelsForLZ77
@@ -94,7 +108,7 @@ encodeVP8LComplete img =
           |> writeBits 14 (fromIntegral $ height - 1)
           |> writeBit True -- alpha_is_used
           |> writeBits 3 0 -- version (must be 0)
-          |> writeAllTransforms maybeColorIndex maybePredResult useSubtractGreen sizeBits
+          |> writeAllTransforms maybeColorIndex maybePredResult maybeColorResult useSubtractGreen sizeBits
           |> writeBit False -- no color cache
           |> writeBit False -- single prefix code group (no meta prefix)
           |> writeHuffmanCode (cGreen codes) 280 -- Green alphabet: 256 + 24 LZ77 length codes (no cache)
@@ -108,19 +122,21 @@ encodeVP8LComplete img =
   where
     (|>) = flip ($)
 
--- | Write all transform headers (color-indexing, predictor, subtract-green, then no-more-transforms marker)
-writeAllTransforms :: Maybe ColorIndexResult -> Maybe PredictorResult -> Bool -> Int -> BitWriter -> BitWriter
-writeAllTransforms maybeCI maybePred subGreen sizeBits w0 =
+-- | Write all transform headers (color-indexing, predictor, color/subtract-green, then no-more-transforms marker)
+writeAllTransforms :: Maybe ColorIndexResult -> Maybe PredictorResult -> Maybe ColorTransformResult -> Bool -> Int -> BitWriter -> BitWriter
+writeAllTransforms maybeCI maybePred maybeColor subGreen sizeBits w0 =
   let w1 = case maybeCI of
         Just ci -> writeColorIndexTransform ci w0
         Nothing -> w0
       w2 = case maybePred of
         Just pr -> writePredictorTransform pr sizeBits w1
         Nothing -> w1
-      w3 =
-        if subGreen
-          then writeSubtractGreenTransform w2
-          else w2
+      w3 = case maybeColor of
+        Just cr -> writeColorTransform cr sizeBits w2
+        Nothing ->
+          if subGreen
+            then writeSubtractGreenTransform w2
+            else w2
    in writeBit False w3 -- no more transforms
 
 -- | Write subtract-green transform header (type 2, no additional data)
@@ -129,6 +145,20 @@ writeSubtractGreenTransform w =
   let w1 = writeBit True w -- transform_present = 1
       w2 = writeBits 2 2 w1 -- transform_type = 2 (subtract green)
    in w2
+
+-- | Write color transform header (type 1)
+writeColorTransform :: ColorTransformResult -> Int -> BitWriter -> BitWriter
+writeColorTransform cr sizeBits w =
+  let w1 = writeBit True w -- transform_present = 1
+      w2 = writeBits 2 1 w1 -- transform_type = 1 (color)
+      w3 = writeBits 3 (fromIntegral $ sizeBits - 2) w2 -- decoder reads ReadBits(3) + 2
+      w4 =
+        encodeSubresolutionImage
+          (ctTransformWidth cr)
+          (ctTransformHeight cr)
+          (ctTransformImage cr)
+          w3
+   in w4
 
 -- | Write color-indexing transform header
 writeColorIndexTransform :: ColorIndexResult -> BitWriter -> BitWriter

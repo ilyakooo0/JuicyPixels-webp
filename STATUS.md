@@ -2,7 +2,7 @@
 
 Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 
-**Total Implementation:** ~11,450 lines of Haskell code across 41 modules
+**Total Implementation:** ~11,650 lines of Haskell code across 42 modules
 **Test Status:** 421 tests - all passing
 
 ---
@@ -74,6 +74,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - Code length code (CLC) encoding
 - Bit writer with correct bit packing (LSB-first)
 - ARGB pixel packing and histogram analysis
+- Color transform (per-block least-squares regression for R/B decorrelation from G)
 
 #### VP8 Lossy Encoder
 - RGB to YCbCr color space conversion
@@ -113,7 +114,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - ~~**Predictor transform**~~ - ✅ implemented (14 prediction modes, 16x16 blocks)
 - ~~**LZ77 back-references**~~ - ✅ implemented (hash-chain match finding, 2D distance map)
 - **Color cache** - hash-based recently-used color lookup
-- **Color transform** - reduce inter-channel correlation
+- ~~**Color transform**~~ - ✅ implemented (per-block least-squares regression, replaces subtract-green for images ≥ 8×8)
 - **Color-indexing transform** - palette-based compression for low-color images
 - **Meta prefix codes** - entropy image support for better Huffman efficiency
 
@@ -131,7 +132,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 ## Design Notes
 
 ### Current Limitations (by design)
-- VP8L encoder uses predictor transform + LZ77 but not color transform, color-indexing, or color cache
+- VP8L encoder uses predictor + color transform + LZ77 but not color cache
 - Simple linear quality→qi mapping
 - VP8 segmentation disabled at qi < 8 (quality > ~93) or images < 4 macroblocks
 
@@ -205,6 +206,7 @@ Internal/
 │   ├── EncodeSimple.hs                       -- Simple encoder
 │   ├── EncodeUncompressed.hs                 -- Uncompressed encoder
 │   ├── EncodeWorking.hs                      -- Working encoder utilities
+│   ├── ColorTransformEncode.hs               -- Color transform encoding (least-squares)
 │   ├── PredictorEncode.hs                    -- Predictor transform encoding
 │   └── SubresolutionEncode.hs                -- Subresolution image encoding
 │

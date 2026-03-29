@@ -110,9 +110,10 @@ inverseColorTransform sizeBits transformData width height pixels = do
           !transformIdx = transformRowBase + transformX
           !transformPixel = VS.unsafeIndex transformData transformIdx
 
-          !greenToRed = toInt8 (fromIntegral ((transformPixel `shiftR` 16) .&. 0xFF) :: Word8)
+          -- Spec: alpha=255, red=red_to_blue, green=green_to_blue, blue=green_to_red
+          !greenToRed = toInt8 (fromIntegral (transformPixel .&. 0xFF) :: Word8)
           !greenToBlue = toInt8 (fromIntegral ((transformPixel `shiftR` 8) .&. 0xFF) :: Word8)
-          !redToBlue = toInt8 (fromIntegral (transformPixel .&. 0xFF) :: Word8)
+          !redToBlue = toInt8 (fromIntegral ((transformPixel `shiftR` 16) .&. 0xFF) :: Word8)
 
           !idx = rowBase + x
 
