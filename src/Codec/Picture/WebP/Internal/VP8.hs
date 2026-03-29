@@ -11,7 +11,7 @@ import Codec.Picture.WebP.Internal.VP8.Coefficients
 import Codec.Picture.WebP.Internal.VP8.Dequant
 import Codec.Picture.WebP.Internal.VP8.Header
 import Codec.Picture.WebP.Internal.VP8.IDCT
-import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyLoopFilter, applySimpleLoopFilterRow)
+import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow, applySimpleLoopFilterRow)
 import Codec.Picture.WebP.Internal.VP8.Predict
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad (forM_, when)
@@ -73,9 +73,11 @@ decodeVP8 bs = do
         let decodeMacroblocks !mbY !mbX !modeDec !coeffDec !lY0 !lY1 !lY2 !lY3 !lU0 !lU1 !lV0 !lV1 !lDC !lBM0 !lBM1 !lBM2 !lBM3
               | mbY >= mbHeight = return (modeDec, coeffDec)
               | mbX >= mbWidth = do
-                  -- Apply per-row simple loop filter to completed row
-                  when (filterLevel > 0 && filterType == 1) $
-                    applySimpleLoopFilterRow yBuf (mbWidth * 16) mbY mbWidth filterLevel
+                  -- Apply per-row loop filter to completed row
+                  when (filterLevel > 0) $
+                    if filterType == 1
+                      then applySimpleLoopFilterRow yBuf (mbWidth * 16) mbY mbWidth filterLevel
+                      else applyNormalLoopFilterRow yBuf (mbWidth * 16) uBuf (mbWidth * 8) vBuf (mbWidth * 8) mbY mbWidth filterLevel
                   decodeMacroblocks (mbY + 1) 0 modeDec coeffDec 0 0 0 0 0 0 0 0 0 0 0 0 0
               | otherwise = do
                   -- Read segment ID from partition 0 (if segmentation enabled)
@@ -268,11 +270,7 @@ decodeVP8 bs = do
 
         (_finalModeDec, _finalCoeffDec) <- decodeMacroblocks 0 0 modeDecoder dctDecoder 0 0 0 0 0 0 0 0 0 0 0 0 0
 
-        -- Apply loop filter to reconstructed frame
-        -- Simple filter (type 1) was already applied per-row above
-        -- Normal filter (type 0) is applied post-frame
-        when (vp8FilterLevel header > 0 && vp8FilterType header /= 1) $ do
-          applyLoopFilter header yBuf (mbWidth * 16) (mbHeight * 16)
+        -- Loop filter was already applied per-row above (both simple and normal)
 
         -- Convert YUV to RGB
         yData <- VS.freeze yBuf

@@ -3,6 +3,7 @@
 module Codec.Picture.WebP.Internal.VP8.LoopFilter
   ( applyLoopFilter,
     applySimpleLoopFilterRow,
+    applyNormalLoopFilterRow,
   )
 where
 
@@ -370,3 +371,201 @@ clip255 x
   | x < 0 = 0
   | x > 255 = 255
   | otherwise = fromIntegral x
+
+-- ==========================================================================
+-- Per-row normal loop filter (for encoder and decoder)
+-- ==========================================================================
+
+-- | Apply normal loop filter to a single MB row for Y, U, and V planes.
+-- Uses spec-correct separate edge and interior limits (sharpness = 0).
+applyNormalLoopFilterRow ::
+  VSM.MVector s Word8 ->
+  Int ->
+  VSM.MVector s Word8 ->
+  Int ->
+  VSM.MVector s Word8 ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  ST s ()
+applyNormalLoopFilterRow yPlane yStride uPlane uStride vPlane vStride mbRow mbCols filterLevel = do
+  let !iLimit = filterLevel -- interior limit (sharpness = 0)
+      !mbELimit = 3 * filterLevel + 4 -- MB edge limit
+      !subELimit = 3 * filterLevel -- sub-block edge limit
+      !hevT = if filterLevel >= 40 then 2 else if filterLevel >= 15 then 1 else 0
+      !yLen = VSM.length yPlane
+      !uLen = VSM.length uPlane
+      !vLen = VSM.length vPlane
+  normalFilterPlaneRow yPlane yStride yLen mbRow mbCols 16 mbELimit subELimit iLimit hevT
+  normalFilterPlaneRow uPlane uStride uLen mbRow mbCols 8 mbELimit subELimit iLimit hevT
+  normalFilterPlaneRow vPlane vStride vLen mbRow mbCols 8 mbELimit subELimit iLimit hevT
+
+-- | Filter one plane for one MB row with normal filter.
+normalFilterPlaneRow ::
+  VSM.MVector s Word8 ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  ST s ()
+normalFilterPlaneRow plane stride planeLen mbRow mbCols blockSize mbELimit subELimit iLimit hevT =
+  forM_ [0 .. mbCols - 1] $ \mbX -> do
+    let !bx = mbX * blockSize
+        !by = mbRow * blockSize
+    -- Vertical MB edge
+    when (mbX > 0) $
+      normalVMBFast plane stride planeLen bx by blockSize mbELimit iLimit hevT
+    -- Vertical sub-block edges (every 4 pixels within MB)
+    forM_ [4, 8 .. blockSize - 1] $ \dx ->
+      normalVSubFast plane stride planeLen (bx + dx) by blockSize subELimit iLimit hevT
+    -- Horizontal MB edge
+    when (mbRow > 0) $
+      normalHMBFast plane stride planeLen bx by blockSize mbELimit iLimit hevT
+    -- Horizontal sub-block edges (every 4 pixels within MB)
+    forM_ [4, 8 .. blockSize - 1] $ \dy ->
+      normalHSubFast plane stride planeLen bx (by + dy) blockSize subELimit iLimit hevT
+
+-- | Normal filter check with separate edge and interior limits (spec-correct).
+{-# INLINE normalFilterCheck #-}
+normalFilterCheck :: Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Word8 -> Int -> Int -> Bool
+normalFilterCheck p3 p2 p1 p0 q0 q1 q2 q3 edgeLimit interiorLimit =
+  let !edgeTest = abs (fromIntegral p0 - fromIntegral q0 :: Int) * 2 + (abs (fromIntegral p1 - fromIntegral q1 :: Int) `shiftR` 1)
+   in edgeTest <= edgeLimit
+        && abs (fromIntegral p3 - fromIntegral p2 :: Int) <= interiorLimit
+        && abs (fromIntegral p2 - fromIntegral p1 :: Int) <= interiorLimit
+        && abs (fromIntegral p1 - fromIntegral p0 :: Int) <= interiorLimit
+        && abs (fromIntegral q3 - fromIntegral q2 :: Int) <= interiorLimit
+        && abs (fromIntegral q2 - fromIntegral q1 :: Int) <= interiorLimit
+        && abs (fromIntegral q1 - fromIntegral q0 :: Int) <= interiorLimit
+
+-- | Filter vertical MB edge for `span` rows starting at (x, y).
+{-# INLINE normalVMBFast #-}
+normalVMBFast :: VSM.MVector s Word8 -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> ST s ()
+normalVMBFast plane stride planeLen x y span eLimit iLimit hevThresh =
+  forM_ [0 .. span - 1] $ \i -> do
+    let !base = (y + i) * stride + x
+    when (base - 4 >= 0 && base + 3 < planeLen) $ do
+      p3 <- VSM.unsafeRead plane (base - 4)
+      p2 <- VSM.unsafeRead plane (base - 3)
+      p1 <- VSM.unsafeRead plane (base - 2)
+      p0 <- VSM.unsafeRead plane (base - 1)
+      q0 <- VSM.unsafeRead plane base
+      q1 <- VSM.unsafeRead plane (base + 1)
+      q2 <- VSM.unsafeRead plane (base + 2)
+      q3 <- VSM.unsafeRead plane (base + 3)
+      when (normalFilterCheck p3 p2 p1 p0 q0 q1 q2 q3 eLimit iLimit) $ do
+        if isHighEdgeVariance p1 p0 q0 q1 hevThresh
+          then do
+            let (!p0', !q0') = simpleFilter p0 q0 p1 q1
+            VSM.unsafeWrite plane (base - 1) p0'
+            VSM.unsafeWrite plane base q0'
+          else do
+            let (!p2', !p1', !p0', !q0', !q1', !q2') = mbFilter p2 p1 p0 q0 q1 q2
+            VSM.unsafeWrite plane (base - 3) p2'
+            VSM.unsafeWrite plane (base - 2) p1'
+            VSM.unsafeWrite plane (base - 1) p0'
+            VSM.unsafeWrite plane base q0'
+            VSM.unsafeWrite plane (base + 1) q1'
+            VSM.unsafeWrite plane (base + 2) q2'
+
+-- | Filter vertical sub-block edge for `span` rows starting at (x, y).
+{-# INLINE normalVSubFast #-}
+normalVSubFast :: VSM.MVector s Word8 -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> ST s ()
+normalVSubFast plane stride planeLen x y span eLimit iLimit hevThresh =
+  forM_ [0 .. span - 1] $ \i -> do
+    let !base = (y + i) * stride + x
+    when (base - 3 >= 0 && base + 2 < planeLen) $ do
+      p2 <- VSM.unsafeRead plane (base - 3)
+      p1 <- VSM.unsafeRead plane (base - 2)
+      p0 <- VSM.unsafeRead plane (base - 1)
+      q0 <- VSM.unsafeRead plane base
+      q1 <- VSM.unsafeRead plane (base + 1)
+      q2 <- VSM.unsafeRead plane (base + 2)
+      when (normalFilterCheck p2 p2 p1 p0 q0 q1 q2 q2 eLimit iLimit) $ do
+        if isHighEdgeVariance p1 p0 q0 q1 hevThresh
+          then do
+            let (!p0', !q0') = simpleFilter p0 q0 p1 q1
+            VSM.unsafeWrite plane (base - 1) p0'
+            VSM.unsafeWrite plane base q0'
+          else do
+            let (!p1', !p0', !q0', !q1') = subblockFilter p1 p0 q0 q1
+            VSM.unsafeWrite plane (base - 2) p1'
+            VSM.unsafeWrite plane (base - 1) p0'
+            VSM.unsafeWrite plane base q0'
+            VSM.unsafeWrite plane (base + 1) q1'
+
+-- | Filter horizontal MB edge for `span` columns starting at (x, y).
+{-# INLINE normalHMBFast #-}
+normalHMBFast :: VSM.MVector s Word8 -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> ST s ()
+normalHMBFast plane stride planeLen x y span eLimit iLimit hevThresh =
+  forM_ [0 .. span - 1] $ \i -> do
+    let !col = x + i
+        !base = y * stride + col
+        !im4 = base - 4 * stride
+        !im3 = base - 3 * stride
+        !im2 = base - 2 * stride
+        !im1 = base - stride
+        !ip1 = base + stride
+        !ip2 = base + 2 * stride
+        !ip3 = base + 3 * stride
+    when (im4 >= 0 && ip3 < planeLen) $ do
+      p3 <- VSM.unsafeRead plane im4
+      p2 <- VSM.unsafeRead plane im3
+      p1 <- VSM.unsafeRead plane im2
+      p0 <- VSM.unsafeRead plane im1
+      q0 <- VSM.unsafeRead plane base
+      q1 <- VSM.unsafeRead plane ip1
+      q2 <- VSM.unsafeRead plane ip2
+      q3 <- VSM.unsafeRead plane ip3
+      when (normalFilterCheck p3 p2 p1 p0 q0 q1 q2 q3 eLimit iLimit) $ do
+        if isHighEdgeVariance p1 p0 q0 q1 hevThresh
+          then do
+            let (!p0', !q0') = simpleFilter p0 q0 p1 q1
+            VSM.unsafeWrite plane im1 p0'
+            VSM.unsafeWrite plane base q0'
+          else do
+            let (!p2', !p1', !p0', !q0', !q1', !q2') = mbFilter p2 p1 p0 q0 q1 q2
+            VSM.unsafeWrite plane im3 p2'
+            VSM.unsafeWrite plane im2 p1'
+            VSM.unsafeWrite plane im1 p0'
+            VSM.unsafeWrite plane base q0'
+            VSM.unsafeWrite plane ip1 q1'
+            VSM.unsafeWrite plane ip2 q2'
+
+-- | Filter horizontal sub-block edge for `span` columns starting at (x, y).
+{-# INLINE normalHSubFast #-}
+normalHSubFast :: VSM.MVector s Word8 -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> ST s ()
+normalHSubFast plane stride planeLen x y span eLimit iLimit hevThresh =
+  forM_ [0 .. span - 1] $ \i -> do
+    let !col = x + i
+        !base = y * stride + col
+        !im3 = base - 3 * stride
+        !im2 = base - 2 * stride
+        !im1 = base - stride
+        !ip1 = base + stride
+        !ip2 = base + 2 * stride
+    when (im3 >= 0 && ip2 < planeLen) $ do
+      p2 <- VSM.unsafeRead plane im3
+      p1 <- VSM.unsafeRead plane im2
+      p0 <- VSM.unsafeRead plane im1
+      q0 <- VSM.unsafeRead plane base
+      q1 <- VSM.unsafeRead plane ip1
+      q2 <- VSM.unsafeRead plane ip2
+      when (normalFilterCheck p2 p2 p1 p0 q0 q1 q2 q2 eLimit iLimit) $ do
+        if isHighEdgeVariance p1 p0 q0 q1 hevThresh
+          then do
+            let (!p0', !q0') = simpleFilter p0 q0 p1 q1
+            VSM.unsafeWrite plane im1 p0'
+            VSM.unsafeWrite plane base q0'
+          else do
+            let (!p1', !p0', !q0', !q1') = subblockFilter p1 p0 q0 q1
+            VSM.unsafeWrite plane im2 p1'
+            VSM.unsafeWrite plane im1 p0'
+            VSM.unsafeWrite plane base q0'
+            VSM.unsafeWrite plane ip1 q1'
