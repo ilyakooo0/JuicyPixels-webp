@@ -328,12 +328,16 @@ selectIntra16x16ModeRDO ::
   DequantFactors -> -- Quantization parameters
   Int -> -- Lambda (rate-distortion tradeoff)
   VU.Vector Word8 -> -- Coefficient probabilities (1056 flat entries)
+  Int -> Int -> Int -> Int -> -- aboveNzY[0..3] (from MB above)
+  Int -> Int -> Int -> Int -> -- leftNzY[0..3] (from MB to the left)
+  Int -> Int -> -- aboveDcNz, leftDcNz (Y2 DC NZ context)
   ST s (Int, Int) -- (mode, rdCost)
-selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs = do
+selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs aNzY0 aNzY1 aNzY2 aNzY3 lNzY0 lNzY1 lNzY2 lNzY3 aDcNz lDcNz = do
   predBuf <- VSM.clone yRecon
   y2DCs <- VSM.new 16
   residuals <- VSM.new 16
   dctStore <- VSM.new (16 * 16)
+  nzGrid <- VSM.new 16 :: ST s (VSM.MVector s Word8)
 
   let tryMode !mode !bestMode !bestCost
         | mode > 3 = return (bestMode, bestCost)
@@ -373,10 +377,17 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
 
             -- Y2: WHT → trellis quantize → estimate bit cost → dequant → inverse WHT
             fwht4x4 y2DCs
-            _ <- trellisQuantizeBlock dqFactors 1 y2DCs coeffProbs 0 0 lambda
-            !y2BitCost <- coeffBlockCost y2DCs coeffProbs 1 0 0
+            let !dcCtx = min 2 (aDcNz + lDcNz)
+            _ <- trellisQuantizeBlock dqFactors 1 y2DCs coeffProbs dcCtx 0 lambda
+            !y2BitCost <- coeffBlockCost y2DCs coeffProbs 1 dcCtx 0
             dequantizeBlock dqFactors 1 y2DCs
             reconDCsV <- iwht4x4 y2DCs
+
+            -- Clear NZ grid for this mode trial
+            let clearNz !i
+                  | i >= 16 = return ()
+                  | otherwise = VSM.unsafeWrite nzGrid i 0 >> clearNz (i + 1)
+            clearNz 0
 
             -- Second pass: quantize AC, estimate bits, reconstruct, compute SSE
             let processBlock !bi !sse !rateCost
@@ -387,8 +398,20 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
                         then tryMode (mode + 1) mode rdCost
                         else tryMode (mode + 1) bestMode bestCost
                   | otherwise = do
-                      let !subX = (bi .&. 3) * 4
-                          !subY = (bi `shiftR` 2) * 4
+                      let !row = bi `shiftR` 2
+                          !col = bi .&. 3
+                          !subX = col * 4
+                          !subY = row * 4
+                      -- Compute NZ context from above/left neighbors
+                      !aboveNz <- if row == 0
+                        then return $ case col of
+                          0 -> aNzY0; 1 -> aNzY1; 2 -> aNzY2; _ -> aNzY3
+                        else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 4)
+                      !leftNz <- if col == 0
+                        then return $ case row of
+                          0 -> lNzY0; 1 -> lNzY1; 2 -> lNzY2; _ -> lNzY3
+                        else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 1)
+                      let !ctx = min 2 (aboveNz + leftNz)
                       let loadCoeffs !i
                             | i >= 16 = return ()
                             | otherwise = do
@@ -398,8 +421,9 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
                       loadCoeffs 0
                       VSM.unsafeWrite residuals 0 0
                       applySharpen dqFactors 0 residuals
-                      _ <- trellisQuantizeBlock dqFactors 0 residuals coeffProbs 0 1 lambda
-                      !blockBitCost <- coeffBlockCost residuals coeffProbs 0 0 1
+                      !hasNz <- trellisQuantizeBlock dqFactors 0 residuals coeffProbs ctx 1 lambda
+                      !blockBitCost <- coeffBlockCost residuals coeffProbs 0 ctx 1
+                      VSM.unsafeWrite nzGrid bi (if hasNz then 1 else 0)
                       dequantizeBlock dqFactors 0 residuals
                       VSM.unsafeWrite residuals 0 (reconDCsV VS.! bi)
                       idct4x4 residuals
@@ -433,10 +457,13 @@ selectBPredModeRDO ::
   Int ->
   Int ->
   Int -> -- Left B-modes from MB to the left (rows 0-3)
+  Int -> Int -> Int -> Int -> -- aboveNzY[0..3] (from MB above)
+  Int -> Int -> Int -> Int -> -- leftNzY[0..3] (from MB to the left)
   ST s (VS.Vector Word8, Int) -- (16 modes, total RD cost)
-selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAbove0 extAbove1 extAbove2 extAbove3 extLeft0 extLeft1 extLeft2 extLeft3 = do
+selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAbove0 extAbove1 extAbove2 extAbove3 extLeft0 extLeft1 extLeft2 extLeft3 aNzY0 aNzY1 aNzY2 aNzY3 lNzY0 lNzY1 lNzY2 lNzY3 = do
   modesMut <- VSM.new 16 :: ST s (VSM.MVector s Word8)
   residuals <- VSM.new 16 :: ST s (VSM.MVector s Int16)
+  nzGrid <- VSM.new 16 :: ST s (VSM.MVector s Word8)
 
   -- Start with the cost of signaling B_PRED in the Y mode tree
   let !bpredSignalCost = (lambda * bPredYModeCost) `div` 256
@@ -465,6 +492,17 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                   !m <- VSM.unsafeRead modesMut (row * 4 + col - 1)
                   return (fromIntegral m)
 
+            -- Compute NZ context from committed blocks
+            !aboveNz <- if row == 0
+              then return $ case col of
+                0 -> aNzY0; 1 -> aNzY1; 2 -> aNzY2; _ -> aNzY3
+              else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 4)
+            !leftNz <- if col == 0
+              then return $ case row of
+                0 -> lNzY0; 1 -> lNzY1; 2 -> lNzY2; _ -> lNzY3
+              else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 1)
+            let !ctx = min 2 (aboveNz + leftNz)
+
             -- Try all 10 modes, pick best by RD cost
             let tryMode !m !bestMode !bestCost
                   | m > 9 = return (bestMode, bestCost)
@@ -489,8 +527,8 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
 
                       fdct4x4 residuals
                       applySharpen dqFactors 3 residuals
-                      _ <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs 0 0 lambda
-                      !blockBitCost <- coeffBlockCost residuals coeffProbs 3 0 0
+                      _ <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 lambda
+                      !blockBitCost <- coeffBlockCost residuals coeffProbs 3 ctx 0
                       dequantizeBlock dqFactors 3 residuals
                       idct4x4 residuals
                       !sse <- computeBlockSSEM yOrig yRecon residuals stride subX subY
@@ -520,7 +558,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
             fillRes 0
             fdct4x4 residuals
             applySharpen dqFactors 3 residuals
-            _ <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs 0 0 lambda
+            !hasNz <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 lambda
             dequantizeBlock dqFactors 3 residuals
             idct4x4 residuals
 
@@ -539,6 +577,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                       reconCol 0
             reconSB 0
 
+            VSM.unsafeWrite nzGrid bi (if hasNz then 1 else 0)
             VSM.unsafeWrite modesMut bi (fromIntegral bestMode)
             processSB (bi + 1) (totalCost + bestCost)
 

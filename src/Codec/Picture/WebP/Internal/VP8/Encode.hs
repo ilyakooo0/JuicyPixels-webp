@@ -346,11 +346,18 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
   aBM2 <- VSM.read aboveBModes (mbX * 4 + 2)
   aBM3 <- VSM.read aboveBModes (mbX * 4 + 3)
 
+  -- Read above NZ context early (needed for RDO mode selection)
+  aNzY0 <- fromIntegral <$> VSM.read aboveNzY (mbX * 4)
+  aNzY1 <- fromIntegral <$> VSM.read aboveNzY (mbX * 4 + 1)
+  aNzY2 <- fromIntegral <$> VSM.read aboveNzY (mbX * 4 + 2)
+  aNzY3 <- fromIntegral <$> VSM.read aboveNzY (mbX * 4 + 3)
+  aNzDC <- fromIntegral <$> VSM.read aboveNzDC mbX
+
   -- Step 1: Select best i16 Y mode using RDO
-  (i16Mode, i16Cost) <- selectIntra16x16ModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda coeffProbs
+  (i16Mode, i16Cost) <- selectIntra16x16ModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda coeffProbs aNzY0 aNzY1 aNzY2 aNzY3 leftNzY0 leftNzY1 leftNzY2 leftNzY3 aNzDC leftNzDC
 
   -- Step 2: Select best B_PRED modes using RDO (modifies yRecon's MB area)
-  (bpredModes, bpredCost) <- selectBPredModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda coeffProbs (fromIntegral aBM0) (fromIntegral aBM1) (fromIntegral aBM2) (fromIntegral aBM3) leftBM0 leftBM1 leftBM2 leftBM3
+  (bpredModes, bpredCost) <- selectBPredModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda coeffProbs (fromIntegral aBM0) (fromIntegral aBM1) (fromIntegral aBM2) (fromIntegral aBM3) leftBM0 leftBM1 leftBM2 leftBM3 aNzY0 aNzY1 aNzY2 aNzY3 leftNzY0 leftNzY1 leftNzY2 leftNzY3
   -- yRecon now has B_PRED reconstruction; if i16 wins, encodeYBlocks will overwrite it
 
   -- True RDO: mode encoding costs already included in i16Cost and bpredCost
