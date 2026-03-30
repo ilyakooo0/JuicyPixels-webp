@@ -131,17 +131,18 @@ encodeVP8 img quality = runST $ do
 
   -- Step 5: Pass 1 — encode with default probs, collect coefficient statistics
   --         Also save pre-filter reconstruction for filter strength search
+  --         Skip mode disabled (Nothing) — we just count skip MBs for prob computation
   stats <- newCoeffStats
   let noUpdateFlags = VU.replicate 1056 False
       defaultFilterLevel = encFilterLevel config
-      compressedHeaderEnc1 = generateCompressedHeader quantIndices defaultFilterLevel (encFilterType config) mSegHeaderInfo defaultCoeffProbs noUpdateFlags
+      compressedHeaderEnc1 = generateCompressedHeader quantIndices defaultFilterLevel (encFilterType config) mSegHeaderInfo defaultCoeffProbs noUpdateFlags Nothing
 
   -- Allocate pre-filter buffers (capture reconstruction before loop filter)
   yPreFilter <- VSM.new ySize
   uPreFilter <- VSM.new uvSize
   vPreFilter <- VSM.new uvSize
 
-  (modeEnc1, coeffEnc1) <-
+  (modeEnc1, coeffEnc1, skipCount1) <-
     encodeMacroblocks
       yBuf uBuf vBuf yRecon uRecon vRecon
       paddedW paddedH mbRows mbCols
@@ -149,6 +150,7 @@ encodeVP8 img quality = runST $ do
       compressedHeaderEnc1 initBoolEncoder
       defaultFilterLevel (Just stats)
       (Just (yPreFilter, uPreFilter, vPreFilter))
+      Nothing
 
   -- Step 6: Adaptive filter strength search
   optFilterLevel <-
@@ -163,7 +165,16 @@ encodeVP8 img quality = runST $ do
   optimalProbs <- computeOptimalProbs stats
   (updatedProbs, updateFlags) <- decideUpdates stats optimalProbs
   let hasUpdates = VU.any id updateFlags
-      needsReencode = hasUpdates || optFilterLevel /= defaultFilterLevel
+
+  -- Step 7b: Compute skip probability from pass 1 statistics
+  let !totalMBs = mbRows * mbCols
+      !nonSkipMBs = totalMBs - skipCount1
+      !hasSkipMBs = skipCount1 > 0
+      -- prob_skip_false = probability that a MB is NOT skipped (has coefficients)
+      !probSkipFalse = fromIntegral (max 1 (min 255 ((256 * nonSkipMBs + totalMBs `div` 2) `div` max 1 totalMBs))) :: Word8
+      !mSkipProb = if hasSkipMBs then Just probSkipFalse else Nothing
+
+      needsReencode = hasUpdates || optFilterLevel /= defaultFilterLevel || hasSkipMBs
 
   if not needsReencode
     then do
@@ -178,12 +189,12 @@ encodeVP8 img quality = runST $ do
       VSM.set uRecon 128
       VSM.set vRecon 128
 
-      -- Step 9: Pass 2 — re-encode with optimal filter level and probs
+      -- Step 9: Pass 2 — re-encode with optimal filter level, probs, and skip mode
       let probs2 = if hasUpdates then updatedProbs else defaultCoeffProbs
           flags2 = if hasUpdates then updateFlags else noUpdateFlags
-          compressedHeaderEnc2 = generateCompressedHeader quantIndices optFilterLevel (encFilterType config) mSegHeaderInfo probs2 flags2
+          compressedHeaderEnc2 = generateCompressedHeader quantIndices optFilterLevel (encFilterType config) mSegHeaderInfo probs2 flags2 mSkipProb
 
-      (modeEnc2, coeffEnc2) <-
+      (modeEnc2, coeffEnc2, _) <-
         encodeMacroblocks
           yBuf uBuf vBuf yRecon uRecon vRecon
           paddedW paddedH mbRows mbCols
@@ -191,6 +202,7 @@ encodeVP8 img quality = runST $ do
           compressedHeaderEnc2 initBoolEncoder
           optFilterLevel Nothing
           Nothing
+          mSkipProb
 
       let partition0 = finalizeBoolEncoder modeEnc2
           dctPartition = finalizeBoolEncoder coeffEnc2
@@ -218,8 +230,10 @@ encodeMacroblocks ::
   Int -> -- Filter level for per-row loop filter
   Maybe (CoeffStats s) -> -- Optional coefficient statistics accumulator
   Maybe (VSM.MVector s Word8, VSM.MVector s Word8, VSM.MVector s Word8) -> -- Pre-filter buffers (save recon before loop filter)
-  ST s (BoolEncoder, BoolEncoder)
-encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dqVec segLambdas mSegEncInfo coeffProbs modeEnc coeffEnc filterLevel mStats mPreFilterBufs = do
+  Maybe Word8 -> -- Skip mode: Just probSkipFalse to enable, Nothing to disable
+  ST s (BoolEncoder, BoolEncoder, Int)
+  -- Returns: (modeEncoder, coeffEncoder, skipCount)
+encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dqVec segLambdas mSegEncInfo coeffProbs modeEnc coeffEnc filterLevel mStats mPreFilterBufs mSkipProb = do
   -- Allocate above NZ tracking arrays (persist across MB rows)
   aboveNzY <- VSM.replicate (mbCols * 4) (0 :: Word8) -- 4 Y columns per MB
   aboveNzU <- VSM.replicate (mbCols * 2) (0 :: Word8) -- 2 U columns per MB
@@ -228,8 +242,8 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
   -- B_PRED sub-block mode context (4 modes per MB column for bottom row)
   -- Non-B_PRED MBs store 0 (B_DC_PRED) as default context
   aboveBModes <- VSM.replicate (mbCols * 4) (0 :: Word8)
-  let loop !mbY !mbX !mEnc !cEnc !leftNzY0 !leftNzY1 !leftNzY2 !leftNzY3 !leftNzU0 !leftNzU1 !leftNzV0 !leftNzV1 !leftNzDC !leftBM0 !leftBM1 !leftBM2 !leftBM3
-        | mbY >= mbRows = return (mEnc, cEnc)
+  let loop !mbY !mbX !mEnc !cEnc !skipCount !leftNzY0 !leftNzY1 !leftNzY2 !leftNzY3 !leftNzU0 !leftNzU1 !leftNzV0 !leftNzV1 !leftNzDC !leftBM0 !leftBM1 !leftBM2 !leftBM3
+        | mbY >= mbRows = return (mEnc, cEnc, skipCount)
         | mbX >= mbCols = do
             -- Save pre-filter reconstruction before loop filter modifies it
             case mPreFilterBufs of
@@ -247,7 +261,7 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
             when (filterLevel > 0) $
               applyNormalLoopFilterRow yRecon paddedW uRecon (paddedW `div` 2) vRecon (paddedW `div` 2) mbY mbCols filterLevel
             -- New row: reset left NZ and left B modes to 0
-            loop (mbY + 1) 0 mEnc cEnc 0 0 0 0 0 0 0 0 0 0 0 0 0
+            loop (mbY + 1) 0 mEnc cEnc skipCount 0 0 0 0 0 0 0 0 0 0 0 0 0
         | otherwise = do
             -- Segment handling: look up per-MB segment, write ID, select per-segment params
             let (!segDq, !segLam, !mEncSeg) = case mSegEncInfo of
@@ -257,7 +271,7 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
                     let !s = fromIntegral (segMap VU.! (mbY * mbCols + mbX))
                      in (dqVec V.! s, segLambdas VU.! s, encodeSegmentId s sp0 sp1 sp2 mEnc)
 
-            (mEnc', cEnc', lY0, lY1, lY2, lY3, lU0, lU1, lV0, lV1, lDC, lBM0, lBM1, lBM2, lBM3) <-
+            (mEnc', cEnc', isSkip, lY0, lY1, lY2, lY3, lU0, lU1, lV0, lV1, lDC, lBM0, lBM1, lBM2, lBM3) <-
               encodeMacroblock
                 yOrig
                 uOrig
@@ -293,9 +307,11 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
                 leftBM2
                 leftBM3
                 mStats
-            loop mbY (mbX + 1) mEnc' cEnc' lY0 lY1 lY2 lY3 lU0 lU1 lV0 lV1 lDC lBM0 lBM1 lBM2 lBM3
+                mSkipProb
+            let !skipCount' = if isSkip then skipCount + 1 else skipCount
+            loop mbY (mbX + 1) mEnc' cEnc' skipCount' lY0 lY1 lY2 lY3 lU0 lU1 lV0 lV1 lDC lBM0 lBM1 lBM2 lBM3
 
-  loop 0 0 modeEnc coeffEnc 0 0 0 0 0 0 0 0 0 0 0 0 0
+  loop 0 0 modeEnc coeffEnc 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 
 -- | Encode a single macroblock
 -- Modes go to modeEnc (partition 0), coefficients go to coeffEnc (DCT partition)
@@ -335,8 +351,10 @@ encodeMacroblock ::
   Int ->
   Int -> -- leftBMode[0..3]
   Maybe (CoeffStats s) -> -- Optional coefficient statistics
-  ST s (BoolEncoder, BoolEncoder, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int)
-encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX dequantFactors lambda coeffProbs mEnc cEnc aboveNzY aboveNzU aboveNzV aboveNzDC aboveBModes leftNzY0 leftNzY1 leftNzY2 leftNzY3 leftNzU0 leftNzU1 leftNzV0 leftNzV1 leftNzDC leftBM0 leftBM1 leftBM2 leftBM3 mStats = do
+  Maybe Word8 -> -- Skip mode: Just probSkipFalse to enable, Nothing to disable
+  ST s (BoolEncoder, BoolEncoder, Bool, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int)
+  -- Returns: (mEnc, cEnc, isSkip, leftNzY0..3, leftNzU0..1, leftNzV0..1, leftNzDC, leftBM0..3)
+encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX dequantFactors lambda coeffProbs mEnc cEnc aboveNzY aboveNzU aboveNzV aboveNzDC aboveBModes leftNzY0 leftNzY1 leftNzY2 leftNzY3 leftNzU0 leftNzU1 leftNzV0 leftNzV1 leftNzDC leftBM0 leftBM1 leftBM2 leftBM3 mStats mSkipProb = do
   let mbXpix = mbX * 16
       mbYpix = mbY * 16
 
@@ -371,14 +389,9 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
   if useBPred
     then do
       -- === B_PRED path ===
-      -- Write B_PRED Y mode to partition 0
-      let mEnc1 = encodeYModeBPred mEnc
-          -- aBM0..3 already read above for RDO
-          mEnc2 = encodeBPredModesToStream bpredModes aBM0 aBM1 aBM2 aBM3 leftBM0 leftBM1 leftBM2 leftBM3 mEnc1
-          mEnc3 = encodeUVMode uvPredMode mEnc2
-
-      -- Encode Y blocks (B_PRED: blockType=3, no Y2)
-      (cEnc1, newLeftY0, newLeftY1, newLeftY2, newLeftY3) <-
+      -- Phase 1: Encode coefficients to determine skip status
+      -- (Side effects on yRecon, aboveNz arrays are always needed)
+      (cEnc1, anyYNz, newLeftY0, newLeftY1, newLeftY2, newLeftY3) <-
         encodeYBlocksBPred
           yOrig
           yRecon
@@ -408,7 +421,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
       VSM.write aboveBModes (mbX * 4 + 3) (bpredModes VS.! 15)
 
       -- Encode chroma
-      (cEnc2, newLeftU0, newLeftU1) <-
+      (cEnc2, anyUNz, newLeftU0, newLeftU1) <-
         encodeChromaBlocks
           uOrig
           uRecon
@@ -427,7 +440,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           leftNzU1
           mStats
 
-      (cEnc3, newLeftV0, newLeftV1) <-
+      (cEnc3, anyVNz, newLeftV0, newLeftV1) <-
         encodeChromaBlocks
           vOrig
           vRecon
@@ -446,20 +459,24 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           leftNzV1
           mStats
 
+      -- B_PRED: decoder has no skip support for B_PRED MBs, so always encode coefficients.
+      -- Write B_PRED Y mode + sub-block modes + UV mode to partition 0 (no skip flag).
+      let mEnc1' = encodeYModeBPred mEnc
+          mEnc2' = encodeBPredModesToStream bpredModes aBM0 aBM1 aBM2 aBM3 leftBM0 leftBM1 leftBM2 leftBM3 mEnc1'
+          mEnc3' = encodeUVMode uvPredMode mEnc2'
+
       -- Right column B modes (blocks 3,7,11,15) for next MB's left context
       let !newLBM0 = fromIntegral (bpredModes VS.! 3)
           !newLBM1 = fromIntegral (bpredModes VS.! 7)
           !newLBM2 = fromIntegral (bpredModes VS.! 11)
           !newLBM3 = fromIntegral (bpredModes VS.! 15)
 
-      return (mEnc3, cEnc3, newLeftY0, newLeftY1, newLeftY2, newLeftY3, newLeftU0, newLeftU1, newLeftV0, newLeftV1, 0, newLBM0, newLBM1, newLBM2, newLBM3)
+      return (mEnc3', cEnc3, False, newLeftY0, newLeftY1, newLeftY2, newLeftY3, newLeftU0, newLeftU1, newLeftV0, newLeftV1, 0, newLBM0, newLBM1, newLBM2, newLBM3)
     else do
-      -- === i16 path (original) ===
-      let mEnc1 = encodeYMode i16Mode mEnc
-          mEnc2 = encodeUVMode uvPredMode mEnc1
-
+      -- === i16 path ===
+      -- Phase 1: Encode coefficients to determine skip status
       aNzDC <- VSM.read aboveNzDC mbX
-      (cEnc1, y2nz, newLeftY0, newLeftY1, newLeftY2, newLeftY3) <-
+      (cEnc1, y2nz, anyYNz, newLeftY0, newLeftY1, newLeftY2, newLeftY3) <-
         encodeYBlocks
           yOrig
           yRecon
@@ -489,7 +506,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
       VSM.write aboveBModes (mbX * 4 + 2) 0
       VSM.write aboveBModes (mbX * 4 + 3) 0
 
-      (cEnc2, newLeftU0, newLeftU1) <-
+      (cEnc2, anyUNz, newLeftU0, newLeftU1) <-
         encodeChromaBlocks
           uOrig
           uRecon
@@ -508,7 +525,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           leftNzU1
           mStats
 
-      (cEnc3, newLeftV0, newLeftV1) <-
+      (cEnc3, anyVNz, newLeftV0, newLeftV1) <-
         encodeChromaBlocks
           vOrig
           vRecon
@@ -527,8 +544,24 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           leftNzV1
           mStats
 
+      -- Phase 2: Determine skip status and write to partition 0
+      let !isSkip = not (anyYNz || anyUNz || anyVNz)
+
+      -- Write i16 mode + UV mode FIRST, then skip flag
+      -- (decoder reads: y_mode, uv_mode, skip_flag — in that order)
+      let mEnc1' = encodeYMode i16Mode mEnc
+          mEnc2' = encodeUVMode uvPredMode mEnc1'
+          !mEnc3' = case mSkipProb of
+            Just prob -> boolWrite prob isSkip mEnc2'
+            Nothing -> mEnc2'
+
+      -- Phase 3: Discard coefficient data for skip MBs
+      let !finalCEnc = case mSkipProb of
+            Just _ | isSkip -> cEnc
+            _ -> cEnc3
+
       let !newLeftDC = if y2nz then 1 else 0
-      return (mEnc2, cEnc3, newLeftY0, newLeftY1, newLeftY2, newLeftY3, newLeftU0, newLeftU1, newLeftV0, newLeftV1, newLeftDC, 0, 0, 0, 0)
+      return (mEnc3', finalCEnc, isSkip, newLeftY0, newLeftY1, newLeftY2, newLeftY3, newLeftU0, newLeftU1, newLeftV0, newLeftV1, newLeftDC, 0, 0, 0, 0)
 
 -- | Encode 16 B_PRED sub-block modes to bitstream with above/left context.
 -- Pure function: walks the kfBmodeTree for each sub-block.
@@ -585,7 +618,8 @@ encodeYBlocks ::
   Int ->
   Int -> -- aboveDcNz, leftDcNz
   Maybe (CoeffStats s) -> -- Optional coefficient statistics
-  ST s (BoolEncoder, Bool, Int, Int, Int, Int)
+  ST s (BoolEncoder, Bool, Bool, Int, Int, Int, Int)
+  -- Returns: (encoder, y2nz, anyYNz, leftNzY0..3)
 encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 aboveDcNz leftDcNz mStats = do
   -- Create temporary buffer for prediction (don't overwrite reconstruction yet)
   predBuf <- VSM.clone yRecon
@@ -662,8 +696,8 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs 
   --   above_nz: row==0 → aboveNzY[col], else → nzGrid[(row-1)*4+col]
   --   left_nz: col==0 → leftNzY[row], else → nzGrid[row*4+col-1]
   --   ctx = min 2 (above_nz + left_nz)
-  let encodeYBlock !blockIdx !e
-        | blockIdx >= 16 = return e
+  let encodeYBlock !blockIdx !e !anyAcNz
+        | blockIdx >= 16 = return (e, anyAcNz)
         | otherwise = do
             let !row = blockIdx `div` 4
                 !col = blockIdx `mod` 4
@@ -717,9 +751,9 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs 
             -- Track NZ
             VSM.write nzGrid blockIdx (if hasNz then 1 else 0)
 
-            encodeYBlock (blockIdx + 1) e'
+            encodeYBlock (blockIdx + 1) e' (anyAcNz || hasNz)
 
-  enc2 <- encodeYBlock 0 enc1
+  (enc2, anyAcNz) <- encodeYBlock 0 enc1 False
 
   -- Update aboveNzY with bottom row NZ (blocks 12, 13, 14, 15)
   nz12 <- VSM.read nzGrid 12
@@ -769,7 +803,8 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs 
         let reconstructed = clip255 (fromIntegral pred + fromIntegral res)
         VSM.write yRecon idx reconstructed
 
-  return (enc2, y2nz, newLeftY0', newLeftY1', newLeftY2', newLeftY3')
+  let !anyYNz = y2nz || anyAcNz
+  return (enc2, y2nz, anyYNz, newLeftY0', newLeftY1', newLeftY2', newLeftY3')
 
 -- | Encode Y blocks for a B_PRED macroblock.
 -- No Y2 block. Each 4x4 sub-block uses blockType=3 (full coefficients with DC).
@@ -793,7 +828,8 @@ encodeYBlocksBPred ::
   Int ->
   Int -> -- leftNzY[0..3]
   Maybe (CoeffStats s) -> -- Optional coefficient statistics
-  ST s (BoolEncoder, Int, Int, Int, Int)
+  ST s (BoolEncoder, Bool, Int, Int, Int, Int)
+  -- Returns: (encoder, anyYNz, leftNzY0..3)
 encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 mStats = do
   -- NZ tracking grid for 16 sub-blocks
   nzGrid <- VSM.replicate 16 (0 :: Word8)
@@ -805,8 +841,8 @@ encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda coef
   aNzCol3 <- VSM.read aboveNzY (mbX * 4 + 3)
 
   -- Process 16 blocks in raster order
-  let encodeBlock !blockIdx !e
-        | blockIdx >= 16 = return e
+  let encodeBlock !blockIdx !e !anyBlockNz
+        | blockIdx >= 16 = return (e, anyBlockNz)
         | otherwise = do
             let !row = blockIdx `div` 4
                 !col = blockIdx `mod` 4
@@ -869,9 +905,9 @@ encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda coef
                 !res <- VSM.read residuals (r * 4 + c)
                 VSM.write yRecon idx (clip255 (fromIntegral pred + fromIntegral res))
 
-            encodeBlock (blockIdx + 1) e'
+            encodeBlock (blockIdx + 1) e' (anyBlockNz || hasNz)
 
-  enc' <- encodeBlock 0 enc
+  (enc', anyYNz) <- encodeBlock 0 enc False
 
   -- Update aboveNzY with bottom row NZ
   nz12 <- VSM.read nzGrid 12
@@ -889,7 +925,7 @@ encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda coef
   newLeftY2' <- fromIntegral <$> VSM.read nzGrid 11
   newLeftY3' <- fromIntegral <$> VSM.read nzGrid 15
 
-  return (enc', newLeftY0', newLeftY1', newLeftY2', newLeftY3')
+  return (enc', anyYNz, newLeftY0', newLeftY1', newLeftY2', newLeftY3')
 
 -- | Encode chroma blocks (U or V) with NZ context tracking
 -- coeffBlockType: 2 for both U and V per RFC 6386 coefficient probability indexing
@@ -913,7 +949,8 @@ encodeChromaBlocks ::
   Int ->
   Int -> -- leftNz row 0, row 1
   Maybe (CoeffStats s) -> -- Optional coefficient statistics
-  ST s (BoolEncoder, Int, Int)
+  ST s (BoolEncoder, Bool, Int, Int)
+  -- Returns: (encoder, anyChromaNz, leftNz0, leftNz1)
 encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lambda coeffProbs enc coeffBlockType aboveNz mbX leftNz0 leftNz1 mStats = do
   -- Create temporary buffer for prediction
   predBuf <- VSM.clone chromaRecon
@@ -929,8 +966,8 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lam
   nzGrid <- VSM.replicate 4 (0 :: Word8)
 
   -- Process 4 chroma blocks in raster order with NZ context
-  let processBlock !blockIdx !e
-        | blockIdx >= 4 = return e
+  let processBlock !blockIdx !e !anyBlockNz
+        | blockIdx >= 4 = return (e, anyBlockNz)
         | otherwise = do
             let !row = blockIdx `div` 2
                 !col = blockIdx `mod` 2
@@ -993,9 +1030,9 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lam
                 res <- VSM.read residuals (r * 4 + c)
                 let reconstructed = clip255 (fromIntegral pred + fromIntegral res)
                 VSM.write chromaRecon idx reconstructed
-            processBlock (blockIdx + 1) e'
+            processBlock (blockIdx + 1) e' (anyBlockNz || hasNz)
 
-  enc' <- processBlock 0 enc
+  (enc', anyChromaNz) <- processBlock 0 enc False
 
   -- Update aboveNz with bottom row NZ (blocks 2 and 3)
   nz2 <- VSM.read nzGrid 2
@@ -1007,7 +1044,7 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lam
   newLeft0 <- fromIntegral <$> VSM.read nzGrid 1
   newLeft1 <- fromIntegral <$> VSM.read nzGrid 3
 
-  return (enc', newLeft0, newLeft1)
+  return (enc', anyChromaNz, newLeft0, newLeft1)
 
 -- ---------------------------------------------------------------------------
 -- Adaptive QP segmentation

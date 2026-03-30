@@ -87,6 +87,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - Coefficient probability updates (two-pass: gather statistics, cost-benefit analysis, re-encode)
 - Adaptive QP segmentation (4 segments based on macroblock variance, per-segment quantization)
 - Adaptive loop filter strength (SSE-optimized search over filter levels between encoding passes)
+- Macroblock skip mode (all-zero MBs signaled with a single bit, saving DCT partition space)
 - Padding to macroblock boundaries
 
 #### Alpha Encoding
@@ -124,6 +125,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - ~~**Segmentation**~~ - ✅ implemented (adaptive QP: 4 segments by variance, per-segment quantization)
 - ~~**Advanced mode selection**~~ - ✅ implemented (full RDO with trellis quantization for I16/I4/UV mode decisions)
 - ~~**Adaptive loop filter strength**~~ - ✅ implemented (SSE-minimizing search over ±10 levels around default)
+- ~~**Macroblock skip mode**~~ - ✅ implemented (all-zero I16 MBs skip coefficient encoding, saving DCT partition bits)
 
 ### Performance
 - SIMD acceleration

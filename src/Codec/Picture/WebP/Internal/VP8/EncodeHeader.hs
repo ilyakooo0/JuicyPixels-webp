@@ -75,8 +75,9 @@ generateCompressedHeader ::
   Maybe (SegmentInfo, Word8, Word8, Word8) -> -- Segment info + 3 tree probs (Nothing = disabled)
   VU.Vector Word8 -> -- Coefficient probabilities (1056 entries, possibly updated)
   VU.Vector Bool -> -- Which positions to update (1056 flags)
+  Maybe Word8 -> -- Skip mode: Just probSkipFalse to enable, Nothing to disable
   BoolEncoder
-generateCompressedHeader quantIndices filterLevel filterType mSegInfo updatedProbs updateFlags =
+generateCompressedHeader quantIndices filterLevel filterType mSegInfo updatedProbs updateFlags mSkipProb =
   let enc0 = initBoolEncoder
 
       -- Color space and clamping (key frame only)
@@ -120,8 +121,12 @@ generateCompressedHeader quantIndices filterLevel filterType mSegInfo updatedPro
       -- Macroblock skip mode
       -- mb_no_skip_coeff: 0 = skip mode disabled (all MBs have coefficients)
       --                   1 = skip mode enabled (must read prob_skip_false byte)
-      -- For simple encoder, disable skip mode (don't read per-MB skip flags)
-      enc17 = boolWriteLiteral 1 0 enc16 -- mb_no_skip_coeff = 0 (skip mode disabled)
+      enc17 = case mSkipProb of
+        Nothing ->
+          boolWriteLiteral 1 0 enc16 -- mb_no_skip_coeff = 0 (disabled)
+        Just probSkipFalse ->
+          let e1 = boolWriteLiteral 1 1 enc16 -- mb_no_skip_coeff = 1 (enabled)
+           in boolWriteLiteral 8 (fromIntegral probSkipFalse) e1 -- prob_skip_false
    in enc17
 
 -- | Write coefficient probability updates to the compressed header.
