@@ -78,7 +78,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 
 #### VP8 Lossy Encoder
 - RGB to YCbCr color space conversion
-- Macroblock mode selection and intra prediction
+- RDO mode selection (I16/I4/UV) with trellis quantization for accurate cost estimates
 - DCT (Discrete Cosine Transform) for all blocks
 - Coefficient quantization with quality mapping
 - Boolean arithmetic encoding
@@ -86,6 +86,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - Quality parameter (0-100) mapping to quantizer values
 - Coefficient probability updates (two-pass: gather statistics, cost-benefit analysis, re-encode)
 - Adaptive QP segmentation (4 segments based on macroblock variance, per-segment quantization)
+- Adaptive loop filter strength (SSE-optimized search over filter levels between encoding passes)
 - Padding to macroblock boundaries
 
 #### Alpha Encoding
@@ -121,7 +122,8 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 ### VP8 Encoding Optimizations
 - ~~**Coefficient probability updates**~~ - ✅ implemented (two-pass with cost-benefit analysis)
 - ~~**Segmentation**~~ - ✅ implemented (adaptive QP: 4 segments by variance, per-segment quantization)
-- **Advanced mode selection** - currently uses simple heuristics
+- ~~**Advanced mode selection**~~ - ✅ implemented (full RDO with trellis quantization for I16/I4/UV mode decisions)
+- ~~**Adaptive loop filter strength**~~ - ✅ implemented (SSE-minimizing search over ±10 levels around default)
 
 ### Performance
 - SIMD acceleration
@@ -228,6 +230,7 @@ Internal/
 │   ├── EncodeHeader.hs                       -- Frame header encoding
 │   ├── EncodeMode.hs                         -- Mode encoding
 │   ├── ModeSelection.hs                      -- Mode selection heuristics
+│   ├── FilterStrengthSearch.hs               -- Adaptive loop filter strength search
 │   └── CoeffStats.hs                         -- Coefficient probability optimization
 │
 ├── Alpha.hs                                  -- ALPH chunk decoder

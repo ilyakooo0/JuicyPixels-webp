@@ -16,6 +16,7 @@ import Codec.Picture.WebP.Internal.VP8.Dequant
 import Codec.Picture.WebP.Internal.VP8.EncodeCoefficients
 import Codec.Picture.WebP.Internal.VP8.EncodeHeader
 import Codec.Picture.WebP.Internal.VP8.EncodeMode
+import Codec.Picture.WebP.Internal.VP8.FilterStrengthSearch (optimizeFilterStrength)
 import Codec.Picture.WebP.Internal.VP8.IDCT
 import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow)
 import Codec.Picture.WebP.Internal.VP8.ModeSelection
@@ -122,14 +123,23 @@ encodeVP8 img quality = runST $ do
         return (Nothing, dqVec, lams, Nothing)
 
   -- Step 4: Allocate reconstruction buffers (for prediction)
-  yRecon <- VSM.replicate (paddedW * paddedH) 128
-  uRecon <- VSM.replicate ((paddedW `div` 2) * (paddedH `div` 2)) 128
-  vRecon <- VSM.replicate ((paddedW `div` 2) * (paddedH `div` 2)) 128
+  let !ySize = paddedW * paddedH
+      !uvSize = (paddedW `div` 2) * (paddedH `div` 2)
+  yRecon <- VSM.replicate ySize 128
+  uRecon <- VSM.replicate uvSize 128
+  vRecon <- VSM.replicate uvSize 128
 
   -- Step 5: Pass 1 — encode with default probs, collect coefficient statistics
+  --         Also save pre-filter reconstruction for filter strength search
   stats <- newCoeffStats
   let noUpdateFlags = VU.replicate 1056 False
-      compressedHeaderEnc1 = generateCompressedHeader quantIndices (encFilterLevel config) (encFilterType config) mSegHeaderInfo defaultCoeffProbs noUpdateFlags
+      defaultFilterLevel = encFilterLevel config
+      compressedHeaderEnc1 = generateCompressedHeader quantIndices defaultFilterLevel (encFilterType config) mSegHeaderInfo defaultCoeffProbs noUpdateFlags
+
+  -- Allocate pre-filter buffers (capture reconstruction before loop filter)
+  yPreFilter <- VSM.new ySize
+  uPreFilter <- VSM.new uvSize
+  vPreFilter <- VSM.new uvSize
 
   (modeEnc1, coeffEnc1) <-
     encodeMacroblocks
@@ -137,36 +147,50 @@ encodeVP8 img quality = runST $ do
       paddedW paddedH mbRows mbCols
       dequantFactorsVec segLambdas mSegEncInfo defaultCoeffProbs
       compressedHeaderEnc1 initBoolEncoder
-      (encFilterLevel config) (Just stats)
+      defaultFilterLevel (Just stats)
+      (Just (yPreFilter, uPreFilter, vPreFilter))
 
-  -- Step 6: Compute optimal coefficient probabilities from statistics
+  -- Step 6: Adaptive filter strength search
+  optFilterLevel <-
+    if defaultFilterLevel > 0
+      then
+        optimizeFilterStrength
+          yBuf uBuf vBuf yPreFilter uPreFilter vPreFilter
+          paddedW mbRows mbCols defaultFilterLevel
+      else return 0
+
+  -- Step 7: Compute optimal coefficient probabilities from statistics
   optimalProbs <- computeOptimalProbs stats
   (updatedProbs, updateFlags) <- decideUpdates stats optimalProbs
   let hasUpdates = VU.any id updateFlags
+      needsReencode = hasUpdates || optFilterLevel /= defaultFilterLevel
 
-  if not hasUpdates
+  if not needsReencode
     then do
-      -- No beneficial updates: use pass 1 output as-is
+      -- No changes needed: use pass 1 output as-is
       let partition0 = finalizeBoolEncoder modeEnc1
           dctPartition = finalizeBoolEncoder coeffEnc1
           uncompHeader = generateUncompressedHeader width height (B.length partition0)
       return $ uncompHeader <> partition0 <> dctPartition
     else do
-      -- Step 7: Reset reconstruction buffers for pass 2
+      -- Step 8: Reset reconstruction buffers for pass 2
       VSM.set yRecon 128
       VSM.set uRecon 128
       VSM.set vRecon 128
 
-      -- Step 8: Pass 2 — re-encode with optimal probs
-      let compressedHeaderEnc2 = generateCompressedHeader quantIndices (encFilterLevel config) (encFilterType config) mSegHeaderInfo updatedProbs updateFlags
+      -- Step 9: Pass 2 — re-encode with optimal filter level and probs
+      let probs2 = if hasUpdates then updatedProbs else defaultCoeffProbs
+          flags2 = if hasUpdates then updateFlags else noUpdateFlags
+          compressedHeaderEnc2 = generateCompressedHeader quantIndices optFilterLevel (encFilterType config) mSegHeaderInfo probs2 flags2
 
       (modeEnc2, coeffEnc2) <-
         encodeMacroblocks
           yBuf uBuf vBuf yRecon uRecon vRecon
           paddedW paddedH mbRows mbCols
-          dequantFactorsVec segLambdas mSegEncInfo updatedProbs
+          dequantFactorsVec segLambdas mSegEncInfo probs2
           compressedHeaderEnc2 initBoolEncoder
-          (encFilterLevel config) Nothing
+          optFilterLevel Nothing
+          Nothing
 
       let partition0 = finalizeBoolEncoder modeEnc2
           dctPartition = finalizeBoolEncoder coeffEnc2
@@ -193,8 +217,9 @@ encodeMacroblocks ::
   BoolEncoder -> -- Coefficient encoder (DCT partition)
   Int -> -- Filter level for per-row loop filter
   Maybe (CoeffStats s) -> -- Optional coefficient statistics accumulator
+  Maybe (VSM.MVector s Word8, VSM.MVector s Word8, VSM.MVector s Word8) -> -- Pre-filter buffers (save recon before loop filter)
   ST s (BoolEncoder, BoolEncoder)
-encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dqVec segLambdas mSegEncInfo coeffProbs modeEnc coeffEnc filterLevel mStats = do
+encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dqVec segLambdas mSegEncInfo coeffProbs modeEnc coeffEnc filterLevel mStats mPreFilterBufs = do
   -- Allocate above NZ tracking arrays (persist across MB rows)
   aboveNzY <- VSM.replicate (mbCols * 4) (0 :: Word8) -- 4 Y columns per MB
   aboveNzU <- VSM.replicate (mbCols * 2) (0 :: Word8) -- 2 U columns per MB
@@ -206,6 +231,18 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
   let loop !mbY !mbX !mEnc !cEnc !leftNzY0 !leftNzY1 !leftNzY2 !leftNzY3 !leftNzU0 !leftNzU1 !leftNzV0 !leftNzV1 !leftNzDC !leftBM0 !leftBM1 !leftBM2 !leftBM3
         | mbY >= mbRows = return (mEnc, cEnc)
         | mbX >= mbCols = do
+            -- Save pre-filter reconstruction before loop filter modifies it
+            case mPreFilterBufs of
+              Just (yPF, uPF, vPF) -> do
+                let !yRowStart = mbY * 16 * paddedW
+                    !yRowLen = 16 * paddedW
+                    !uvStride = paddedW `div` 2
+                    !uvRowStart = mbY * 8 * uvStride
+                    !uvRowLen = 8 * uvStride
+                VSM.copy (VSM.slice yRowStart yRowLen yPF) (VSM.slice yRowStart yRowLen yRecon)
+                VSM.copy (VSM.slice uvRowStart uvRowLen uPF) (VSM.slice uvRowStart uvRowLen uRecon)
+                VSM.copy (VSM.slice uvRowStart uvRowLen vPF) (VSM.slice uvRowStart uvRowLen vRecon)
+              Nothing -> return ()
             -- Apply per-row loop filter to completed row
             when (filterLevel > 0) $
               applyNormalLoopFilterRow yRecon paddedW uRecon (paddedW `div` 2) vRecon (paddedW `div` 2) mbY mbCols filterLevel
