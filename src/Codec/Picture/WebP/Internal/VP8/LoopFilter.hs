@@ -4,6 +4,7 @@ module Codec.Picture.WebP.Internal.VP8.LoopFilter
   ( applyLoopFilter,
     applySimpleLoopFilterRow,
     applyNormalLoopFilterRow,
+    applyNormalLoopFilterRowSegmented,
   )
 where
 
@@ -13,6 +14,7 @@ import Control.Monad.ST
 import Data.Bits
 import Data.Int
 import qualified Data.Vector.Storable.Mutable as VSM
+import qualified Data.Vector.Unboxed as VU
 import Data.Word
 
 -- | Apply loop filter to reconstructed frame
@@ -569,3 +571,62 @@ normalHSubFast plane stride planeLen x y span eLimit iLimit hevThresh =
             VSM.unsafeWrite plane im1 p0'
             VSM.unsafeWrite plane base q0'
             VSM.unsafeWrite plane ip1 q1'
+
+-- ==========================================================================
+-- Per-segment loop filter (for encoder with adaptive filter levels)
+-- ==========================================================================
+
+-- | Apply normal loop filter to a single MB row with per-segment filter levels.
+-- Each MB uses its segment's effective filter level: baseLevel + segFilterDelta[segId].
+applyNormalLoopFilterRowSegmented ::
+  VSM.MVector s Word8 ->
+  Int ->
+  VSM.MVector s Word8 ->
+  Int ->
+  VSM.MVector s Word8 ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  VU.Vector Int ->
+  VU.Vector Word8 ->
+  ST s ()
+applyNormalLoopFilterRowSegmented yPlane yStride uPlane uStride vPlane vStride mbRow mbCols baseLevel segFilterDeltas segMap = do
+  let !yLen = VSM.length yPlane
+      !uLen = VSM.length uPlane
+      !vLen = VSM.length vPlane
+  normalFilterPlaneRowSeg yPlane yStride yLen mbRow mbCols 16 baseLevel segFilterDeltas segMap
+  normalFilterPlaneRowSeg uPlane uStride uLen mbRow mbCols 8 baseLevel segFilterDeltas segMap
+  normalFilterPlaneRowSeg vPlane vStride vLen mbRow mbCols 8 baseLevel segFilterDeltas segMap
+
+-- | Filter one plane for one MB row with per-segment filter levels.
+normalFilterPlaneRowSeg ::
+  VSM.MVector s Word8 ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  Int ->
+  VU.Vector Int ->
+  VU.Vector Word8 ->
+  ST s ()
+normalFilterPlaneRowSeg plane stride planeLen mbRow mbCols blockSize baseLevel segFilterDeltas segMap =
+  forM_ [0 .. mbCols - 1] $ \mbX -> do
+    let !segId = fromIntegral (segMap VU.! (mbRow * mbCols + mbX))
+        !level = max 0 $ min 63 $ baseLevel + (segFilterDeltas VU.! segId)
+    when (level > 0) $ do
+      let !iLimit = level
+          !mbELimit = 3 * level + 4
+          !subELimit = 3 * level
+          !hevT = if level >= 40 then 2 else if level >= 15 then 1 else 0
+          !bx = mbX * blockSize
+          !by = mbRow * blockSize
+      when (mbX > 0) $
+        normalVMBFast plane stride planeLen bx by blockSize mbELimit iLimit hevT
+      forM_ [4, 8 .. blockSize - 1] $ \dx ->
+        normalVSubFast plane stride planeLen (bx + dx) by blockSize subELimit iLimit hevT
+      when (mbRow > 0) $
+        normalHMBFast plane stride planeLen bx by blockSize mbELimit iLimit hevT
+      forM_ [4, 8 .. blockSize - 1] $ \dy ->
+        normalHSubFast plane stride planeLen bx (by + dy) blockSize subELimit iLimit hevT

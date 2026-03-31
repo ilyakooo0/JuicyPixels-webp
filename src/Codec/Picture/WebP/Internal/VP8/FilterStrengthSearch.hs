@@ -7,11 +7,12 @@ module Codec.Picture.WebP.Internal.VP8.FilterStrengthSearch
   )
 where
 
-import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow)
+import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow, applyNormalLoopFilterRowSegmented)
 import Control.Monad (forM_)
 import Control.Monad.ST
 import Data.Int (Int64)
 import qualified Data.Vector.Storable.Mutable as VSM
+import qualified Data.Vector.Unboxed as VU
 import Data.Word
 
 -- | Find the filter level (0-63) that minimizes distortion against the source.
@@ -33,8 +34,10 @@ optimizeFilterStrength ::
   -- | MB cols
   Int ->
   -- | default filter level
+  Maybe (VU.Vector Int, VU.Vector Word8) ->
+  -- | per-segment filter info: (filter deltas, segment map)
   ST s Int
-optimizeFilterStrength ySrc uSrc vSrc yPF uPF vPF paddedW mbRows mbCols defaultLevel = do
+optimizeFilterStrength ySrc uSrc vSrc yPF uPF vPF paddedW mbRows mbCols defaultLevel mSegFilterInfo = do
   -- SSE at level 0 (no filter) — baseline
   sse0 <- computeFrameSSE ySrc uSrc vSrc yPF uPF vPF
 
@@ -55,7 +58,11 @@ optimizeFilterStrength ySrc uSrc vSrc yPF uPF vPF paddedW mbRows mbCols defaultL
             VSM.copy uScratch uPF
             VSM.copy vScratch vPF
             forM_ [0 .. mbRows - 1] $ \mbRow ->
-              applyNormalLoopFilterRow yScratch paddedW uScratch uvStride vScratch uvStride mbRow mbCols level
+              case mSegFilterInfo of
+                Just (segFD, segMap) ->
+                  applyNormalLoopFilterRowSegmented yScratch paddedW uScratch uvStride vScratch uvStride mbRow mbCols level segFD segMap
+                Nothing ->
+                  applyNormalLoopFilterRow yScratch paddedW uScratch uvStride vScratch uvStride mbRow mbCols level
             sse <- computeFrameSSE ySrc uSrc vSrc yScratch uScratch vScratch
             if sse < bestSSE
               then search (level + 1) level sse

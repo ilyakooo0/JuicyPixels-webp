@@ -18,7 +18,7 @@ import Codec.Picture.WebP.Internal.VP8.EncodeHeader
 import Codec.Picture.WebP.Internal.VP8.EncodeMode
 import Codec.Picture.WebP.Internal.VP8.FilterStrengthSearch (optimizeFilterStrength)
 import Codec.Picture.WebP.Internal.VP8.IDCT
-import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow)
+import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow, applyNormalLoopFilterRowSegmented)
 import Codec.Picture.WebP.Internal.VP8.ModeSelection
 import Codec.Picture.WebP.Internal.VP8.Predict
 import Codec.Picture.WebP.Internal.VP8.Quantize (applySharpen, qualityToYacQi, rdLambdaFromQi, trellisQuantizeBlock)
@@ -107,20 +107,21 @@ encodeVP8 img quality = runST $ do
         variances <- computeMBVariances yBuf paddedW mbRows mbCols
         let (segMap, c0, c1, c2, c3) = classifySegments variances
             (sp0, sp1, sp2) = computeSegmentProbs c0 c1 c2 c3
+            segFilterDeltas = computeSegmentFilterDeltas qi segDeltas
             segInfo =
               SegmentInfo
                 { segmentEnabled = True,
                   segmentUpdateMap = True,
                   segmentAbsoluteMode = False,
                   segmentQuantizer = segDeltas,
-                  segmentFilterStrength = VU.fromList [0, 0, 0, 0],
+                  segmentFilterStrength = segFilterDeltas,
                   segmentTreeProbs = (sp0, sp1, sp2)
                 }
             dqVec = computeDequantFactors quantIndices (Just segInfo)
             lams =
               VU.generate 4 $ \s ->
                 rdLambdaFromQi (max 0 (min 127 (qi + segDeltas VU.! s)))
-        return (Just (segInfo, sp0, sp1, sp2), dqVec, lams, Just (segMap, sp0, sp1, sp2))
+        return (Just (segInfo, sp0, sp1, sp2), dqVec, lams, Just (segMap, sp0, sp1, sp2, segFilterDeltas))
       else do
         let dqVec = computeDequantFactors quantIndices Nothing
             lams = VU.singleton (rdLambdaFromQi qi)
@@ -157,12 +158,15 @@ encodeVP8 img quality = runST $ do
       Nothing
 
   -- Step 6: Adaptive filter strength search
+  let mSegFilterInfo = case mSegEncInfo of
+        Just (segMap, _, _, _, segFD) -> Just (segFD, segMap)
+        Nothing -> Nothing
   optFilterLevel <-
     if defaultFilterLevel > 0
       then
         optimizeFilterStrength
           yBuf uBuf vBuf yPreFilter uPreFilter vPreFilter
-          paddedW mbRows mbCols defaultFilterLevel
+          paddedW mbRows mbCols defaultFilterLevel mSegFilterInfo
       else return 0
 
   -- Step 7: Compute optimal coefficient probabilities from statistics
@@ -227,7 +231,7 @@ encodeMacroblocks ::
   Int -> -- MB rows, cols
   V.Vector DequantFactors -> -- Per-segment dequant factors (length 1 or 4)
   VU.Vector Int -> -- Per-segment RDO lambdas
-  Maybe (VU.Vector Word8, Word8, Word8, Word8) -> -- Segment map + 3 tree probs (Nothing = no segments)
+  Maybe (VU.Vector Word8, Word8, Word8, Word8, VU.Vector Int) -> -- Segment map + 3 tree probs + filter deltas (Nothing = no segments)
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder -> -- Mode encoder (partition 0)
   BoolEncoder -> -- Coefficient encoder (DCT partition)
@@ -263,7 +267,11 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
               Nothing -> return ()
             -- Apply per-row loop filter to completed row
             when (filterLevel > 0) $
-              applyNormalLoopFilterRow yRecon paddedW uRecon (paddedW `div` 2) vRecon (paddedW `div` 2) mbY mbCols filterLevel
+              case mSegEncInfo of
+                Just (segMap, _, _, _, segFD) ->
+                  applyNormalLoopFilterRowSegmented yRecon paddedW uRecon (paddedW `div` 2) vRecon (paddedW `div` 2) mbY mbCols filterLevel segFD segMap
+                Nothing ->
+                  applyNormalLoopFilterRow yRecon paddedW uRecon (paddedW `div` 2) vRecon (paddedW `div` 2) mbY mbCols filterLevel
             -- New row: reset left NZ and left B modes to 0
             loop (mbY + 1) 0 mEnc cEnc skipCount 0 0 0 0 0 0 0 0 0 0 0 0 0
         | otherwise = do
@@ -271,7 +279,7 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
             let (!segDq, !segLam, !mEncSeg) = case mSegEncInfo of
                   Nothing ->
                     (dqVec V.! 0, segLambdas VU.! 0, mEnc)
-                  Just (segMap, sp0, sp1, sp2) ->
+                  Just (segMap, sp0, sp1, sp2, _) ->
                     let !s = fromIntegral (segMap VU.! (mbY * mbCols + mbX))
                      in (dqVec V.! s, segLambdas VU.! s, encodeSegmentId s sp0 sp1 sp2 mEnc)
 
@@ -1129,6 +1137,22 @@ computeSegmentDeltas qi
           !d0' = max (negate qi) d0
           !d3' = min (127 - qi) d3
        in VU.fromList [d0', d1, d2, d3']
+
+-- | Compute per-segment filter strength deltas from quantizer deltas.
+-- Each segment's filter level should match its effective quantization:
+-- since base filter level ≈ qi/2, the filter delta tracks the QP delta.
+-- Coarser quantization (higher qi) → more blocking → stronger filter.
+-- Finer quantization (lower qi) → less blocking → weaker filter.
+computeSegmentFilterDeltas :: Int -> VU.Vector Int -> VU.Vector Int
+computeSegmentFilterDeltas qi qDeltas =
+  let !baseLevel = min 63 $ max 0 $ qi `div` 2
+   in VU.map
+        ( \qd ->
+            let !effectiveQi = max 0 $ min 127 $ qi + qd
+                !desiredLevel = min 63 $ max 0 $ effectiveQi `div` 2
+             in max (-63) $ min 63 $ desiredLevel - baseLevel
+        )
+        qDeltas
 
 -- | Compute 3 segment tree probabilities from segment counts.
 -- Balanced tree (matching libwebp): prob[0] splits {seg0,seg1} vs {seg2,seg3},
