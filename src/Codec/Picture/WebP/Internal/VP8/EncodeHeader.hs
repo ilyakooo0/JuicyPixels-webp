@@ -104,12 +104,12 @@ generateCompressedHeader quantIndices filterLevel filterType mSegInfo updatedPro
       -- Quantization indices
       enc9 = boolWriteLiteral 7 (fromIntegral $ qiYacQi quantIndices) enc8 -- base_qi (0-127)
 
-      -- Delta flags (all 0 for simple encoder)
-      enc10 = boolWriteLiteral 1 0 enc9 -- y_dc_delta_present = 0
-      enc11 = boolWriteLiteral 1 0 enc10 -- y2_dc_delta_present = 0
-      enc12 = boolWriteLiteral 1 0 enc11 -- y2_ac_delta_present = 0
-      enc13 = boolWriteLiteral 1 0 enc12 -- uv_dc_delta_present = 0
-      enc14 = boolWriteLiteral 1 0 enc13 -- uv_ac_delta_present = 0
+      -- Quantization deltas: each is 1-bit present flag, then 4-bit magnitude + 1-bit sign
+      enc10 = writeQuantDelta (qiYdcDelta quantIndices) enc9
+      enc11 = writeQuantDelta (qiY2dcDelta quantIndices) enc10
+      enc12 = writeQuantDelta (qiY2acDelta quantIndices) enc11
+      enc13 = writeQuantDelta (qiUvdcDelta quantIndices) enc12
+      enc14 = writeQuantDelta (qiUvacDelta quantIndices) enc13
 
       -- Refresh entropy probabilities
       enc15 = boolWriteLiteral 1 1 enc14 -- refresh_entropy_probs = 1 (use defaults)
@@ -154,6 +154,14 @@ writeCoeffProbUpdates updatedProbs updateFlags enc =
                     let e1 = boolWrite updateProb False e
                      in loop i j k (l + 1) e1
    in loop 0 0 0 0 enc
+
+-- | Write a quantization delta: 1-bit present flag, then 4-bit magnitude + 1-bit sign.
+writeQuantDelta :: Int -> BoolEncoder -> BoolEncoder
+writeQuantDelta 0 enc = boolWriteLiteral 1 0 enc -- not present
+writeQuantDelta delta enc =
+  let enc1 = boolWriteLiteral 1 1 enc -- present
+      enc2 = boolWriteLiteral 4 (fromIntegral (abs delta)) enc1 -- magnitude (4 bits)
+   in boolWriteLiteral 1 (if delta < 0 then 1 else 0) enc2 -- sign (1=negative)
 
 -- | Encode the full segmentation header into the compressed header.
 -- Layout per RFC 6386 Section 9.3:

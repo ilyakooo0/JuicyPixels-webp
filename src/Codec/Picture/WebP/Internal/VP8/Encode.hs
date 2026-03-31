@@ -80,14 +80,18 @@ encodeVP8 img quality = runST $ do
   -- Step 2: Set up encoder configuration
   let config = defaultEncodeConfig quality
       qi = qualityToYacQi quality
+      -- Negative UV delta gives chroma finer quantization than luma.
+      -- Human vision is more sensitive to chroma shifts than luma detail,
+      -- so this improves perceived quality at minimal bitrate cost.
+      !uvDelta = negate (max 0 (min 15 (qi `div` 8)))
       quantIndices =
         QuantIndices
           { qiYacQi = qi,
             qiYdcDelta = 0,
             qiY2dcDelta = 0,
             qiY2acDelta = 0,
-            qiUvdcDelta = 0,
-            qiUvacDelta = 0
+            qiUvdcDelta = uvDelta,
+            qiUvacDelta = uvDelta
           }
 
   -- Step 3: Adaptive QP segmentation analysis
