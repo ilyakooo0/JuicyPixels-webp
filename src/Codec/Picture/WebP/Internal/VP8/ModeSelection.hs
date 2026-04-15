@@ -15,7 +15,7 @@ import Codec.Picture.WebP.Internal.VP8.DCT (fdct4x4, fwht4x4)
 import Codec.Picture.WebP.Internal.VP8.Dequant (DequantFactors, dequantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.IDCT (idct4x4, iwht4x4)
 import Codec.Picture.WebP.Internal.VP8.Predict
-import Codec.Picture.WebP.Internal.VP8.Quantize (trellisQuantizeBlock)
+import Codec.Picture.WebP.Internal.VP8.Quantize (blockOrigVar256, ssimC2Scaled, ssimTrellisScale, trellisQuantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.RateCost
   ( bPredYModeCost,
     bSubModeCost,
@@ -378,7 +378,7 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
             -- Y2: WHT → trellis quantize → estimate bit cost → dequant → inverse WHT
             fwht4x4 y2DCs
             let !dcCtx = min 2 (aDcNz + lDcNz)
-            _ <- trellisQuantizeBlock dqFactors 1 y2DCs coeffProbs dcCtx 0
+            _ <- trellisQuantizeBlock dqFactors 1 y2DCs coeffProbs dcCtx 0 256
             !y2BitCost <- coeffBlockCost y2DCs coeffProbs 1 dcCtx 0
             dequantizeBlock dqFactors 1 y2DCs
             reconDCsV <- iwht4x4 y2DCs
@@ -420,7 +420,9 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
                                 loadCoeffs (i + 1)
                       loadCoeffs 0
                       VSM.unsafeWrite residuals 0 0
-                      !hasNz <- trellisQuantizeBlock dqFactors 0 residuals coeffProbs ctx 1
+                      !var256 <- blockOrigVar256 yOrig stride (mbX + subX) (mbY + subY)
+                      let !ssScale = ssimTrellisScale var256
+                      !hasNz <- trellisQuantizeBlock dqFactors 0 residuals coeffProbs ctx 1 ssScale
                       !blockBitCost <- coeffBlockCost residuals coeffProbs 0 ctx 1
                       VSM.unsafeWrite nzGrid bi (if hasNz then 1 else 0)
                       dequantizeBlock dqFactors 0 residuals
@@ -502,6 +504,10 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
               else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 1)
             let !ctx = min 2 (aboveNz + leftNz)
 
+            -- SSIM trellis scale for this sub-block (invariant across modes)
+            !bpVar256 <- blockOrigVar256 yOrig stride subX subY
+            let !bpSsScale = ssimTrellisScale bpVar256
+
             -- Try all 10 modes, pick best by RD cost
             let tryMode !m !bestMode !bestCost
                   | m > 9 = return (bestMode, bestCost)
@@ -525,7 +531,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                       fillRes 0
 
                       fdct4x4 residuals
-                      _ <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0
+                      _ <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 bpSsScale
                       !blockBitCost <- coeffBlockCost residuals coeffProbs 3 ctx 0
                       dequantizeBlock dqFactors 3 residuals
                       idct4x4 residuals
@@ -555,7 +561,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                       fillCol 0
             fillRes 0
             fdct4x4 residuals
-            !hasNz <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0
+            !hasNz <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 bpSsScale
             dequantizeBlock dqFactors 3 residuals
             idct4x4 residuals
 
@@ -651,7 +657,7 @@ trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda c
                       fillCol 0
             fillRes 0
             fdct4x4 residuals
-            _ <- trellisQuantizeBlock dqFactors 2 residuals coeffProbs 0 0
+            _ <- trellisQuantizeBlock dqFactors 2 residuals coeffProbs 0 0 256
             !blockBitCost <- coeffBlockCost residuals coeffProbs 2 0 0
             dequantizeBlock dqFactors 2 residuals
             idct4x4 residuals
@@ -662,13 +668,6 @@ trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda c
 -- ---------------------------------------------------------------------------
 -- RDO helpers
 -- ---------------------------------------------------------------------------
-
--- | SSIM structural masking constant.
--- C2 = (K2 * L)^2 where K2 = 0.03, L = 255; scaled by 256 (block size N=16)
--- to align with the 256-scaled variance: var256 = N * sum(x^2) - sum(x)^2.
-ssimC2Scaled :: Int
-ssimC2Scaled = 14982
-{-# INLINE ssimC2Scaled #-}
 
 -- | Psy-visual RD strength for luma mode selection.
 -- Penalizes texture energy loss (variance flattening) in reconstructed blocks.

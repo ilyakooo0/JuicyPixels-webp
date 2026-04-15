@@ -7,6 +7,9 @@ module Codec.Picture.WebP.Internal.VP8.Quantize
     applySharpen,
     qualityToYacQi,
     rdModeLambda,
+    ssimC2Scaled,
+    blockOrigVar256,
+    ssimTrellisScale,
   )
 where
 
@@ -213,6 +216,50 @@ kWeightTrellis =
     ]
 
 -- ---------------------------------------------------------------------------
+-- SSIM-aware trellis distortion scaling
+-- ---------------------------------------------------------------------------
+
+-- | SSIM structural masking constant.
+-- C2 = (K2 * L)^2 where K2 = 0.03, L = 255; scaled by 256 (block size N=16)
+-- to align with the 256-scaled variance: var256 = N * sum(x^2) - sum(x)^2.
+ssimC2Scaled :: Int
+ssimC2Scaled = 14982
+{-# INLINE ssimC2Scaled #-}
+
+-- | Compute 256-scaled variance of a 4x4 block from a pixel buffer.
+-- var256 = 16 * Σ(x²) - (Σx)²  (always ≥ 0)
+-- Used to derive SSIM trellis scale for content-adaptive quantization.
+{-# INLINE blockOrigVar256 #-}
+blockOrigVar256 :: VSM.MVector s Word8 -> Int -> Int -> Int -> ST s Int
+blockOrigVar256 buf stride bx by = do
+  let go !r !sX !sX2
+        | r >= 4 = return (16 * sX2 - sX * sX)
+        | otherwise = do
+            let goC !c !sx !sx2
+                  | c >= 4 = go (r + 1) sx sx2
+                  | otherwise = do
+                      !v <- fromIntegral <$> VSM.unsafeRead buf ((by + r) * stride + (bx + c))
+                      goC (c + 1) (sx + v) (sx2 + v * v)
+            goC 0 sX sX2
+  go 0 0 0
+
+-- | Compute SSIM-based trellis distortion scale from block variance.
+-- Returns a value in [192, 256] where 256 = flat (no masking) and lower values
+-- indicate textured regions where quantization noise is perceptually masked.
+-- Formula: scale = 256 * C2 / (var256 + C2), clamped to >= 192.
+--
+-- The floor at 192 (75% of baseline) prevents over-masking of high-contrast
+-- structured patterns (e.g. checkerboards) where the pure SSIM formula would
+-- collapse to ~0 and cause the trellis to zero all coefficients. This keeps
+-- the gain in textured regions modest (up to 25% bit savings) while ensuring
+-- that structurally important coefficients are always preserved.
+{-# INLINE ssimTrellisScale #-}
+ssimTrellisScale :: Int -> Int
+ssimTrellisScale !var256 =
+  let !raw = (256 * ssimC2Scaled) `div` (var256 + ssimC2Scaled)
+   in max 192 raw
+
+-- ---------------------------------------------------------------------------
 -- Trellis quantization
 -- ---------------------------------------------------------------------------
 
@@ -242,8 +289,9 @@ trellisQuantizeBlock ::
   VU.Vector Word8 -> -- coefficient probabilities (1056 entries)
   Int -> -- initial context (0, 1, or 2)
   Int -> -- start position (0 or 1)
+  Int -> -- SSIM trellis scale (256 = no masking; lower = more masking in textured regions)
   ST s Bool
-trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startPos = do
+trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startPos !ssimScale = do
   let -- Quantization steps per position
       !qDC = fromIntegral (case blockType of
         1 -> dqY2DC factors; 2 -> dqUVDC factors; 3 -> dqYDC factors; _ -> dqYDC factors) :: Int
@@ -264,6 +312,8 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
         1 -> avgQ * avgQ `div` 4       -- I16 Y2:   Q²/4
         2 -> 2 * avgQ * avgQ           -- UV:       2*Q²
         _ -> 7 * avgQ * avgQ `div` 8)  -- I4 Y:     7*Q²/8
+      -- SSIM distortion scale (replaces fixed RD_DISTO_MULT = 256)
+      !ssI64 = fromIntegral ssimScale :: Int64
       -- Sentinel for dead trellis nodes (large but won't overflow on addition)
       !dead = maxBound `div` 4 :: Int64
 
@@ -335,10 +385,10 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
                 let {-# INLINE evalCand #-}
                     evalCand !lev =
                       let -- Distortion delta relative to all-zero baseline, scaled by
-                          -- RD_DISTO_MULT = 256 to match libwebp's rate/distortion balance
+                          -- SSIM-weighted RD_DISTO_MULT (replaces fixed 256)
                           !errI = fromIntegral (ac - lev * q) :: Int64
                           !acI = fromIntegral ac :: Int64
-                          !dd = 256 * w * (errI * errI - acI * acI)
+                          !dd = ssI64 * w * (errI * errI - acI * acI)
                           -- Rate cost from predecessor 0
                           !pi0 = blockType * 264 + band * 33 + pc0 * 11
                           !r0 = trellisLevelCost coeffProbs pi0 pc0 lev

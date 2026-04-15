@@ -21,7 +21,7 @@ import Codec.Picture.WebP.Internal.VP8.IDCT
 import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow, applyNormalLoopFilterRowSegmented)
 import Codec.Picture.WebP.Internal.VP8.ModeSelection
 import Codec.Picture.WebP.Internal.VP8.Predict
-import Codec.Picture.WebP.Internal.VP8.Quantize (qualityToYacQi, rdModeLambda, trellisQuantizeBlock)
+import Codec.Picture.WebP.Internal.VP8.Quantize (blockOrigVar256, qualityToYacQi, rdModeLambda, ssimTrellisScale, trellisQuantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad (forM_, when)
 import Control.Monad.ST
@@ -744,7 +744,7 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs 
 
   -- Quantize Y2 (trellis-optimized)
   let !dcCtx = min 2 (aboveDcNz + leftDcNz)
-  _ <- trellisQuantizeBlock dequantFactors 1 y2DCs coeffProbs dcCtx 0
+  _ <- trellisQuantizeBlock dequantFactors 1 y2DCs coeffProbs dcCtx 0 256
 
   -- ENCODE Y2 FIRST
   -- blockType=1 for Y2 (i16-DC per libwebp convention)
@@ -808,9 +808,11 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs 
             -- DC was already extracted for Y2, clear it
             VSM.write residuals 0 0
 
-            -- Trellis-quantize AC coefficients
+            -- Trellis-quantize AC coefficients (SSIM-weighted distortion)
             let !ctx = min 2 (aboveNz + leftNz)
-            _ <- trellisQuantizeBlock dequantFactors 0 residuals coeffProbs ctx 1
+            !yVar256 <- blockOrigVar256 yOrig stride (x + col * 4) (y + row * 4)
+            let !ySsScale = ssimTrellisScale yVar256
+            _ <- trellisQuantizeBlock dequantFactors 0 residuals coeffProbs ctx 1 ySsScale
 
             -- Save quantized values for reconstruction (avoid double-quantization)
             forM_ [0 .. 15] $ \i -> do
@@ -960,8 +962,10 @@ encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda coef
                 else fromIntegral <$> VSM.read nzGrid (row * 4 + col - 1)
             let !ctx = min 2 (aboveNz + leftNz)
 
-            -- Trellis-quantize (blockType=3: Y full with DC)
-            _ <- trellisQuantizeBlock dequantFactors 3 residuals coeffProbs ctx 0
+            -- Trellis-quantize (blockType=3: Y full with DC, SSIM-weighted)
+            !bpVar256 <- blockOrigVar256 yOrig stride (x + subX) (y + subY)
+            let !bpSsScale = ssimTrellisScale bpVar256
+            _ <- trellisQuantizeBlock dequantFactors 3 residuals coeffProbs ctx 0 bpSsScale
 
             -- Encode coefficients (blockType=3 for i4-AC, startPos=0 to include DC)
             (e', hasNz) <- encodeCoefficients residuals coeffProbs 3 ctx 0 e
@@ -1080,7 +1084,7 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lam
             fdct4x4 residuals
 
             -- Trellis-quantize (always use type 2 = UV quant for both U and V)
-            _ <- trellisQuantizeBlock dequantFactors 2 residuals coeffProbs ctx 0
+            _ <- trellisQuantizeBlock dequantFactors 2 residuals coeffProbs ctx 0 256
 
             -- Encode coefficients with NZ context
             (e', hasNz) <- encodeCoefficients residuals coeffProbs coeffBlockType ctx 0 e
