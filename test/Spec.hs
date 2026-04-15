@@ -31,7 +31,7 @@ import qualified TransformSpec
 import qualified VP8EncodeSpec
 
 main :: IO ()
-main = hspec $ do
+main = hspec $ parallel $ do
   -- Low-level component tests
   describe "BitReader" BitReaderSpec.spec
   describe "BitWriter" BitWriterSpec.spec

@@ -1073,8 +1073,11 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lam
 -- ---------------------------------------------------------------------------
 
 -- | Compute coding complexity for a single 16x16 macroblock.
--- Uses minimum SAD across DC, H, and V predictions to estimate
--- coding difficulty. Lower score = smoother = easier to predict.
+-- Uses per-sub-block SAD analysis to distinguish edges from texture:
+--   - Edges have concentrated prediction errors (few sub-blocks dominate)
+--     → reduced alpha → assigned to finer-QP segments
+--   - Texture has spread prediction errors (many sub-blocks contribute)
+--     → full alpha → assigned to coarser-QP segments (errors are masked)
 {-# INLINE computeMBAlpha #-}
 computeMBAlpha :: VSM.MVector s Word8 -> Int -> Int -> Int -> ST s Int
 computeMBAlpha buf stride bx by = do
@@ -1095,17 +1098,59 @@ computeMBAlpha buf stride bx by = do
             !px <- fromIntegral <$> VSM.unsafeRead buf ((by + r) * stride + (bx + c))
             goMean (i + 1) (s + px)
   !dcPred <- goMean 0 (0 :: Int)
-  -- Pass 2: compute SAD for DC, H, V predictions
-  let goSAD !i !sDC !sH !sV
-        | i >= 256 = return $! min sDC (min sH sV)
+  -- Pass 2: compute per-sub-block SADs for DC, H, V predictions
+  -- Each macroblock has 16 sub-blocks (4x4 pixels each)
+  subSadDC <- VUM.replicate 16 (0 :: Int)
+  subSadH <- VUM.replicate 16 (0 :: Int)
+  subSadV <- VUM.replicate 16 (0 :: Int)
+  let goSAD !i
+        | i >= 256 = return ()
         | otherwise = do
             let !r = i `shiftR` 4
                 !c = i .&. 15
+                !blk = (r `shiftR` 2) `shiftL` 2 + (c `shiftR` 2)
             !px <- fromIntegral <$> VSM.unsafeRead buf ((by + r) * stride + (bx + c))
             !hRef <- VUM.unsafeRead firstCol r
             !vRef <- VUM.unsafeRead firstRow c
-            goSAD (i + 1) (sDC + abs (px - dcPred)) (sH + abs (px - hRef)) (sV + abs (px - vRef))
-  goSAD 0 0 0 0
+            VUM.unsafeModify subSadDC (+ abs (px - dcPred)) blk
+            VUM.unsafeModify subSadH (+ abs (px - hRef)) blk
+            VUM.unsafeModify subSadV (+ abs (px - vRef)) blk
+            goSAD (i + 1)
+  goSAD 0
+  -- Sum per-mode totals
+  let sumVec !v = do
+        let go !i !acc
+              | i >= 16 = return acc
+              | otherwise = do
+                  !x <- VUM.unsafeRead v i
+                  go (i + 1) (acc + x)
+        go 0 0
+  !totalDC <- sumVec subSadDC
+  !totalH <- sumVec subSadH
+  !totalV <- sumVec subSadV
+  -- Find best prediction mode
+  let !bestTotal = min totalDC (min totalH totalV)
+  if bestTotal == 0
+    then return 0
+    else do
+      let !bestSubs
+            | totalDC <= totalH && totalDC <= totalV = subSadDC
+            | totalH <= totalV = subSadH
+            | otherwise = subSadV
+      -- Count "active" sub-blocks: those with SAD above half the mean.
+      -- Edges: few active (concentrated errors) → lower effective alpha
+      -- Texture: many active (spread errors) → full alpha
+      let !thresh = max 1 (bestTotal `div` 32)
+      let countActive !i !cnt
+            | i >= 16 = return cnt
+            | otherwise = do
+                !s <- VUM.unsafeRead bestSubs i
+                countActive (i + 1) (if s >= thresh then cnt + 1 else cnt)
+      !numActive <- countActive 0 (0 :: Int)
+      -- Scale alpha by texture ratio:
+      --   numActive=0 (pure edge): alpha = bestTotal * 16/32 = bestTotal/2
+      --   numActive=16 (pure texture): alpha = bestTotal * 32/32 = bestTotal
+      return $! bestTotal * (16 + numActive) `div` 32
 
 -- | Compute per-MB complexity scores for all macroblocks.
 computeMBAlphas ::
@@ -1128,15 +1173,15 @@ computeMBAlphas yBuf stride mbRows mbCols = do
   go 0
 
 -- | Compute per-MB activity weights for perceptual RDO lambda modulation.
--- Returns 8.8 fixed-point weights (256 = 1.0): smooth MBs get higher weight
--- (lower effective lambda → preserve quality), busy MBs get lower weight
+-- Returns 8.8 fixed-point weights (256 = 1.0): smooth MBs get lower weight
+-- (lower effective lambda → preserve quality), busy MBs get higher weight
 -- (higher effective lambda → accept more distortion where it's masked).
 computeActivityWeights :: VU.Vector Int -> Int -> VU.Vector Int
 computeActivityWeights alphas mbCount
   | mbCount == 0 = VU.empty
   | otherwise =
       let !avgAlpha = max 1 (VU.foldl' (+) 0 alphas `div` mbCount)
-       in VU.map (\a -> max 128 $ min 512 $ (256 * avgAlpha) `div` max 1 a) alphas
+       in VU.map (\a -> max 128 $ min 512 $ (256 * a) `div` max 1 avgAlpha) alphas
 
 -- | Classify macroblocks into 4 segments using k-means clustering and compute
 -- adaptive QI deltas from centroid positions (Spatial Noise Shaping).
