@@ -426,7 +426,7 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
                       dequantizeBlock dqFactors 0 residuals
                       VSM.unsafeWrite residuals 0 (reconDCsV VS.! bi)
                       idct4x4 residuals
-                      !blockSSE <- computeBlockSSEM yOrig predBuf residuals stride (mbX + subX) (mbY + subY)
+                      !blockSSE <- computeBlockSSEM yOrig predBuf residuals stride (mbX + subX) (mbY + subY) psyRdStr
                       processBlock (bi + 1) (sse + blockSSE) (rateCost + blockBitCost)
 
             processBlock 0 0 y2BitCost
@@ -529,7 +529,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                       !blockBitCost <- coeffBlockCost residuals coeffProbs 3 ctx 0
                       dequantizeBlock dqFactors 3 residuals
                       idct4x4 residuals
-                      !sse <- computeBlockSSEM yOrig yRecon residuals stride subX subY
+                      !sse <- computeBlockSSEM yOrig yRecon residuals stride subX subY psyRdStr
 
                       let !modeBitCost = bSubModeCost aboveMode leftMode m
                           !cost = sse + (lambda * (blockBitCost + modeBitCost)) `div` 256
@@ -655,7 +655,7 @@ trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda c
             !blockBitCost <- coeffBlockCost residuals coeffProbs 2 0 0
             dequantizeBlock dqFactors 2 residuals
             idct4x4 residuals
-            !blockSSE <- computeBlockSSEM chromaOrig predBuf residuals stride (x + subX) (y + subY)
+            !blockSSE <- computeBlockSSEM chromaOrig predBuf residuals stride (x + subX) (y + subY) 0
             processBlock (bi + 1) (sse + blockSSE) (rate + blockBitCost)
   processBlock 0 0 0
 
@@ -670,11 +670,22 @@ ssimC2Scaled :: Int
 ssimC2Scaled = 14982
 {-# INLINE ssimC2Scaled #-}
 
--- | Compute SSIM-weighted distortion for one 4x4 block.
--- Uses the SSIM structural term to mask errors in textured regions:
---   D = SSE * C2 / (σ²_orig_scaled + C2)
--- In flat regions (σ² ≈ 0): D ≈ SSE (full penalty, errors are visible)
--- In textured regions (large σ²): D << SSE (masked, errors blend into texture)
+-- | Psy-visual RD strength for luma mode selection.
+-- Penalizes texture energy loss (variance flattening) in reconstructed blocks.
+-- Counteracts SSIM masking which hides quality loss in textured regions,
+-- biasing toward modes that preserve detail (e.g., I4 over I16).
+-- Units: distortion += psyRdStr * energyLoss / 4096.
+psyRdStr :: Int
+psyRdStr = 8
+{-# INLINE psyRdStr #-}
+
+-- | Compute SSIM-weighted distortion + psy-visual penalty for one 4x4 block.
+-- SSIM structural term masks errors in textured regions:
+--   D_ssim = SSE * C2 / (σ²_orig_scaled + C2)
+-- Psy-visual term penalizes texture energy loss (variance flattening):
+--   D_psy = psyStr * max(0, origVar - reconVar) / 4096
+-- This counteracts SSIM over-masking in textured regions where quantization
+-- flattens detail that humans still perceive.
 {-# INLINE computeBlockSSEM #-}
 computeBlockSSEM ::
   VSM.MVector s Word8 -> -- Original pixels
@@ -683,13 +694,14 @@ computeBlockSSEM ::
   Int -> -- Stride
   Int -> -- X position
   Int -> -- Y position
+  Int -> -- Psy-visual strength (0 to disable, e.g., for chroma)
   ST s Int
-computeBlockSSEM orig predBuf idctOut stride x y = do
-  let go !r !sse !sumO !sumO2
-        | r >= 4 = return (sse, sumO, sumO2)
+computeBlockSSEM orig predBuf idctOut stride x y psyStr = do
+  let go !r !sse !sumO !sumO2 !sumR !sumR2
+        | r >= 4 = return (sse, sumO, sumO2, sumR, sumR2)
         | otherwise = do
-            let goC !c !s !sO !sO2
-                  | c >= 4 = go (r + 1) s sO sO2
+            let goC !c !s !sO !sO2 !sR !sR2
+                  | c >= 4 = go (r + 1) s sO sO2 sR sR2
                   | otherwise = do
                       let !idx = (y + r) * stride + (x + c)
                       !o <- VSM.unsafeRead orig idx
@@ -697,13 +709,21 @@ computeBlockSSEM orig predBuf idctOut stride x y = do
                       !res <- VSM.unsafeRead idctOut (r * 4 + c)
                       let !oi = fromIntegral o :: Int
                           !recon = clip255 (fromIntegral p + fromIntegral res)
-                          !diff = oi - fromIntegral recon
-                      goC (c + 1) (s + diff * diff) (sO + oi) (sO2 + oi * oi)
-            goC 0 sse sumO sumO2
-  (!sse, !sumOrig, !sumOrigSq) <- go 0 0 0 0
+                          !ri = fromIntegral recon :: Int
+                          !diff = oi - ri
+                      goC (c + 1) (s + diff * diff) (sO + oi) (sO2 + oi * oi) (sR + ri) (sR2 + ri * ri)
+            goC 0 sse sumO sumO2 sumR sumR2
+  (!sse, !sumOrig, !sumOrigSq, !sumRecon, !sumReconSq) <- go 0 0 0 0 0 0
   -- var256 = 16 * Σ(x²) - (Σx)²  (= 256 * block variance, always ≥ 0)
   let !var256 = 16 * sumOrigSq - sumOrig * sumOrig
       !c2 = ssimC2Scaled
-      -- D = SSE * C2 / (var256 + C2); intermediate fits in Int on 64-bit
-      !distortion = sse * c2 `div` (var256 + c2)
-  return distortion
+      -- D_ssim = SSE * C2 / (var256 + C2); intermediate fits in Int on 64-bit
+      !ssimDist = sse * c2 `div` (var256 + c2)
+      -- Psy-visual penalty: penalize variance loss (texture flattening)
+      !psyPenalty
+        | psyStr == 0 = 0
+        | otherwise =
+            let !reconVar256 = 16 * sumReconSq - sumRecon * sumRecon
+                !energyLoss = max 0 (var256 - reconVar256)
+             in (psyStr * energyLoss) `div` 4096
+  return (ssimDist + psyPenalty)
