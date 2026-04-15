@@ -179,6 +179,25 @@ applySharpen factors blockType coeffs
   | otherwise = return ()
 
 -- ---------------------------------------------------------------------------
+-- Trellis distortion weights
+-- ---------------------------------------------------------------------------
+
+-- | Frequency-dependent distortion weights for trellis quantization.
+-- Indexed by raster position (0-15) in a 4x4 block. Weights decrease with
+-- Manhattan distance from DC, so low-frequency errors (visible as blocking
+-- or color shifts) are penalized more heavily than high-frequency errors
+-- (less visible noise). From libwebp kWeightTrellis, scaled by 16.
+-- Average weight ≈ 251 (close to the original uniform weight of 256).
+kWeightTrellis :: VU.Vector Int
+kWeightTrellis =
+  VU.fromList
+    [ 480, 432, 304, 176,
+      432, 304, 176, 176,
+      304, 176, 176, 176,
+      176, 176, 176, 176
+    ]
+
+-- ---------------------------------------------------------------------------
 -- Trellis quantization
 -- ---------------------------------------------------------------------------
 
@@ -270,6 +289,9 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
                     !q = if pos == 0 && blockType /= 0 then qDC else qAC
                     !l0 = if q == 0 then 0 else ac `div` q
                     !band = coeffBands VU.! pos
+                    -- Frequency-dependent distortion weight: DC/low-freq errors
+                    -- cost more than high-freq errors (perceptual weighting)
+                    !w = fromIntegral (kWeightTrellis VU.! zi) :: Int64
 
                 VUM.unsafeWrite level0Arr pos l0
                 VUM.unsafeWrite signArr pos sgn
@@ -280,7 +302,7 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
                       let -- Distortion delta relative to all-zero baseline
                           !errI = fromIntegral (ac - lev * q) :: Int64
                           !acI = fromIntegral ac :: Int64
-                          !dd = 256 * (errI * errI - acI * acI)
+                          !dd = w * (errI * errI - acI * acI)
                           -- Rate cost from predecessor 0
                           !pi0 = blockType * 264 + band * 33 + pc0 * 11
                           !r0 = trellisLevelCost coeffProbs pi0 pc0 lev
