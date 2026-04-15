@@ -94,34 +94,34 @@ encodeVP8 img quality = runST $ do
             qiUvacDelta = uvDelta
           }
 
-  -- Step 3: Adaptive QP segmentation analysis
-  let segDeltas = computeSegmentDeltas qi
-      useSegmentation =
-        encUseSegmentation config
-          && VU.any (/= 0) segDeltas
-          && mbRows * mbCols >= 4
-
+  -- Step 3: Spatial Noise Shaping (SNS) segmentation
   (mSegHeaderInfo, dequantFactorsVec, segLambdas, mSegEncInfo) <-
-    if useSegmentation
+    if encUseSegmentation config && qi >= 8 && mbRows * mbCols >= 4
       then do
-        variances <- computeMBVariances yBuf paddedW mbRows mbCols
-        let (segMap, c0, c1, c2, c3) = classifySegments variances
-            (sp0, sp1, sp2) = computeSegmentProbs c0 c1 c2 c3
-            segFilterDeltas = computeSegmentFilterDeltas qi segDeltas
-            segInfo =
-              SegmentInfo
-                { segmentEnabled = True,
-                  segmentUpdateMap = True,
-                  segmentAbsoluteMode = False,
-                  segmentQuantizer = segDeltas,
-                  segmentFilterStrength = segFilterDeltas,
-                  segmentTreeProbs = (sp0, sp1, sp2)
-                }
-            dqVec = computeDequantFactors quantIndices (Just segInfo)
-            lams =
-              VU.generate 4 $ \s ->
-                rdLambdaFromQi (max 0 (min 127 (qi + segDeltas VU.! s)))
-        return (Just (segInfo, sp0, sp1, sp2), dqVec, lams, Just (segMap, sp0, sp1, sp2, segFilterDeltas))
+        alphas <- computeMBAlphas yBuf paddedW mbRows mbCols
+        let (!segMap, !segDeltas, !c0, !c1, !c2, !c3) = classifySegmentsSNS alphas qi
+        if not (VU.any (/= 0) segDeltas)
+          then do
+            let dqVec = computeDequantFactors quantIndices Nothing
+                lams = VU.singleton (rdLambdaFromQi qi)
+            return (Nothing, dqVec, lams, Nothing)
+          else do
+            let (sp0, sp1, sp2) = computeSegmentProbs c0 c1 c2 c3
+                segFilterDeltas = computeSegmentFilterDeltas qi segDeltas
+                segInfo =
+                  SegmentInfo
+                    { segmentEnabled = True,
+                      segmentUpdateMap = True,
+                      segmentAbsoluteMode = False,
+                      segmentQuantizer = segDeltas,
+                      segmentFilterStrength = segFilterDeltas,
+                      segmentTreeProbs = (sp0, sp1, sp2)
+                    }
+                dqVec = computeDequantFactors quantIndices (Just segInfo)
+                lams =
+                  VU.generate 4 $ \s ->
+                    rdLambdaFromQi (max 0 (min 127 (qi + segDeltas VU.! s)))
+            return (Just (segInfo, sp0, sp1, sp2), dqVec, lams, Just (segMap, sp0, sp1, sp2, segFilterDeltas))
       else do
         let dqVec = computeDequantFactors quantIndices Nothing
             lams = VU.singleton (rdLambdaFromQi qi)
@@ -1059,34 +1059,52 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lam
   return (enc', anyChromaNz, newLeft0, newLeft1)
 
 -- ---------------------------------------------------------------------------
--- Adaptive QP segmentation
+-- Spatial Noise Shaping (SNS) segmentation
 -- ---------------------------------------------------------------------------
 
--- | Compute Y-plane variance for a single block
-{-# INLINE computeBlockVariance #-}
-computeBlockVariance :: VSM.MVector s Word8 -> Int -> Int -> Int -> ST s Int
-computeBlockVariance buf stride bx by = do
-  let n = 256 :: Int -- 16x16
-      go !i !sumVal !sumSq
-        | i >= n =
-            -- var = (n * sumSq - sumVal^2) / n^2
-            return $ (n * sumSq - sumVal * sumVal) `div` (n * n)
+-- | Compute coding complexity for a single 16x16 macroblock.
+-- Uses minimum SAD across DC, H, and V predictions to estimate
+-- coding difficulty. Lower score = smoother = easier to predict.
+{-# INLINE computeMBAlpha #-}
+computeMBAlpha :: VSM.MVector s Word8 -> Int -> Int -> Int -> ST s Int
+computeMBAlpha buf stride bx by = do
+  -- Read first row (V prediction reference) and first column (H prediction)
+  firstRow <- VUM.new 16
+  firstCol <- VUM.new 16
+  forM_ [0 .. 15] $ \i -> do
+    !topPx <- fromIntegral <$> VSM.unsafeRead buf (by * stride + bx + i)
+    VUM.unsafeWrite firstRow i (topPx :: Int)
+    !leftPx <- fromIntegral <$> VSM.unsafeRead buf ((by + i) * stride + bx)
+    VUM.unsafeWrite firstCol i (leftPx :: Int)
+  -- Pass 1: compute block mean for DC prediction
+  let goMean !i !s
+        | i >= 256 = return $! (s + 128) `div` 256
         | otherwise = do
-            let !row = i `shiftR` 4
-                !col = i .&. 15
-                !idx = (by + row) * stride + (bx + col)
-            !px <- fromIntegral <$> VSM.unsafeRead buf idx
-            go (i + 1) (sumVal + px) (sumSq + px * px)
-  go 0 0 0
+            let !r = i `shiftR` 4
+                !c = i .&. 15
+            !px <- fromIntegral <$> VSM.unsafeRead buf ((by + r) * stride + (bx + c))
+            goMean (i + 1) (s + px)
+  !dcPred <- goMean 0 (0 :: Int)
+  -- Pass 2: compute SAD for DC, H, V predictions
+  let goSAD !i !sDC !sH !sV
+        | i >= 256 = return $! min sDC (min sH sV)
+        | otherwise = do
+            let !r = i `shiftR` 4
+                !c = i .&. 15
+            !px <- fromIntegral <$> VSM.unsafeRead buf ((by + r) * stride + (bx + c))
+            !hRef <- VUM.unsafeRead firstCol r
+            !vRef <- VUM.unsafeRead firstRow c
+            goSAD (i + 1) (sDC + abs (px - dcPred)) (sH + abs (px - hRef)) (sV + abs (px - vRef))
+  goSAD 0 0 0 0
 
--- | Compute Y-plane variance for all macroblocks
-computeMBVariances ::
+-- | Compute per-MB complexity scores for all macroblocks.
+computeMBAlphas ::
   VSM.MVector s Word8 -> -- Y buffer
   Int -> -- Stride (padded width)
   Int -> -- MB rows
   Int -> -- MB cols
   ST s (VU.Vector Int)
-computeMBVariances yBuf stride mbRows mbCols = do
+computeMBAlphas yBuf stride mbRows mbCols = do
   let !n = mbRows * mbCols
   result <- VUM.new n
   let go !i
@@ -1094,49 +1112,152 @@ computeMBVariances yBuf stride mbRows mbCols = do
         | otherwise = do
             let !r = i `div` mbCols
                 !c = i - r * mbCols
-            !var <- computeBlockVariance yBuf stride (c * 16) (r * 16)
-            VUM.unsafeWrite result i var
+            !alpha <- computeMBAlpha yBuf stride (c * 16) (r * 16)
+            VUM.unsafeWrite result i alpha
             go (i + 1)
   go 0
 
--- | Classify macroblocks into 4 segments by variance quartiles.
--- Returns (segment map, count per segment).
-classifySegments :: VU.Vector Int -> (VU.Vector Word8, Int, Int, Int, Int)
-classifySegments variances =
-  let n = VU.length variances
-      sorted = VU.fromList $ sort (VU.toList variances)
-      -- Quartile boundaries (use floor indices)
-      !q1 = sorted VU.! max 0 (n `div` 4 - 1)
-      !q2 = sorted VU.! max 0 (n `div` 2 - 1)
-      !q3 = sorted VU.! max 0 (3 * n `div` 4 - 1)
-      classify v
-        | v <= q1 = 0
-        | v <= q2 = 1
-        | v <= q3 = 2
-        | otherwise = 3
-      segMap = VU.map classify variances
-      !c0 = VU.foldl' (\acc s -> if s == 0 then acc + 1 else acc) 0 segMap
-      !c1 = VU.foldl' (\acc s -> if s == 1 then acc + 1 else acc) 0 segMap
-      !c2 = VU.foldl' (\acc s -> if s == 2 then acc + 1 else acc) 0 segMap
-      !c3 = n - c0 - c1 - c2
-   in (segMap, c0, c1, c2, c3)
+-- | Classify macroblocks into 4 segments using k-means clustering and compute
+-- adaptive QI deltas from centroid positions (Spatial Noise Shaping).
+--
+-- Unlike simple variance-quartile classification, k-means finds natural
+-- complexity clusters and computes QI deltas proportional to each cluster's
+-- deviation from the weighted mean — automatically shrinking deltas when
+-- the image has uniform complexity.
+--
+-- Returns (segment map, QI deltas, counts per segment).
+-- Segments are ordered: 0 = smoothest, 3 = busiest.
+classifySegmentsSNS :: VU.Vector Int -> Int -> (VU.Vector Word8, VU.Vector Int, Int, Int, Int, Int)
+classifySegmentsSNS alphas qi =
+  let !n = VU.length alphas
+      !minA = VU.minimum alphas
+      !maxA = VU.maximum alphas
+      !rangeA = maxA - minA
+   in if rangeA < 2
+        then -- Uniform image: no benefit from segmentation
+          (VU.replicate n 0, VU.fromList [0, 0, 0, 0], n, 0, 0, 0)
+        else
+          let !numBins = 256 :: Int
 
--- | Compute QP deltas for 4 segments based on base quantizer index.
--- Smooth regions (low variance) get finer quantization (negative delta),
--- busy regions (high variance) get coarser quantization (positive delta).
-computeSegmentDeltas :: Int -> VU.Vector Int
-computeSegmentDeltas qi
-  | qi < 8 = VU.fromList [0, 0, 0, 0] -- No benefit at very high quality
-  | otherwise =
-      let -- Scale deltas proportionally with qi
-          !d0 = negate $ qi * 15 `div` 100 -- smoothest: up to ~15% finer
-          !d1 = negate $ qi * 5 `div` 100 -- medium-smooth: up to ~5% finer
-          !d2 = 0 -- base
-          !d3 = qi * 10 `div` 100 -- busiest: up to ~10% coarser
-          -- Clamp so effective qi stays in [0, 127]
-          !d0' = max (negate qi) d0
-          !d3' = min (127 - qi) d3
-       in VU.fromList [d0', d1, d2, d3']
+              -- Map alpha value to bin index [0, numBins-1]
+              toBin a = min (numBins - 1) $ ((a - minA) * (numBins - 1)) `div` rangeA
+
+              -- Build histogram via mutable vector
+              !hist = VU.create $ do
+                h <- VUM.replicate numBins (0 :: Int)
+                let bld !i
+                      | i >= n = return h
+                      | otherwise = do
+                          VUM.unsafeModify h (+ 1) (toBin (alphas VU.! i))
+                          bld (i + 1)
+                bld 0
+
+              -- One k-means iteration on the histogram
+              kMeansStep (!c0, !c1, !c2, !c3) =
+                let nearest !bin
+                      | d0 <= d1 && d0 <= d2 && d0 <= d3 = 0 :: Int
+                      | d1 <= d2 && d1 <= d3 = 1
+                      | d2 <= d3 = 2
+                      | otherwise = 3
+                      where
+                        !d0 = abs (bin - c0)
+                        !d1 = abs (bin - c1)
+                        !d2 = abs (bin - c2)
+                        !d3 = abs (bin - c3)
+                    accum !bin !s0 !s1 !s2 !s3 !n0 !n1 !n2 !n3
+                      | bin >= numBins = (s0, s1, s2, s3, n0, n1, n2, n3)
+                      | otherwise =
+                          let !cnt = hist VU.! bin
+                           in if cnt == 0
+                                then accum (bin + 1) s0 s1 s2 s3 n0 n1 n2 n3
+                                else case nearest bin of
+                                  0 -> accum (bin + 1) (s0 + cnt * bin) s1 s2 s3 (n0 + cnt) n1 n2 n3
+                                  1 -> accum (bin + 1) s0 (s1 + cnt * bin) s2 s3 n0 (n1 + cnt) n2 n3
+                                  2 -> accum (bin + 1) s0 s1 (s2 + cnt * bin) s3 n0 n1 (n2 + cnt) n3
+                                  _ -> accum (bin + 1) s0 s1 s2 (s3 + cnt * bin) n0 n1 n2 (n3 + cnt)
+                    (!s0, !s1, !s2, !s3, !n0, !n1, !n2, !n3) =
+                      accum 0 0 0 0 0 0 0 0 0
+                 in ( if n0 > 0 then (s0 + n0 `div` 2) `div` n0 else c0
+                    , if n1 > 0 then (s1 + n1 `div` 2) `div` n1 else c1
+                    , if n2 > 0 then (s2 + n2 `div` 2) `div` n2 else c2
+                    , if n3 > 0 then (s3 + n3 `div` 2) `div` n3 else c3
+                    )
+
+              -- 6 iterations (matching libwebp MAX_ITERS_K_MEANS)
+              runKMeans !cs !iters
+                | iters <= (0 :: Int) = cs
+                | otherwise = runKMeans (kMeansStep cs) (iters - 1)
+
+              (!fc0, !fc1, !fc2, !fc3) =
+                runKMeans
+                  ( numBins `div` 8, 3 * numBins `div` 8
+                  , 5 * numBins `div` 8, 7 * numBins `div` 8
+                  )
+                  6
+
+              -- Sort centers: segment 0 = lowest alpha = smoothest
+              sorted = sort [fc0, fc1, fc2, fc3]
+              !sc0 = sorted !! 0
+              !sc1 = sorted !! 1
+              !sc2 = sorted !! 2
+              !sc3 = sorted !! 3
+
+              -- Assign each MB to nearest sorted center
+              assign a =
+                let !bin = toBin a
+                    !d0 = abs (bin - sc0)
+                    !d1 = abs (bin - sc1)
+                    !d2 = abs (bin - sc2)
+                    !d3 = abs (bin - sc3)
+                 in if d0 <= d1 && d0 <= d2 && d0 <= d3
+                      then 0
+                      else
+                        if d1 <= d2 && d1 <= d3
+                          then 1
+                          else if d2 <= d3 then 2 else 3 :: Word8
+
+              segMap = VU.map assign alphas
+              !cnt0 = VU.foldl' (\acc s -> if s == 0 then acc + 1 else acc) 0 segMap
+              !cnt1 = VU.foldl' (\acc s -> if s == 1 then acc + 1 else acc) 0 segMap
+              !cnt2 = VU.foldl' (\acc s -> if s == 2 then acc + 1 else acc) 0 segMap
+              !cnt3 = n - cnt0 - cnt1 - cnt2
+
+              -- Convert bin centers to alpha space for delta computation
+              toAlpha bin = minA + (bin * rangeA + (numBins `div` 2)) `div` numBins
+              !a0 = toAlpha sc0
+              !a1 = toAlpha sc1
+              !a2 = toAlpha sc2
+              !a3 = toAlpha sc3
+
+              -- Weighted mean alpha (reference point: delta = 0 for average complexity)
+              !totalCnt = max 1 (cnt0 + cnt1 + cnt2 + cnt3)
+              !meanAlpha = (a0 * cnt0 + a1 * cnt1 + a2 * cnt2 + a3 * cnt3) `div` totalCnt
+
+              -- Max deviation from mean (for scaling)
+              !maxDev =
+                max 1 $
+                  maximum
+                    [ abs (a0 - meanAlpha),
+                      abs (a1 - meanAlpha),
+                      abs (a2 - meanAlpha),
+                      abs (a3 - meanAlpha)
+                    ]
+
+              -- Max QI delta: ~15% of qi (similar magnitude to previous fixed deltas)
+              !maxDelta = qi * 3 `div` 20
+
+              -- Per-segment delta proportional to deviation from mean
+              -- Smooth (below mean) → negative delta → finer quantization
+              -- Busy (above mean) → positive delta → coarser quantization
+              computeDelta a =
+                let !dev = a - meanAlpha
+                    !delta = (dev * maxDelta) `quot` maxDev
+                 in max (negate qi) $ min (127 - qi) delta
+
+              segDeltas =
+                VU.fromList
+                  [computeDelta a0, computeDelta a1, computeDelta a2, computeDelta a3]
+           in (segMap, segDeltas, cnt0, cnt1, cnt2, cnt3)
 
 -- | Compute per-segment filter strength deltas from quantizer deltas.
 -- Each segment's filter level should match its effective quantization:
