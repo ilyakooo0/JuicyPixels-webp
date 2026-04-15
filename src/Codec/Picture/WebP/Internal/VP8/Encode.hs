@@ -215,26 +215,69 @@ encodeVP8 img quality = runST $ do
       VSM.set vRecon 128
 
       -- Step 9: Pass 2 — re-encode with optimal filter level, probs, skip mode,
-      --         and optimized per-segment filter deltas
+      --         and optimized per-segment filter deltas.
+      --         Also collect statistics: mode decisions with updated probs may
+      --         shift the coefficient distribution, so a third pass can help.
       let probs2 = if hasUpdates then updatedProbs else defaultCoeffProbs
           flags2 = if hasUpdates then updateFlags else noUpdateFlags
           compressedHeaderEnc2 = generateCompressedHeader quantIndices optFilterLevel (encFilterType config) mSegHeaderInfo2 probs2 flags2 mSkipProb
 
-      (modeEnc2, coeffEnc2, _) <-
+      stats2 <- newCoeffStats
+      (modeEnc2, coeffEnc2, skipCount2) <-
         encodeMacroblocks
           yBuf uBuf vBuf yRecon uRecon vRecon
           paddedW paddedH mbRows mbCols
           dequantFactorsVec segLambdas mSegEncInfo2 probs2
           compressedHeaderEnc2 initBoolEncoder
-          optFilterLevel Nothing
+          optFilterLevel (Just stats2)
           Nothing
           mSkipProb
           activityWeights
 
-      let partition0 = finalizeBoolEncoder modeEnc2
-          dctPartition = finalizeBoolEncoder coeffEnc2
-          uncompHeader = generateUncompressedHeader width height (B.length partition0)
-      return $ uncompHeader <> partition0 <> dctPartition
+      -- Step 10: Check if pass 3 would improve probabilities.
+      -- Recompute optimal probabilities from pass 2's actual coefficient
+      -- distribution and re-encode if they differ from what pass 2 used.
+      optimalProbs2 <- computeOptimalProbs stats2
+      (updatedProbs2, updateFlags2) <- decideUpdates stats2 optimalProbs2
+      let !hasUpdates2 = VU.any id updateFlags2
+          !probs3 = if hasUpdates2 then updatedProbs2 else defaultCoeffProbs
+          !flags3 = if hasUpdates2 then updateFlags2 else noUpdateFlags
+          -- Updated skip probability from pass 2 statistics
+          !nonSkipMBs2 = totalMBs - skipCount2
+          !probSkipFalse2 = fromIntegral (max 1 (min 255 ((256 * nonSkipMBs2 + totalMBs `div` 2) `div` max 1 totalMBs))) :: Word8
+          !mSkipProb2 = if skipCount2 > 0 then Just probSkipFalse2 else Nothing
+          !needsPass3 = probs3 /= probs2 || mSkipProb2 /= mSkipProb
+
+      if not needsPass3
+        then do
+          -- Pass 2 probabilities already converged — use pass 2 output
+          let partition0 = finalizeBoolEncoder modeEnc2
+              dctPartition = finalizeBoolEncoder coeffEnc2
+              uncompHeader = generateUncompressedHeader width height (B.length partition0)
+          return $ uncompHeader <> partition0 <> dctPartition
+        else do
+          -- Step 11: Pass 3 — re-encode with converged probabilities and skip prob
+          VSM.set yRecon 128
+          VSM.set uRecon 128
+          VSM.set vRecon 128
+
+          let compressedHeaderEnc3 = generateCompressedHeader quantIndices optFilterLevel (encFilterType config) mSegHeaderInfo2 probs3 flags3 mSkipProb2
+
+          (modeEnc3, coeffEnc3, _) <-
+            encodeMacroblocks
+              yBuf uBuf vBuf yRecon uRecon vRecon
+              paddedW paddedH mbRows mbCols
+              dequantFactorsVec segLambdas mSegEncInfo2 probs3
+              compressedHeaderEnc3 initBoolEncoder
+              optFilterLevel Nothing
+              Nothing
+              mSkipProb2
+              activityWeights
+
+          let partition0 = finalizeBoolEncoder modeEnc3
+              dctPartition = finalizeBoolEncoder coeffEnc3
+              uncompHeader = generateUncompressedHeader width height (B.length partition0)
+          return $ uncompHeader <> partition0 <> dctPartition
 
 -- | Encode all macroblocks, writing modes to modeEnc and coefficients to coeffEnc
 encodeMacroblocks ::
