@@ -16,7 +16,7 @@ import Codec.Picture.WebP.Internal.VP8.Dequant
 import Codec.Picture.WebP.Internal.VP8.EncodeCoefficients
 import Codec.Picture.WebP.Internal.VP8.EncodeHeader
 import Codec.Picture.WebP.Internal.VP8.EncodeMode
-import Codec.Picture.WebP.Internal.VP8.FilterStrengthSearch (optimizeFilterStrength)
+import Codec.Picture.WebP.Internal.VP8.FilterStrengthSearch (optimizeFilterStrength, optimizeFilterStrengthPerSegment)
 import Codec.Picture.WebP.Internal.VP8.IDCT
 import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow, applyNormalLoopFilterRowSegmented)
 import Codec.Picture.WebP.Internal.VP8.ModeSelection
@@ -161,17 +161,27 @@ encodeVP8 img quality = runST $ do
       Nothing
       activityWeights
 
-  -- Step 6: Adaptive filter strength search
-  let mSegFilterInfo = case mSegEncInfo of
-        Just (segMap, _, _, _, segFD) -> Just (segFD, segMap)
-        Nothing -> Nothing
-  optFilterLevel <-
+  -- Step 6: Adaptive filter strength search (per-segment when segmentation active)
+  (optFilterLevel, mSegHeaderInfo2, mSegEncInfo2) <-
     if defaultFilterLevel > 0
-      then
-        optimizeFilterStrength
-          yBuf uBuf vBuf yPreFilter uPreFilter vPreFilter
-          paddedW mbRows mbCols defaultFilterLevel mSegFilterInfo
-      else return 0
+      then case mSegEncInfo of
+        Just (segMap, sp0, sp1, sp2, qpFilterDeltas) -> do
+          (baseLevel, optDeltas) <-
+            optimizeFilterStrengthPerSegment
+              yBuf uBuf vBuf yPreFilter uPreFilter vPreFilter
+              paddedW mbRows mbCols defaultFilterLevel qpFilterDeltas segMap
+          let mSHI2 = case mSegHeaderInfo of
+                Just (si, p0, p1, p2) -> Just (si {segmentFilterStrength = optDeltas}, p0, p1, p2)
+                Nothing -> Nothing
+              mSEI2 = Just (segMap, sp0, sp1, sp2, optDeltas)
+          return (baseLevel, mSHI2, mSEI2)
+        Nothing -> do
+          level <-
+            optimizeFilterStrength
+              yBuf uBuf vBuf yPreFilter uPreFilter vPreFilter
+              paddedW mbRows mbCols defaultFilterLevel Nothing
+          return (level, mSegHeaderInfo, mSegEncInfo)
+      else return (0, mSegHeaderInfo, mSegEncInfo)
 
   -- Step 7: Compute optimal coefficient probabilities from statistics
   optimalProbs <- computeOptimalProbs stats
@@ -186,7 +196,10 @@ encodeVP8 img quality = runST $ do
       !probSkipFalse = fromIntegral (max 1 (min 255 ((256 * nonSkipMBs + totalMBs `div` 2) `div` max 1 totalMBs))) :: Word8
       !mSkipProb = if hasSkipMBs then Just probSkipFalse else Nothing
 
-      needsReencode = hasUpdates || optFilterLevel /= defaultFilterLevel || hasSkipMBs
+      filterDeltasChanged = case (mSegEncInfo, mSegEncInfo2) of
+        (Just (_, _, _, _, oldD), Just (_, _, _, _, newD)) -> oldD /= newD
+        _ -> False
+      needsReencode = hasUpdates || optFilterLevel /= defaultFilterLevel || filterDeltasChanged || hasSkipMBs
 
   if not needsReencode
     then do
@@ -201,16 +214,17 @@ encodeVP8 img quality = runST $ do
       VSM.set uRecon 128
       VSM.set vRecon 128
 
-      -- Step 9: Pass 2 — re-encode with optimal filter level, probs, and skip mode
+      -- Step 9: Pass 2 — re-encode with optimal filter level, probs, skip mode,
+      --         and optimized per-segment filter deltas
       let probs2 = if hasUpdates then updatedProbs else defaultCoeffProbs
           flags2 = if hasUpdates then updateFlags else noUpdateFlags
-          compressedHeaderEnc2 = generateCompressedHeader quantIndices optFilterLevel (encFilterType config) mSegHeaderInfo probs2 flags2 mSkipProb
+          compressedHeaderEnc2 = generateCompressedHeader quantIndices optFilterLevel (encFilterType config) mSegHeaderInfo2 probs2 flags2 mSkipProb
 
       (modeEnc2, coeffEnc2, _) <-
         encodeMacroblocks
           yBuf uBuf vBuf yRecon uRecon vRecon
           paddedW paddedH mbRows mbCols
-          dequantFactorsVec segLambdas mSegEncInfo probs2
+          dequantFactorsVec segLambdas mSegEncInfo2 probs2
           compressedHeaderEnc2 initBoolEncoder
           optFilterLevel Nothing
           Nothing
