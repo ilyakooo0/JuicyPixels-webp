@@ -21,7 +21,7 @@ import Codec.Picture.WebP.Internal.VP8.IDCT
 import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow, applyNormalLoopFilterRowSegmented)
 import Codec.Picture.WebP.Internal.VP8.ModeSelection
 import Codec.Picture.WebP.Internal.VP8.Predict
-import Codec.Picture.WebP.Internal.VP8.Quantize (applySharpen, qualityToYacQi, rdLambdaFromQi, trellisQuantizeBlock)
+import Codec.Picture.WebP.Internal.VP8.Quantize (qualityToYacQi, rdModeLambda, trellisQuantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad (forM_, when)
 import Control.Monad.ST
@@ -106,7 +106,7 @@ encodeVP8 img quality = runST $ do
         if not (VU.any (/= 0) segDeltas)
           then do
             let dqVec = computeDequantFactors quantIndices Nothing
-                lams = VU.singleton (rdLambdaFromQi qi)
+                lams = VU.singleton (rdModeLambda (dqVec V.! 0))
             return (Nothing, dqVec, lams, Nothing)
           else do
             let (sp0, sp1, sp2) = computeSegmentProbs c0 c1 c2 c3
@@ -121,13 +121,11 @@ encodeVP8 img quality = runST $ do
                       segmentTreeProbs = (sp0, sp1, sp2)
                     }
                 dqVec = computeDequantFactors quantIndices (Just segInfo)
-                lams =
-                  VU.generate 4 $ \s ->
-                    rdLambdaFromQi (max 0 (min 127 (qi + segDeltas VU.! s)))
+                lams = VU.generate 4 $ \s -> rdModeLambda (dqVec V.! s)
             return (Just (segInfo, sp0, sp1, sp2), dqVec, lams, Just (segMap, sp0, sp1, sp2, segFilterDeltas))
       else do
         let dqVec = computeDequantFactors quantIndices Nothing
-            lams = VU.singleton (rdLambdaFromQi qi)
+            lams = VU.singleton (rdModeLambda (dqVec V.! 0))
         return (Nothing, dqVec, lams, Nothing)
 
   -- Step 4: Allocate reconstruction buffers (for prediction)
@@ -746,7 +744,7 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs 
 
   -- Quantize Y2 (trellis-optimized)
   let !dcCtx = min 2 (aboveDcNz + leftDcNz)
-  _ <- trellisQuantizeBlock dequantFactors 1 y2DCs coeffProbs dcCtx 0 lambda
+  _ <- trellisQuantizeBlock dequantFactors 1 y2DCs coeffProbs dcCtx 0
 
   -- ENCODE Y2 FIRST
   -- blockType=1 for Y2 (i16-DC per libwebp convention)
@@ -810,10 +808,9 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs 
             -- DC was already extracted for Y2, clear it
             VSM.write residuals 0 0
 
-            -- Sharpen + trellis-quantize AC coefficients
-            applySharpen dequantFactors 0 residuals
+            -- Trellis-quantize AC coefficients
             let !ctx = min 2 (aboveNz + leftNz)
-            _ <- trellisQuantizeBlock dequantFactors 0 residuals coeffProbs ctx 1 lambda
+            _ <- trellisQuantizeBlock dequantFactors 0 residuals coeffProbs ctx 1
 
             -- Save quantized values for reconstruction (avoid double-quantization)
             forM_ [0 .. 15] $ \i -> do
@@ -963,9 +960,8 @@ encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda coef
                 else fromIntegral <$> VSM.read nzGrid (row * 4 + col - 1)
             let !ctx = min 2 (aboveNz + leftNz)
 
-            -- Sharpen + trellis-quantize (blockType=3: Y full with DC)
-            applySharpen dequantFactors 3 residuals
-            _ <- trellisQuantizeBlock dequantFactors 3 residuals coeffProbs ctx 0 lambda
+            -- Trellis-quantize (blockType=3: Y full with DC)
+            _ <- trellisQuantizeBlock dequantFactors 3 residuals coeffProbs ctx 0
 
             -- Encode coefficients (blockType=3 for i4-AC, startPos=0 to include DC)
             (e', hasNz) <- encodeCoefficients residuals coeffProbs 3 ctx 0 e
@@ -1084,7 +1080,7 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lam
             fdct4x4 residuals
 
             -- Trellis-quantize (always use type 2 = UV quant for both U and V)
-            _ <- trellisQuantizeBlock dequantFactors 2 residuals coeffProbs ctx 0 lambda
+            _ <- trellisQuantizeBlock dequantFactors 2 residuals coeffProbs ctx 0
 
             -- Encode coefficients with NZ context
             (e', hasNz) <- encodeCoefficients residuals coeffProbs coeffBlockType ctx 0 e

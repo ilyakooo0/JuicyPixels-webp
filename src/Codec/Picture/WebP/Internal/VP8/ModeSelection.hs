@@ -15,7 +15,7 @@ import Codec.Picture.WebP.Internal.VP8.DCT (fdct4x4, fwht4x4)
 import Codec.Picture.WebP.Internal.VP8.Dequant (DequantFactors, dequantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.IDCT (idct4x4, iwht4x4)
 import Codec.Picture.WebP.Internal.VP8.Predict
-import Codec.Picture.WebP.Internal.VP8.Quantize (applySharpen, trellisQuantizeBlock)
+import Codec.Picture.WebP.Internal.VP8.Quantize (trellisQuantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.RateCost
   ( bPredYModeCost,
     bSubModeCost,
@@ -378,7 +378,7 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
             -- Y2: WHT → trellis quantize → estimate bit cost → dequant → inverse WHT
             fwht4x4 y2DCs
             let !dcCtx = min 2 (aDcNz + lDcNz)
-            _ <- trellisQuantizeBlock dqFactors 1 y2DCs coeffProbs dcCtx 0 lambda
+            _ <- trellisQuantizeBlock dqFactors 1 y2DCs coeffProbs dcCtx 0
             !y2BitCost <- coeffBlockCost y2DCs coeffProbs 1 dcCtx 0
             dequantizeBlock dqFactors 1 y2DCs
             reconDCsV <- iwht4x4 y2DCs
@@ -420,8 +420,7 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
                                 loadCoeffs (i + 1)
                       loadCoeffs 0
                       VSM.unsafeWrite residuals 0 0
-                      applySharpen dqFactors 0 residuals
-                      !hasNz <- trellisQuantizeBlock dqFactors 0 residuals coeffProbs ctx 1 lambda
+                      !hasNz <- trellisQuantizeBlock dqFactors 0 residuals coeffProbs ctx 1
                       !blockBitCost <- coeffBlockCost residuals coeffProbs 0 ctx 1
                       VSM.unsafeWrite nzGrid bi (if hasNz then 1 else 0)
                       dequantizeBlock dqFactors 0 residuals
@@ -526,8 +525,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                       fillRes 0
 
                       fdct4x4 residuals
-                      applySharpen dqFactors 3 residuals
-                      _ <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 lambda
+                      _ <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0
                       !blockBitCost <- coeffBlockCost residuals coeffProbs 3 ctx 0
                       dequantizeBlock dqFactors 3 residuals
                       idct4x4 residuals
@@ -557,8 +555,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                       fillCol 0
             fillRes 0
             fdct4x4 residuals
-            applySharpen dqFactors 3 residuals
-            !hasNz <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 lambda
+            !hasNz <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0
             dequantizeBlock dqFactors 3 residuals
             idct4x4 residuals
 
@@ -632,7 +629,7 @@ trialEncodeChroma8x8 ::
   Int -> -- Lambda for trellis quantization
   VU.Vector Word8 -> -- Coefficient probabilities
   ST s (Int, Int) -- (SSE, bitCost in 256ths)
-trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors lambda coeffProbs = do
+trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda coeffProbs = do
   let processBlock !bi !sse !rate
         | bi >= 4 = return (sse, rate)
         | otherwise = do
@@ -654,7 +651,7 @@ trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors lambda co
                       fillCol 0
             fillRes 0
             fdct4x4 residuals
-            _ <- trellisQuantizeBlock dqFactors 2 residuals coeffProbs 0 0 lambda
+            _ <- trellisQuantizeBlock dqFactors 2 residuals coeffProbs 0 0
             !blockBitCost <- coeffBlockCost residuals coeffProbs 2 0 0
             dequantizeBlock dqFactors 2 residuals
             idct4x4 residuals

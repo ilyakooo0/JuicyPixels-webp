@@ -6,7 +6,7 @@ module Codec.Picture.WebP.Internal.VP8.Quantize
     trellisQuantizeBlock,
     applySharpen,
     qualityToYacQi,
-    rdLambdaFromQi,
+    rdModeLambda,
   )
 where
 
@@ -59,6 +59,17 @@ quantizeBlock factors blockType coeffs = do
     3 -> quantYFull factors coeffs
     _ -> return ()
 
+-- | Per-block-type quantization biases (0-255 scale).
+-- From libwebp's kBiasMatrices[3][2]: values below 128 create a deadzone
+-- that biases small coefficients toward zero, improving compression efficiency.
+--   Y1 (I4):  DC=96,  AC=110
+--   Y2 (I16): DC=96,  AC=108
+--   UV:       DC=110, AC=115
+biasY1DC, biasY1AC, biasY2DC, biasY2AC, biasUVDC, biasUVAC :: Int
+biasY1DC = 96;  biasY1AC = 110
+biasY2DC = 96;  biasY2AC = 108
+biasUVDC = 110; biasUVAC = 115
+
 -- | Quantize Y block (AC only, position 0 is DC from Y2, don't quantize it here)
 {-# INLINE quantYAC #-}
 quantYAC :: DequantFactors -> VSM.MVector s Int16 -> ST s ()
@@ -68,7 +79,7 @@ quantYAC factors coeffs = do
         | i > 15 = return ()
         | otherwise = do
             !c <- VSM.unsafeRead coeffs i
-            VSM.unsafeWrite coeffs i (quantizeCoeff c quant)
+            VSM.unsafeWrite coeffs i (quantizeCoeffBiased c quant biasY1AC)
             go (i + 1)
   go 1
 
@@ -78,14 +89,14 @@ quantY2 :: DequantFactors -> VSM.MVector s Int16 -> ST s ()
 quantY2 factors coeffs = do
   !c0 <- VSM.unsafeRead coeffs 0
   let !dcQuant = dqY2DC factors
-  VSM.unsafeWrite coeffs 0 (quantizeCoeff c0 dcQuant)
+  VSM.unsafeWrite coeffs 0 (quantizeCoeffBiased c0 dcQuant biasY2DC)
 
   let !acQuant = dqY2AC factors
   let go !i
         | i > 15 = return ()
         | otherwise = do
             !c <- VSM.unsafeRead coeffs i
-            VSM.unsafeWrite coeffs i (quantizeCoeff c acQuant)
+            VSM.unsafeWrite coeffs i (quantizeCoeffBiased c acQuant biasY2AC)
             go (i + 1)
   go 1
 
@@ -95,14 +106,14 @@ quantUV :: DequantFactors -> VSM.MVector s Int16 -> ST s ()
 quantUV factors coeffs = do
   !c0 <- VSM.unsafeRead coeffs 0
   let !dcQuant = dqUVDC factors
-  VSM.unsafeWrite coeffs 0 (quantizeCoeff c0 dcQuant)
+  VSM.unsafeWrite coeffs 0 (quantizeCoeffBiased c0 dcQuant biasUVDC)
 
   let !acQuant = dqUVAC factors
   let go !i
         | i > 15 = return ()
         | otherwise = do
             !c <- VSM.unsafeRead coeffs i
-            VSM.unsafeWrite coeffs i (quantizeCoeff c acQuant)
+            VSM.unsafeWrite coeffs i (quantizeCoeffBiased c acQuant biasUVAC)
             go (i + 1)
   go 1
 
@@ -112,39 +123,39 @@ quantYFull :: DequantFactors -> VSM.MVector s Int16 -> ST s ()
 quantYFull factors coeffs = do
   !c0 <- VSM.unsafeRead coeffs 0
   let !dcQuant = dqYDC factors
-  VSM.unsafeWrite coeffs 0 (quantizeCoeff c0 dcQuant)
+  VSM.unsafeWrite coeffs 0 (quantizeCoeffBiased c0 dcQuant biasY1DC)
 
   let !acQuant = dqYAC factors
   let go !i
         | i > 15 = return ()
         | otherwise = do
             !c <- VSM.unsafeRead coeffs i
-            VSM.unsafeWrite coeffs i (quantizeCoeff c acQuant)
+            VSM.unsafeWrite coeffs i (quantizeCoeffBiased c acQuant biasY1AC)
             go (i + 1)
   go 1
 
--- | Quantize a single coefficient
--- Formula: quantized = round(coeff / quant) = (abs(coeff) + quant/2) / quant
--- Preserves sign
-{-# INLINE quantizeCoeff #-}
-quantizeCoeff :: Int16 -> Int16 -> Int16
-quantizeCoeff !coeff !quant
-  | quant == 0 = 0 -- Avoid division by zero
+-- | Quantize a single coefficient with deadzone bias.
+-- Formula: level = (|coeff| * 256 + bias * quant) / (quant * 256)
+-- where bias (0-255) controls rounding: 128 = round-to-nearest,
+-- <128 = wider deadzone (bias toward zero, better compression).
+-- Preserves sign.
+{-# INLINE quantizeCoeffBiased #-}
+quantizeCoeffBiased :: Int16 -> Int16 -> Int -> Int16
+quantizeCoeffBiased !coeff !quant !bias
+  | quant == 0 = 0
   | otherwise =
-      let absCoeff = abs (fromIntegral coeff :: Int)
-          absQuant = abs (fromIntegral quant :: Int)
-          -- Add rounding bias (quant / 2)
-          quantized = (absCoeff + (absQuant `shiftR` 1)) `div` absQuant
-          -- Preserve sign
-          result = if coeff < 0 then -quantized else quantized
-       in fromIntegral result
+      let !absCoeff = abs (fromIntegral coeff :: Int)
+          !absQuant = abs (fromIntegral quant :: Int)
+          !quantized = (absCoeff * 256 + bias * absQuant) `div` (absQuant * 256)
+       in fromIntegral (if coeff < 0 then -quantized else quantized)
 
--- | Compute RDO lambda from quantizer index.
--- Controls the rate vs distortion tradeoff in mode selection:
---   low qi (high quality) → small lambda → prioritize distortion
---   high qi (low quality) → large lambda → prioritize rate
-rdLambdaFromQi :: Int -> Int
-rdLambdaFromQi qi = max 1 ((qi * qi + 8) `div` 16)
+-- | Compute RDO lambda for mode selection from dequantization factors.
+-- Controls the rate vs distortion tradeoff in I16/I4/UV mode decisions.
+-- From libwebp: lambda_mode = Q^2 / 128 where Q is the Y-AC quantizer step.
+rdModeLambda :: DequantFactors -> Int
+rdModeLambda dq =
+  let !q = fromIntegral (dqYAC dq) :: Int
+   in max 1 ((q * q) `div` 128)
 
 -- ---------------------------------------------------------------------------
 -- Pre-quantization sharpening bias
@@ -161,6 +172,10 @@ kFreqSharpening =
 -- Adds a frequency-dependent bias proportional to the quantization step,
 -- preserving high-frequency detail that would otherwise be zeroed out.
 -- Only applied to Y blocks (types 0 and 3), not Y2 (type 1) or UV (type 2).
+--
+-- NOTE: This is for the non-trellis quantizeBlock path only. Do NOT apply
+-- before trellisQuantizeBlock — the trellis makes optimal level decisions on
+-- raw coefficients, and sharpening would corrupt its distortion calculation.
 {-# INLINE applySharpen #-}
 applySharpen :: DequantFactors -> Int -> VSM.MVector s Int16 -> ST s ()
 applySharpen factors blockType coeffs
@@ -203,12 +218,19 @@ kWeightTrellis =
 
 -- | Trellis-optimized quantization for a 4x4 block.
 -- Uses Viterbi dynamic programming to find the quantized coefficient levels
--- that minimize (lambda * rate + 256 * distortion), accounting for the VP8
--- coefficient entropy context that flows between positions.
+-- that minimize (lambda * rate + RD_DISTO_MULT * distortion), accounting for
+-- the VP8 coefficient entropy context that flows between positions.
 --
 -- At each scan position, considers two candidates: floor(|c|/Q) and
 -- floor(|c|/Q)+1. The forward pass finds optimal predecessor chains;
 -- backtracking writes the best signed levels to the coefficients buffer.
+--
+-- The trellis lambda is computed internally from the quantizer step and block
+-- type, following libwebp's calibration:
+--   I4 Y:   7 * Q^2 / 3  (preserve detail in I4 blocks)
+--   I16 Y:  13 * Q^2 / 3  (I16 tolerates more zeroing)
+--   UV:     15 * Q^2 / 3  (chroma tolerates most zeroing)
+-- Distortion is scaled by RD_DISTO_MULT = 256 to match libwebp's convention.
 --
 -- Returns True if any coefficient is nonzero after optimization.
 {-# INLINE trellisQuantizeBlock #-}
@@ -220,15 +242,22 @@ trellisQuantizeBlock ::
   VU.Vector Word8 -> -- coefficient probabilities (1056 entries)
   Int -> -- initial context (0, 1, or 2)
   Int -> -- start position (0 or 1)
-  Int -> -- RDO lambda (same as mode-selection lambda)
   ST s Bool
-trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startPos !lambda = do
+trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startPos = do
   let -- Quantization steps per position
       !qDC = fromIntegral (case blockType of
         1 -> dqY2DC factors; 2 -> dqUVDC factors; 3 -> dqYDC factors; _ -> dqYDC factors) :: Int
       !qAC = fromIntegral (case blockType of
         0 -> dqYAC factors; 1 -> dqY2AC factors; 2 -> dqUVAC factors; _ -> dqYAC factors) :: Int
-      !lam = fromIntegral lambda :: Int64
+      -- Block-type-specific trellis lambda from the quantizer step.
+      -- Uses Y-AC step for Y blocks (both I4 and I16), UV-AC step for chroma.
+      !qLam = fromIntegral (case blockType of
+        2 -> dqUVAC factors; _ -> dqYAC factors) :: Int64
+      !tlam = max 1 (case blockType of
+        0 -> 13 * qLam * qLam `div` 3 -- I16 Y-AC
+        1 -> 13 * qLam * qLam `div` 3 -- I16 Y2
+        2 -> 15 * qLam * qLam `div` 3 -- UV
+        _ -> 7 * qLam * qLam `div` 3) -- I4 Y-full
       -- Sentinel for dead trellis nodes (large but won't overflow on addition)
       !dead = maxBound `div` 4 :: Int64
 
@@ -267,13 +296,13 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
       -- Skip score: immediate EOB at startPos (baseline = all-zero block)
       let !startBand = coeffBands VU.! startPos
           !startPI = blockType * 264 + startBand * 33 + initialCtx * 11
-          !skipScore = lam * fromIntegral (branchCost (coeffProbs VU.! startPI) False)
+          !skipScore = tlam * fromIntegral (branchCost (coeffProbs VU.! startPI) False)
 
       -- Initial predecessor: virtual node before startPos.
       -- When initialCtx=0, the not-EOB cost at startPos is omitted by trellisLevelCost,
       -- so we must add it to the starting score. For initialCtx>0 it's already included.
       let !initScore = if initialCtx == 0
-            then lam * fromIntegral (branchCost (coeffProbs VU.! startPI) True)
+            then tlam * fromIntegral (branchCost (coeffProbs VU.! startPI) True)
             else 0 :: Int64
 
       -- Phase 3: Forward Viterbi pass
@@ -299,18 +328,19 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
                 -- Evaluate a candidate quantization level
                 let {-# INLINE evalCand #-}
                     evalCand !lev =
-                      let -- Distortion delta relative to all-zero baseline
+                      let -- Distortion delta relative to all-zero baseline, scaled by
+                          -- RD_DISTO_MULT = 256 to match libwebp's rate/distortion balance
                           !errI = fromIntegral (ac - lev * q) :: Int64
                           !acI = fromIntegral ac :: Int64
-                          !dd = w * (errI * errI - acI * acI)
+                          !dd = 256 * w * (errI * errI - acI * acI)
                           -- Rate cost from predecessor 0
                           !pi0 = blockType * 264 + band * 33 + pc0 * 11
                           !r0 = trellisLevelCost coeffProbs pi0 pc0 lev
-                          !s0 = if ps0 >= dead then dead else ps0 + lam * fromIntegral r0
+                          !s0 = if ps0 >= dead then dead else ps0 + tlam * fromIntegral r0
                           -- Rate cost from predecessor 1
                           !pi1 = blockType * 264 + band * 33 + pc1 * 11
                           !r1 = trellisLevelCost coeffProbs pi1 pc1 lev
-                          !s1 = if ps1 >= dead then dead else ps1 + lam * fromIntegral r1
+                          !s1 = if ps1 >= dead then dead else ps1 + tlam * fromIntegral r1
                           -- Pick best predecessor
                           (!bestPrevS, !bestPrevI) = if s0 <= s1 then (s0, 0) else (s1, 1)
                           -- Node score = best predecessor + distortion delta
@@ -341,7 +371,7 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
                                     let !nb = coeffBands VU.! np
                                         !npi = blockType * 264 + nb * 33 + ctx * 11
                                      in branchCost (coeffProbs VU.! npi) False
-                              !ts = score + lam * fromIntegral ec
+                              !ts = score + tlam * fromIntegral ec
                            in if ts < bS then (ts, pos, cIdx) else (bS, bP, bC)
 
                 let (!bS1, !bP1, !bC1) = checkTerm cs0 cc0 0 bestS bestP bestC
