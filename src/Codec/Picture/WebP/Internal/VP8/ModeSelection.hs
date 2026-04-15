@@ -666,7 +666,18 @@ trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors lambda co
 -- RDO helpers
 -- ---------------------------------------------------------------------------
 
--- | Compute SSE for one 4x4 block: original vs (prediction + IDCT residuals)
+-- | SSIM structural masking constant.
+-- C2 = (K2 * L)^2 where K2 = 0.03, L = 255; scaled by 256 (block size N=16)
+-- to align with the 256-scaled variance: var256 = N * sum(x^2) - sum(x)^2.
+ssimC2Scaled :: Int
+ssimC2Scaled = 14982
+{-# INLINE ssimC2Scaled #-}
+
+-- | Compute SSIM-weighted distortion for one 4x4 block.
+-- Uses the SSIM structural term to mask errors in textured regions:
+--   D = SSE * C2 / (σ²_orig_scaled + C2)
+-- In flat regions (σ² ≈ 0): D ≈ SSE (full penalty, errors are visible)
+-- In textured regions (large σ²): D << SSE (masked, errors blend into texture)
 {-# INLINE computeBlockSSEM #-}
 computeBlockSSEM ::
   VSM.MVector s Word8 -> -- Original pixels
@@ -677,18 +688,25 @@ computeBlockSSEM ::
   Int -> -- Y position
   ST s Int
 computeBlockSSEM orig predBuf idctOut stride x y = do
-  let go !r !acc
-        | r >= 4 = return acc
+  let go !r !sse !sumO !sumO2
+        | r >= 4 = return (sse, sumO, sumO2)
         | otherwise = do
-            let goC !c !a
-                  | c >= 4 = go (r + 1) a
+            let goC !c !s !sO !sO2
+                  | c >= 4 = go (r + 1) s sO sO2
                   | otherwise = do
                       let !idx = (y + r) * stride + (x + c)
                       !o <- VSM.unsafeRead orig idx
                       !p <- VSM.unsafeRead predBuf idx
                       !res <- VSM.unsafeRead idctOut (r * 4 + c)
-                      let !recon = clip255 (fromIntegral p + fromIntegral res)
-                          !diff = fromIntegral o - fromIntegral recon :: Int
-                      goC (c + 1) (a + diff * diff)
-            goC 0 acc
-  go 0 0
+                      let !oi = fromIntegral o :: Int
+                          !recon = clip255 (fromIntegral p + fromIntegral res)
+                          !diff = oi - fromIntegral recon
+                      goC (c + 1) (s + diff * diff) (sO + oi) (sO2 + oi * oi)
+            goC 0 sse sumO sumO2
+  (!sse, !sumOrig, !sumOrigSq) <- go 0 0 0 0
+  -- var256 = 16 * Σ(x²) - (Σx)²  (= 256 * block variance, always ≥ 0)
+  let !var256 = 16 * sumOrigSq - sumOrig * sumOrig
+      !c2 = ssimC2Scaled
+      -- D = SSE * C2 / (var256 + C2); intermediate fits in Int on 64-bit
+      !distortion = sse * c2 `div` (var256 + c2)
+  return distortion
