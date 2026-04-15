@@ -249,15 +249,21 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
         1 -> dqY2DC factors; 2 -> dqUVDC factors; 3 -> dqYDC factors; _ -> dqYDC factors) :: Int
       !qAC = fromIntegral (case blockType of
         0 -> dqYAC factors; 1 -> dqY2AC factors; 2 -> dqUVAC factors; _ -> dqYAC factors) :: Int
-      -- Block-type-specific trellis lambda from the quantizer step.
-      -- Uses Y-AC step for Y blocks (both I4 and I16), UV-AC step for chroma.
-      !qLam = fromIntegral (case blockType of
-        2 -> dqUVAC factors; _ -> dqYAC factors) :: Int64
+      -- Average quantizer step per block type (libwebp's ExpandMatrix).
+      -- I16 (types 0,1): Y2 matrix. UV (type 2): UV matrix. I4 (type 3): Y1 matrix.
+      !avgQ = let !sumQ = case blockType of
+                    0 -> fromIntegral (dqY2DC factors) + 15 * fromIntegral (dqY2AC factors)
+                    1 -> fromIntegral (dqY2DC factors) + 15 * fromIntegral (dqY2AC factors)
+                    2 -> fromIntegral (dqUVDC factors) + 15 * fromIntegral (dqUVAC factors)
+                    _ -> fromIntegral (dqYDC factors) + 15 * fromIntegral (dqYAC factors)
+               in (sumQ + 8) `div` 16 :: Int64
+      -- Block-type-specific trellis lambda (from libwebp's SetSegmentParams).
+      -- Controls rate-vs-distortion tradeoff in coefficient level selection.
       !tlam = max 1 (case blockType of
-        0 -> 13 * qLam * qLam `div` 3 -- I16 Y-AC
-        1 -> 13 * qLam * qLam `div` 3 -- I16 Y2
-        2 -> 15 * qLam * qLam `div` 3 -- UV
-        _ -> 7 * qLam * qLam `div` 3) -- I4 Y-full
+        0 -> avgQ * avgQ `div` 4       -- I16 Y-AC: Q²/4
+        1 -> avgQ * avgQ `div` 4       -- I16 Y2:   Q²/4
+        2 -> 2 * avgQ * avgQ           -- UV:       2*Q²
+        _ -> 7 * avgQ * avgQ `div` 8)  -- I4 Y:     7*Q²/8
       -- Sentinel for dead trellis nodes (large but won't overflow on addition)
       !dead = maxBound `div` 4 :: Int64
 
