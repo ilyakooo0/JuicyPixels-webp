@@ -77,7 +77,7 @@ Pure Haskell WebP codec for JuicyPixels. Supports both decoding and encoding.
 - Color transform (per-block least-squares regression for R/B decorrelation from G)
 
 #### VP8 Lossy Encoder
-- RGB to YCbCr color space conversion
+- Sharp YUV color space conversion (iterative gamma-aware chroma optimization)
 - RDO mode selection (I16/I4/UV) with trellis quantization for accurate cost estimates
 - DCT (Discrete Cosine Transform) for all blocks
 - Coefficient quantization with quality mapping

@@ -10,7 +10,7 @@ where
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.VP8.BoolEncoder
 import Codec.Picture.WebP.Internal.VP8.CoeffStats
-import Codec.Picture.WebP.Internal.VP8.ColorConvert
+import Codec.Picture.WebP.Internal.VP8.ColorConvert (clip255, rgbToYCbCrSharp)
 import Codec.Picture.WebP.Internal.VP8.DCT
 import Codec.Picture.WebP.Internal.VP8.Dequant
 import Codec.Picture.WebP.Internal.VP8.EncodeCoefficients
@@ -68,7 +68,7 @@ defaultEncodeConfig quality =
 encodeVP8 :: Image PixelRGB8 -> Int -> B.ByteString
 encodeVP8 img quality = runST $ do
   -- Step 1: Convert RGB to YCbCr
-  (yBuf, uBuf, vBuf) <- rgbToYCbCr img
+  (yBuf, uBuf, vBuf) <- rgbToYCbCrSharp img
 
   let width = imageWidth img
       height = imageHeight img
