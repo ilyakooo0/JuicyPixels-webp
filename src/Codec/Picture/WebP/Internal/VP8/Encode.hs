@@ -94,11 +94,14 @@ encodeVP8 img quality = runST $ do
             qiUvacDelta = uvDelta
           }
 
-  -- Step 3: Spatial Noise Shaping (SNS) segmentation
+  -- Step 3: Compute per-MB spatial activity (needed for both SNS and activity masking)
+  alphas <- computeMBAlphas yBuf paddedW mbRows mbCols
+  let !activityWeights = computeActivityWeights alphas (mbRows * mbCols)
+
+  -- Step 3b: Spatial Noise Shaping (SNS) segmentation
   (mSegHeaderInfo, dequantFactorsVec, segLambdas, mSegEncInfo) <-
     if encUseSegmentation config && qi >= 8 && mbRows * mbCols >= 4
       then do
-        alphas <- computeMBAlphas yBuf paddedW mbRows mbCols
         let (!segMap, !segDeltas, !c0, !c1, !c2, !c3) = classifySegmentsSNS alphas qi
         if not (VU.any (/= 0) segDeltas)
           then do
@@ -156,6 +159,7 @@ encodeVP8 img quality = runST $ do
       defaultFilterLevel (Just stats)
       (Just (yPreFilter, uPreFilter, vPreFilter))
       Nothing
+      activityWeights
 
   -- Step 6: Adaptive filter strength search
   let mSegFilterInfo = case mSegEncInfo of
@@ -211,6 +215,7 @@ encodeVP8 img quality = runST $ do
           optFilterLevel Nothing
           Nothing
           mSkipProb
+          activityWeights
 
       let partition0 = finalizeBoolEncoder modeEnc2
           dctPartition = finalizeBoolEncoder coeffEnc2
@@ -239,9 +244,10 @@ encodeMacroblocks ::
   Maybe (CoeffStats s) -> -- Optional coefficient statistics accumulator
   Maybe (VSM.MVector s Word8, VSM.MVector s Word8, VSM.MVector s Word8) -> -- Pre-filter buffers (save recon before loop filter)
   Maybe Word8 -> -- Skip mode: Just probSkipFalse to enable, Nothing to disable
+  VU.Vector Int -> -- Per-MB activity weights (8.8 fixed point, 256 = 1.0)
   ST s (BoolEncoder, BoolEncoder, Int)
   -- Returns: (modeEncoder, coeffEncoder, skipCount)
-encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dqVec segLambdas mSegEncInfo coeffProbs modeEnc coeffEnc filterLevel mStats mPreFilterBufs mSkipProb = do
+encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows mbCols dqVec segLambdas mSegEncInfo coeffProbs modeEnc coeffEnc filterLevel mStats mPreFilterBufs mSkipProb actWeights = do
   -- Allocate above NZ tracking arrays (persist across MB rows)
   aboveNzY <- VSM.replicate (mbCols * 4) (0 :: Word8) -- 4 Y columns per MB
   aboveNzU <- VSM.replicate (mbCols * 2) (0 :: Word8) -- 2 U columns per MB
@@ -276,12 +282,16 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
             loop (mbY + 1) 0 mEnc cEnc skipCount 0 0 0 0 0 0 0 0 0 0 0 0 0
         | otherwise = do
             -- Segment handling: look up per-MB segment, write ID, select per-segment params
-            let (!segDq, !segLam, !mEncSeg) = case mSegEncInfo of
+            let !mbIdx = mbY * mbCols + mbX
+                (!segDq, !segLam, !mEncSeg) = case mSegEncInfo of
                   Nothing ->
                     (dqVec V.! 0, segLambdas VU.! 0, mEnc)
                   Just (segMap, sp0, sp1, sp2, _) ->
-                    let !s = fromIntegral (segMap VU.! (mbY * mbCols + mbX))
+                    let !s = fromIntegral (segMap VU.! mbIdx)
                      in (dqVec V.! s, segLambdas VU.! s, encodeSegmentId s sp0 sp1 sp2 mEnc)
+                -- Per-MB activity masking: scale lambda by spatial activity weight
+                !actW = actWeights VU.! mbIdx
+                !adjLam = max 1 ((segLam * actW) `div` 256)
 
             (mEnc', cEnc', isSkip, lY0, lY1, lY2, lY3, lU0, lU1, lV0, lV1, lDC, lBM0, lBM1, lBM2, lBM3) <-
               encodeMacroblock
@@ -296,7 +306,7 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
                 mbY
                 mbX
                 segDq
-                segLam
+                adjLam
                 coeffProbs
                 mEncSeg
                 cEnc
@@ -1116,6 +1126,17 @@ computeMBAlphas yBuf stride mbRows mbCols = do
             VUM.unsafeWrite result i alpha
             go (i + 1)
   go 0
+
+-- | Compute per-MB activity weights for perceptual RDO lambda modulation.
+-- Returns 8.8 fixed-point weights (256 = 1.0): smooth MBs get higher weight
+-- (lower effective lambda → preserve quality), busy MBs get lower weight
+-- (higher effective lambda → accept more distortion where it's masked).
+computeActivityWeights :: VU.Vector Int -> Int -> VU.Vector Int
+computeActivityWeights alphas mbCount
+  | mbCount == 0 = VU.empty
+  | otherwise =
+      let !avgAlpha = max 1 (VU.foldl' (+) 0 alphas `div` mbCount)
+       in VU.map (\a -> max 128 $ min 512 $ (256 * avgAlpha) `div` max 1 a) alphas
 
 -- | Classify macroblocks into 4 segments using k-means clustering and compute
 -- adaptive QI deltas from centroid positions (Spatial Noise Shaping).
