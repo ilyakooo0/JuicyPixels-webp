@@ -327,12 +327,13 @@ selectIntra16x16ModeRDO ::
   Int -> -- Macroblock Y position (pixels)
   DequantFactors -> -- Quantization parameters
   Int -> -- Lambda (rate-distortion tradeoff)
+  Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities (1056 flat entries)
   Int -> Int -> Int -> Int -> -- aboveNzY[0..3] (from MB above)
   Int -> Int -> Int -> Int -> -- leftNzY[0..3] (from MB to the left)
   Int -> Int -> -- aboveDcNz, leftDcNz (Y2 DC NZ context)
   ST s (Int, Int) -- (mode, rdCost)
-selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs aNzY0 aNzY1 aNzY2 aNzY3 lNzY0 lNzY1 lNzY2 lNzY3 aDcNz lDcNz = do
+selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale coeffProbs aNzY0 aNzY1 aNzY2 aNzY3 lNzY0 lNzY1 lNzY2 lNzY3 aDcNz lDcNz = do
   predBuf <- VSM.clone yRecon
   y2DCs <- VSM.new 16
   residuals <- VSM.new 16
@@ -378,7 +379,7 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
             -- Y2: WHT → trellis quantize → estimate bit cost → dequant → inverse WHT
             fwht4x4 y2DCs
             let !dcCtx = min 2 (aDcNz + lDcNz)
-            _ <- trellisQuantizeBlock dqFactors 1 y2DCs coeffProbs dcCtx 0 256
+            _ <- trellisQuantizeBlock dqFactors 1 y2DCs coeffProbs dcCtx 0 256 actScale
             !y2BitCost <- coeffBlockCost y2DCs coeffProbs 1 dcCtx 0
             dequantizeBlock dqFactors 1 y2DCs
             reconDCsV <- iwht4x4 y2DCs
@@ -422,7 +423,7 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs 
                       VSM.unsafeWrite residuals 0 0
                       !var256 <- blockOrigVar256 yOrig stride (mbX + subX) (mbY + subY)
                       let !ssScale = ssimTrellisScale var256
-                      !hasNz <- trellisQuantizeBlock dqFactors 0 residuals coeffProbs ctx 1 ssScale
+                      !hasNz <- trellisQuantizeBlock dqFactors 0 residuals coeffProbs ctx 1 ssScale actScale
                       !blockBitCost <- coeffBlockCost residuals coeffProbs 0 ctx 1
                       VSM.unsafeWrite nzGrid bi (if hasNz then 1 else 0)
                       dequantizeBlock dqFactors 0 residuals
@@ -449,6 +450,7 @@ selectBPredModeRDO ::
   Int -> -- MB Y position (pixels)
   DequantFactors ->
   Int -> -- Lambda
+  Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities (1056 flat entries)
   Int ->
   Int ->
@@ -461,7 +463,7 @@ selectBPredModeRDO ::
   Int -> Int -> Int -> Int -> -- aboveNzY[0..3] (from MB above)
   Int -> Int -> Int -> Int -> -- leftNzY[0..3] (from MB to the left)
   ST s (VS.Vector Word8, Int) -- (16 modes, total RD cost)
-selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAbove0 extAbove1 extAbove2 extAbove3 extLeft0 extLeft1 extLeft2 extLeft3 aNzY0 aNzY1 aNzY2 aNzY3 lNzY0 lNzY1 lNzY2 lNzY3 = do
+selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale coeffProbs extAbove0 extAbove1 extAbove2 extAbove3 extLeft0 extLeft1 extLeft2 extLeft3 aNzY0 aNzY1 aNzY2 aNzY3 lNzY0 lNzY1 lNzY2 lNzY3 = do
   modesMut <- VSM.new 16 :: ST s (VSM.MVector s Word8)
   residuals <- VSM.new 16 :: ST s (VSM.MVector s Int16)
   nzGrid <- VSM.new 16 :: ST s (VSM.MVector s Word8)
@@ -531,7 +533,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                       fillRes 0
 
                       fdct4x4 residuals
-                      _ <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 bpSsScale
+                      _ <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 bpSsScale actScale
                       !blockBitCost <- coeffBlockCost residuals coeffProbs 3 ctx 0
                       dequantizeBlock dqFactors 3 residuals
                       idct4x4 residuals
@@ -561,7 +563,7 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda coeffProbs extAb
                       fillCol 0
             fillRes 0
             fdct4x4 residuals
-            !hasNz <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 bpSsScale
+            !hasNz <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 bpSsScale actScale
             dequantizeBlock dqFactors 3 residuals
             idct4x4 residuals
 
@@ -599,9 +601,10 @@ selectChromaModeRDO ::
   Int -> -- Y position (chroma coords)
   DequantFactors ->
   Int -> -- Lambda
+  Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities (1056 flat entries)
   ST s (Int, Int) -- (mode, rdCost)
-selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda coeffProbs = do
+selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda actScale coeffProbs = do
   uPredBuf <- VSM.clone uRecon
   vPredBuf <- VSM.clone vRecon
   residuals <- VSM.new 16
@@ -611,8 +614,8 @@ selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda coeffP
         | otherwise = do
             predict8x8 mode uPredBuf stride x y
             predict8x8 mode vPredBuf stride x y
-            (!sseU, !bitCostU) <- trialEncodeChroma8x8 uOrig uPredBuf residuals stride x y dqFactors lambda coeffProbs
-            (!sseV, !bitCostV) <- trialEncodeChroma8x8 vOrig vPredBuf residuals stride x y dqFactors lambda coeffProbs
+            (!sseU, !bitCostU) <- trialEncodeChroma8x8 uOrig uPredBuf residuals stride x y dqFactors lambda actScale coeffProbs
+            (!sseV, !bitCostV) <- trialEncodeChroma8x8 vOrig vPredBuf residuals stride x y dqFactors lambda actScale coeffProbs
             let !modeBitCost = uvModeCost mode
                 !rdCost = (sseU + sseV) + (lambda * (bitCostU + bitCostV + modeBitCost)) `div` 256
             if rdCost < bestCost
@@ -633,9 +636,10 @@ trialEncodeChroma8x8 ::
   Int -> -- Y position
   DequantFactors ->
   Int -> -- Lambda for trellis quantization
+  Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities
   ST s (Int, Int) -- (SSE, bitCost in 256ths)
-trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda coeffProbs = do
+trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda actScale coeffProbs = do
   let processBlock !bi !sse !rate
         | bi >= 4 = return (sse, rate)
         | otherwise = do
@@ -661,7 +665,7 @@ trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda c
             !cVar256 <- blockOrigVar256 chromaOrig stride (x + subX) (y + subY)
             let !cSsScale = ssimTrellisScale cVar256
             fdct4x4 residuals
-            _ <- trellisQuantizeBlock dqFactors 2 residuals coeffProbs 0 0 cSsScale
+            _ <- trellisQuantizeBlock dqFactors 2 residuals coeffProbs 0 0 cSsScale actScale
             !blockBitCost <- coeffBlockCost residuals coeffProbs 2 0 0
             dequantizeBlock dqFactors 2 residuals
             idct4x4 residuals

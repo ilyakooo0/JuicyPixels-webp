@@ -290,8 +290,9 @@ trellisQuantizeBlock ::
   Int -> -- initial context (0, 1, or 2)
   Int -> -- start position (0 or 1)
   Int -> -- SSIM trellis scale (256 = no masking; lower = more masking in textured regions)
+  Int -> -- activity scale (8.8 fixed point: 256 = unity, <256 = flat MB, >256 = textured MB)
   ST s Bool
-trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startPos !ssimScale = do
+trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startPos !ssimScale !activityScale = do
   let -- Quantization steps per position
       !qDC = fromIntegral (case blockType of
         1 -> dqY2DC factors; 2 -> dqUVDC factors; 3 -> dqYDC factors; _ -> dqYDC factors) :: Int
@@ -307,11 +308,17 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
                in (sumQ + 8) `div` 16 :: Int64
       -- Block-type-specific trellis lambda (from libwebp's SetSegmentParams).
       -- Controls rate-vs-distortion tradeoff in coefficient level selection.
-      !tlam = max 1 (case blockType of
+      !tlamBase = max 1 (case blockType of
         0 -> avgQ * avgQ `div` 4       -- I16 Y-AC: Q²/4
         1 -> avgQ * avgQ `div` 4       -- I16 Y2:   Q²/4
         2 -> 2 * avgQ * avgQ           -- UV:       2*Q²
         _ -> 7 * avgQ * avgQ `div` 8)  -- I4 Y:     7*Q²/8
+      -- Activity masking: scale lambda by per-MB spatial activity. Flat MBs
+      -- get lower lambda (favor keeping coefficients — errors are visible),
+      -- textured MBs get higher lambda (favor dropping coefficients — errors
+      -- are masked by the texture). Matches the RDO lambda modulation done
+      -- in Encode.encodeMacroblocks.
+      !tlam = max 1 ((tlamBase * fromIntegral activityScale) `div` 256)
       -- SSIM distortion scale (replaces fixed RD_DISTO_MULT = 256)
       !ssI64 = fromIntegral ssimScale :: Int64
       -- Sentinel for dead trellis nodes (large but won't overflow on addition)
@@ -342,8 +349,12 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
       return False
     else do
       -- Phase 2: Allocate trellis backtracking arrays
-      -- prevCand[pos*2+cand] = which predecessor candidate (0 or 1) was best
-      prevCand <- VUM.replicate 32 (0 :: Int)
+      -- prevCand[pos*3+cand] = which predecessor candidate (0, 1, or 2) was best.
+      -- Three candidates per position (cand -> level):
+      --   0 -> l0      (truncation toward zero)
+      --   1 -> l0 + 1  (round-up)
+      --   2 -> l0 - 1  (aggressive down-rounding; dead when l0 = 0)
+      prevCand <- VUM.replicate 48 (0 :: Int)
       -- level0[pos] = truncated quantization level at each position
       level0Arr <- VUM.replicate 16 (0 :: Int)
       -- sign[pos] = sign of original coefficient (-1 or 1)
@@ -362,9 +373,16 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
             else 0 :: Int64
 
       -- Phase 3: Forward Viterbi pass
-      -- State: (score, context) for each of 2 candidates at previous position.
-      -- Initially only one virtual predecessor is alive; the second is dead.
-      let fwd !pos !ps0 !pc0 !ps1 !pc1 !bestS !bestP !bestC
+      -- State: (score, context) for each of 3 candidates at previous position.
+      -- Initially only predecessor 0 is alive (the virtual node); 1 and 2 are dead.
+      --
+      -- The 3rd candidate (l0-1) covers two cases that {l0, l0+1} misses:
+      --   (a) l0 = 1: candidate 2 = 0, letting the trellis introduce an
+      --       intermediate zero when the rate cost of encoding level 1 exceeds
+      --       the distortion saved.
+      --   (b) l0 >= 2: candidate 2 = l0-1, letting the trellis aggressively
+      --       round down large coefficients when rate savings beat distortion.
+      let fwd !pos !ps0 !pc0 !ps1 !pc1 !ps2 !pc2 !bestS !bestP !bestC
             | pos > lastPos = return (bestS, bestP, bestC)
             | otherwise = do
                 let !zi = zigzag VU.! pos
@@ -381,7 +399,8 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
                 VUM.unsafeWrite level0Arr pos l0
                 VUM.unsafeWrite signArr pos sgn
 
-                -- Evaluate a candidate quantization level
+                -- Evaluate a candidate quantization level, picking the best of
+                -- three predecessor states.
                 let {-# INLINE evalCand #-}
                     evalCand !lev =
                       let -- Distortion delta relative to all-zero baseline, scaled by
@@ -397,8 +416,14 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
                           !pi1 = blockType * 264 + band * 33 + pc1 * 11
                           !r1 = trellisLevelCost coeffProbs pi1 pc1 lev
                           !s1 = if ps1 >= dead then dead else ps1 + tlam * fromIntegral r1
-                          -- Pick best predecessor
-                          (!bestPrevS, !bestPrevI) = if s0 <= s1 then (s0, 0) else (s1, 1)
+                          -- Rate cost from predecessor 2
+                          !pi2 = blockType * 264 + band * 33 + pc2 * 11
+                          !r2 = trellisLevelCost coeffProbs pi2 pc2 lev
+                          !s2 = if ps2 >= dead then dead else ps2 + tlam * fromIntegral r2
+                          -- Pick best predecessor (3-way min)
+                          (!bestS01, !bestI01) = if s0 <= s1 then (s0, 0) else (s1, 1)
+                          (!bestPrevS, !bestPrevI) =
+                            if bestS01 <= s2 then (bestS01, bestI01) else (s2, 2)
                           -- Node score = best predecessor + distortion delta
                           !nodeS = bestPrevS + dd
                           -- Context for next position
@@ -407,17 +432,26 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
 
                 -- Candidate 0: level = l0 (truncation toward zero)
                 let (!cs0, !cc0, !cp0) = evalCand l0
-                VUM.unsafeWrite prevCand (pos * 2) cp0
+                VUM.unsafeWrite prevCand (pos * 3) cp0
 
-                -- Candidate 1: level = l0 + 1 (one step above truncation)
+                -- Candidate 1: level = l0 + 1 (round-up)
                 let (!cs1, !cc1, !cp1) = evalCand (l0 + 1)
-                VUM.unsafeWrite prevCand (pos * 2 + 1) cp1
+                VUM.unsafeWrite prevCand (pos * 3 + 1) cp1
 
-                -- Check if either candidate is a valid terminal (last nonzero)
+                -- Candidate 2: level = l0 - 1 (aggressive down-rounding).
+                -- Dead when l0 = 0 (would duplicate candidate 0 at level 0 while
+                -- wasting a trellis state; keep the state slot but make it unselectable).
+                let (!cs2, !cc2, !cp2)
+                      | l0 >= 1 = evalCand (l0 - 1)
+                      | otherwise = (dead, 0, 0)
+                VUM.unsafeWrite prevCand (pos * 3 + 2) cp2
+
+                -- Check if any candidate is a valid terminal (last nonzero).
+                -- Level 0 cannot be a terminal: a terminal must be nonzero.
                 let {-# INLINE checkTerm #-}
-                    checkTerm !score !ctx !cIdx !bS !bP !bC
+                    checkTerm !score !ctx !cIdx !lev !bS !bP !bC
                       | score >= dead = (bS, bP, bC)
-                      | l0 + cIdx == 0 = (bS, bP, bC) -- zero level: not a terminal
+                      | lev == 0 = (bS, bP, bC)
                       | otherwise =
                           let !np = pos + 1
                               !ec =
@@ -430,13 +464,14 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
                               !ts = score + tlam * fromIntegral ec
                            in if ts < bS then (ts, pos, cIdx) else (bS, bP, bC)
 
-                let (!bS1, !bP1, !bC1) = checkTerm cs0 cc0 0 bestS bestP bestC
-                    (!bS2, !bP2, !bC2) = checkTerm cs1 cc1 1 bS1 bP1 bC1
+                let (!bS1, !bP1, !bC1) = checkTerm cs0 cc0 0 l0 bestS bestP bestC
+                    (!bS2, !bP2, !bC2) = checkTerm cs1 cc1 1 (l0 + 1) bS1 bP1 bC1
+                    (!bS3, !bP3, !bC3) = checkTerm cs2 cc2 2 (l0 - 1) bS2 bP2 bC2
 
-                fwd (pos + 1) cs0 cc0 cs1 cc1 bS2 bP2 bC2
+                fwd (pos + 1) cs0 cc0 cs1 cc1 cs2 cc2 bS3 bP3 bC3
 
       (!finalBS, !finalBP, !finalBC) <-
-        fwd startPos initScore initialCtx dead 0 skipScore (-1) (-1)
+        fwd startPos initScore initialCtx dead 0 dead 0 skipScore (-1) (-1)
 
       -- Phase 4: Write results
       if finalBP < startPos || finalBS >= dead
@@ -458,16 +493,21 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
                     zeroAfter (p + 1)
           zeroAfter (finalBP + 1)
 
-          -- Backtrack from (finalBP, finalBC) to startPos, writing quantized levels
+          -- Backtrack from (finalBP, finalBC) to startPos, writing quantized levels.
+          -- cand -> level: 0 -> l0, 1 -> l0+1, 2 -> l0-1 (floored at 0).
           let backtrack !pos !cand
                 | pos < startPos = return ()
                 | otherwise = do
                     !l0 <- VUM.unsafeRead level0Arr pos
                     !sgn <- VUM.unsafeRead signArr pos
-                    let !level = min 2047 (l0 + cand)
-                        !quantized = sgn * fromIntegral level
+                    let !level = case cand of
+                          0 -> l0
+                          1 -> l0 + 1
+                          _ -> max 0 (l0 - 1)
+                        !clampedLevel = min 2047 level
+                        !quantized = sgn * fromIntegral clampedLevel
                     VSM.unsafeWrite coeffs (zigzag VU.! pos) quantized
-                    !pCand <- VUM.unsafeRead prevCand (pos * 2 + cand)
+                    !pCand <- VUM.unsafeRead prevCand (pos * 3 + cand)
                     backtrack (pos - 1) pCand
 
           backtrack finalBP finalBC

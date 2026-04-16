@@ -362,6 +362,7 @@ encodeMacroblocks yOrig uOrig vOrig yRecon uRecon vRecon paddedW paddedH mbRows 
                 mbX
                 segDq
                 adjLam
+                actW
                 coeffProbs
                 mEncSeg
                 cEnc
@@ -405,7 +406,8 @@ encodeMacroblock ::
   Int ->
   Int -> -- MB row, col
   DequantFactors ->
-  Int -> -- RDO lambda
+  Int -> -- RDO lambda (activity-adjusted)
+  Int -> -- Activity scale (8.8 fixed, 256 = unity) — for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
   BoolEncoder -> -- Mode and coefficient encoders
@@ -431,7 +433,7 @@ encodeMacroblock ::
   Maybe Word8 -> -- Skip mode: Just probSkipFalse to enable, Nothing to disable
   ST s (BoolEncoder, BoolEncoder, Bool, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int)
   -- Returns: (mEnc, cEnc, isSkip, leftNzY0..3, leftNzU0..1, leftNzV0..1, leftNzDC, leftBM0..3)
-encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX dequantFactors lambda coeffProbs mEnc cEnc aboveNzY aboveNzU aboveNzV aboveNzDC aboveBModes leftNzY0 leftNzY1 leftNzY2 leftNzY3 leftNzU0 leftNzU1 leftNzV0 leftNzV1 leftNzDC leftBM0 leftBM1 leftBM2 leftBM3 mStats mSkipProb = do
+encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX dequantFactors lambda actScale coeffProbs mEnc cEnc aboveNzY aboveNzU aboveNzV aboveNzDC aboveBModes leftNzY0 leftNzY1 leftNzY2 leftNzY3 leftNzU0 leftNzU1 leftNzV0 leftNzV1 leftNzDC leftBM0 leftBM1 leftBM2 leftBM3 mStats mSkipProb = do
   let mbXpix = mbX * 16
       mbYpix = mbY * 16
 
@@ -449,10 +451,10 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
   aNzDC <- fromIntegral <$> VSM.read aboveNzDC mbX
 
   -- Step 1: Select best i16 Y mode using RDO
-  (i16Mode, i16Cost) <- selectIntra16x16ModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda coeffProbs aNzY0 aNzY1 aNzY2 aNzY3 leftNzY0 leftNzY1 leftNzY2 leftNzY3 aNzDC leftNzDC
+  (i16Mode, i16Cost) <- selectIntra16x16ModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda actScale coeffProbs aNzY0 aNzY1 aNzY2 aNzY3 leftNzY0 leftNzY1 leftNzY2 leftNzY3 aNzDC leftNzDC
 
   -- Step 2: Select best B_PRED modes using RDO (modifies yRecon's MB area)
-  (bpredModes, bpredCost) <- selectBPredModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda coeffProbs (fromIntegral aBM0) (fromIntegral aBM1) (fromIntegral aBM2) (fromIntegral aBM3) leftBM0 leftBM1 leftBM2 leftBM3 aNzY0 aNzY1 aNzY2 aNzY3 leftNzY0 leftNzY1 leftNzY2 leftNzY3
+  (bpredModes, bpredCost) <- selectBPredModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda actScale coeffProbs (fromIntegral aBM0) (fromIntegral aBM1) (fromIntegral aBM2) (fromIntegral aBM3) leftBM0 leftBM1 leftBM2 leftBM3 aNzY0 aNzY1 aNzY2 aNzY3 leftNzY0 leftNzY1 leftNzY2 leftNzY3
   -- yRecon now has B_PRED reconstruction; if i16 wins, encodeYBlocks will overwrite it
 
   -- True RDO: mode encoding costs already included in i16Cost and bpredCost
@@ -461,7 +463,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
   -- Step 3: Select best UV mode using RDO (both U and V)
   let chromaX = mbX * 8
       chromaY = mbY * 8
-  (uvPredMode, _) <- selectChromaModeRDO uOrig uRecon vOrig vRecon (paddedW `div` 2) chromaX chromaY dequantFactors lambda coeffProbs
+  (uvPredMode, _) <- selectChromaModeRDO uOrig uRecon vOrig vRecon (paddedW `div` 2) chromaX chromaY dequantFactors lambda actScale coeffProbs
 
   if useBPred
     then do
@@ -478,6 +480,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           bpredModes
           dequantFactors
           lambda
+          actScale
           coeffProbs
           cEnc
           aboveNzY
@@ -508,6 +511,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           uvPredMode
           dequantFactors
           lambda
+          actScale
           coeffProbs
           cEnc1
           2
@@ -527,6 +531,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           uvPredMode
           dequantFactors
           lambda
+          actScale
           coeffProbs
           cEnc2
           2
@@ -563,6 +568,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           i16Mode
           dequantFactors
           lambda
+          actScale
           coeffProbs
           cEnc
           aboveNzY
@@ -593,6 +599,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           uvPredMode
           dequantFactors
           lambda
+          actScale
           coeffProbs
           cEnc1
           2
@@ -612,6 +619,7 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
           uvPredMode
           dequantFactors
           lambda
+          actScale
           coeffProbs
           cEnc2
           2
@@ -684,6 +692,7 @@ encodeYBlocks ::
   Int -> -- Prediction mode (0-3)
   DequantFactors ->
   Int -> -- RDO lambda for trellis quantization
+  Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
   VSM.MVector s Word8 -> -- aboveNzY (mbCols*4, read top row, write bottom row)
@@ -697,7 +706,7 @@ encodeYBlocks ::
   Maybe (CoeffStats s) -> -- Optional coefficient statistics
   ST s (BoolEncoder, Bool, Bool, Int, Int, Int, Int)
   -- Returns: (encoder, y2nz, anyYNz, leftNzY0..3)
-encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 aboveDcNz leftDcNz mStats = do
+encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda actScale coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 aboveDcNz leftDcNz mStats = do
   -- Create temporary buffer for prediction (don't overwrite reconstruction yet)
   predBuf <- VSM.clone yRecon
 
@@ -744,7 +753,7 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs 
 
   -- Quantize Y2 (trellis-optimized)
   let !dcCtx = min 2 (aboveDcNz + leftDcNz)
-  _ <- trellisQuantizeBlock dequantFactors 1 y2DCs coeffProbs dcCtx 0 256
+  _ <- trellisQuantizeBlock dequantFactors 1 y2DCs coeffProbs dcCtx 0 256 actScale
 
   -- ENCODE Y2 FIRST
   -- blockType=1 for Y2 (i16-DC per libwebp convention)
@@ -812,7 +821,7 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda coeffProbs 
             let !ctx = min 2 (aboveNz + leftNz)
             !yVar256 <- blockOrigVar256 yOrig stride (x + col * 4) (y + row * 4)
             let !ySsScale = ssimTrellisScale yVar256
-            _ <- trellisQuantizeBlock dequantFactors 0 residuals coeffProbs ctx 1 ySsScale
+            _ <- trellisQuantizeBlock dequantFactors 0 residuals coeffProbs ctx 1 ySsScale actScale
 
             -- Save quantized values for reconstruction (avoid double-quantization)
             forM_ [0 .. 15] $ \i -> do
@@ -897,6 +906,7 @@ encodeYBlocksBPred ::
   VS.Vector Word8 -> -- 16 sub-block modes
   DequantFactors ->
   Int -> -- RDO lambda for trellis quantization
+  Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder -> -- Coefficient encoder (DCT partition)
   VSM.MVector s Word8 -> -- aboveNzY (mbCols*4)
@@ -908,7 +918,7 @@ encodeYBlocksBPred ::
   Maybe (CoeffStats s) -> -- Optional coefficient statistics
   ST s (BoolEncoder, Bool, Int, Int, Int, Int)
   -- Returns: (encoder, anyYNz, leftNzY0..3)
-encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 mStats = do
+encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda actScale coeffProbs enc aboveNzY mbX leftNzY0 leftNzY1 leftNzY2 leftNzY3 mStats = do
   -- NZ tracking grid for 16 sub-blocks
   nzGrid <- VSM.replicate 16 (0 :: Word8)
 
@@ -965,7 +975,7 @@ encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda coef
             -- Trellis-quantize (blockType=3: Y full with DC, SSIM-weighted)
             !bpVar256 <- blockOrigVar256 yOrig stride (x + subX) (y + subY)
             let !bpSsScale = ssimTrellisScale bpVar256
-            _ <- trellisQuantizeBlock dequantFactors 3 residuals coeffProbs ctx 0 bpSsScale
+            _ <- trellisQuantizeBlock dequantFactors 3 residuals coeffProbs ctx 0 bpSsScale actScale
 
             -- Encode coefficients (blockType=3 for i4-AC, startPos=0 to include DC)
             (e', hasNz) <- encodeCoefficients residuals coeffProbs 3 ctx 0 e
@@ -1020,6 +1030,7 @@ encodeChromaBlocks ::
   Int -> -- Prediction mode (0-3)
   DequantFactors ->
   Int -> -- RDO lambda for trellis quantization
+  Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities
   BoolEncoder ->
   Int -> -- Coefficient block type (2 for both U and V)
@@ -1030,7 +1041,7 @@ encodeChromaBlocks ::
   Maybe (CoeffStats s) -> -- Optional coefficient statistics
   ST s (BoolEncoder, Bool, Int, Int)
   -- Returns: (encoder, anyChromaNz, leftNz0, leftNz1)
-encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lambda coeffProbs enc coeffBlockType aboveNz mbX leftNz0 leftNz1 mStats = do
+encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lambda actScale coeffProbs enc coeffBlockType aboveNz mbX leftNz0 leftNz1 mStats = do
   -- Create temporary buffer for prediction
   predBuf <- VSM.clone chromaRecon
 
@@ -1090,7 +1101,7 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lam
             let !cSsScale = ssimTrellisScale cVar256
 
             -- Trellis-quantize (always use type 2 = UV quant for both U and V)
-            _ <- trellisQuantizeBlock dequantFactors 2 residuals coeffProbs ctx 0 cSsScale
+            _ <- trellisQuantizeBlock dequantFactors 2 residuals coeffProbs ctx 0 cSsScale actScale
 
             -- Encode coefficients with NZ context
             (e', hasNz) <- encodeCoefficients residuals coeffProbs coeffBlockType ctx 0 e
