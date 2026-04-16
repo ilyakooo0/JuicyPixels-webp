@@ -656,8 +656,12 @@ trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda c
                                 fillCol (c + 1)
                       fillCol 0
             fillRes 0
+            -- SSIM masking based on chroma block content (mode-invariant, but
+            -- cheap enough to recompute; mirrors luma I16 path).
+            !cVar256 <- blockOrigVar256 chromaOrig stride (x + subX) (y + subY)
+            let !cSsScale = ssimTrellisScale cVar256
             fdct4x4 residuals
-            _ <- trellisQuantizeBlock dqFactors 2 residuals coeffProbs 0 0 256
+            _ <- trellisQuantizeBlock dqFactors 2 residuals coeffProbs 0 0 cSsScale
             !blockBitCost <- coeffBlockCost residuals coeffProbs 2 0 0
             dequantizeBlock dqFactors 2 residuals
             idct4x4 residuals

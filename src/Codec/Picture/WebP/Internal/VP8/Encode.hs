@@ -1083,8 +1083,14 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lam
             -- Forward DCT
             fdct4x4 residuals
 
+            -- SSIM-aware trellis scale from chroma block variance: flat blocks
+            -- get full distortion weight (preserve DC accuracy), textured blocks
+            -- allow more aggressive zeroing (masked by visual complexity).
+            !cVar256 <- blockOrigVar256 chromaOrig stride (x + subX) (y + subY)
+            let !cSsScale = ssimTrellisScale cVar256
+
             -- Trellis-quantize (always use type 2 = UV quant for both U and V)
-            _ <- trellisQuantizeBlock dequantFactors 2 residuals coeffProbs ctx 0 256
+            _ <- trellisQuantizeBlock dequantFactors 2 residuals coeffProbs ctx 0 cSsScale
 
             -- Encode coefficients with NZ context
             (e', hasNz) <- encodeCoefficients residuals coeffProbs coeffBlockType ctx 0 e
