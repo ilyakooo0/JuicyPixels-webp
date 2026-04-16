@@ -590,6 +590,9 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale coeffPr
 
 -- | Select best chroma mode using true RDO over both U and V planes.
 -- Score = (SSE_U + SSE_V) + (lambda * (bitCost_U + bitCost_V + modeCost)) / 256.
+-- NZ context from neighboring MBs (U and V tracked separately) is plumbed into
+-- each plane's trial encode so coefficient bit-cost estimates match the real
+-- encoder and mode decisions aren't biased by under-estimated rate.
 {-# INLINE selectChromaModeRDO #-}
 selectChromaModeRDO ::
   VSM.MVector s Word8 -> -- U original
@@ -603,8 +606,12 @@ selectChromaModeRDO ::
   Int -> -- Lambda
   Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities (1056 flat entries)
+  Int -> Int -> -- aboveNzU[0..1] (from MB above)
+  Int -> Int -> -- aboveNzV[0..1]
+  Int -> Int -> -- leftNzU[0..1] (from MB to the left)
+  Int -> Int -> -- leftNzV[0..1]
   ST s (Int, Int) -- (mode, rdCost)
-selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda actScale coeffProbs = do
+selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda actScale coeffProbs aNzU0 aNzU1 aNzV0 aNzV1 lNzU0 lNzU1 lNzV0 lNzV1 = do
   uPredBuf <- VSM.clone uRecon
   vPredBuf <- VSM.clone vRecon
   residuals <- VSM.new 16
@@ -614,8 +621,8 @@ selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda actSca
         | otherwise = do
             predict8x8 mode uPredBuf stride x y
             predict8x8 mode vPredBuf stride x y
-            (!sseU, !bitCostU) <- trialEncodeChroma8x8 uOrig uPredBuf residuals stride x y dqFactors lambda actScale coeffProbs
-            (!sseV, !bitCostV) <- trialEncodeChroma8x8 vOrig vPredBuf residuals stride x y dqFactors lambda actScale coeffProbs
+            (!sseU, !bitCostU) <- trialEncodeChroma8x8 uOrig uPredBuf residuals stride x y dqFactors lambda actScale coeffProbs aNzU0 aNzU1 lNzU0 lNzU1
+            (!sseV, !bitCostV) <- trialEncodeChroma8x8 vOrig vPredBuf residuals stride x y dqFactors lambda actScale coeffProbs aNzV0 aNzV1 lNzV0 lNzV1
             let !modeBitCost = uvModeCost mode
                 !rdCost = (sseU + sseV) + (lambda * (bitCostU + bitCostV + modeBitCost)) `div` 256
             if rdCost < bestCost
@@ -625,6 +632,8 @@ selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda actSca
   tryMode 0 0 maxBound
 
 -- | Trial-encode a single 8x8 chroma plane (4 blocks of 4x4).
+-- Tracks NZ context propagation within the 2x2 block layout so the trellis
+-- and coeff bit-cost estimates match what the actual encoder will see.
 -- Returns (SSE, bitCost) where bitCost is in 256ths of a bit.
 {-# INLINE trialEncodeChroma8x8 #-}
 trialEncodeChroma8x8 ::
@@ -638,40 +647,49 @@ trialEncodeChroma8x8 ::
   Int -> -- Lambda for trellis quantization
   Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities
+  Int -> Int -> -- aboveNz[0..1] (one bit per chroma column from MB above)
+  Int -> Int -> -- leftNz[0..1] (one bit per chroma row from MB to the left)
   ST s (Int, Int) -- (SSE, bitCost in 256ths)
-trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda actScale coeffProbs = do
-  let processBlock !bi !sse !rate
-        | bi >= 4 = return (sse, rate)
-        | otherwise = do
-            let !row = bi `shiftR` 1
-                !col = bi .&. 1
-                !subX = col * 4
-                !subY = row * 4
-            let fillRes !r
-                  | r >= 4 = return ()
-                  | otherwise = do
-                      let fillCol !c
-                            | c >= 4 = fillRes (r + 1)
-                            | otherwise = do
-                                let !idx = (y + subY + r) * stride + (x + subX + c)
-                                !o <- VSM.unsafeRead chromaOrig idx
-                                !p <- VSM.unsafeRead predBuf idx
-                                VSM.unsafeWrite residuals (r * 4 + c) (fromIntegral o - fromIntegral p :: Int16)
-                                fillCol (c + 1)
-                      fillCol 0
-            fillRes 0
-            -- SSIM masking based on chroma block content (mode-invariant, but
-            -- cheap enough to recompute; mirrors luma I16 path).
-            !cVar256 <- blockOrigVar256 chromaOrig stride (x + subX) (y + subY)
-            let !cSsScale = ssimTrellisScale cVar256
-            fdct4x4 residuals
-            _ <- trellisQuantizeBlock dqFactors 2 residuals coeffProbs 0 0 cSsScale actScale
-            !blockBitCost <- coeffBlockCost residuals coeffProbs 2 0 0
-            dequantizeBlock dqFactors 2 residuals
-            idct4x4 residuals
-            !blockSSE <- computeBlockSSEM chromaOrig predBuf residuals stride (x + subX) (y + subY) 0
-            processBlock (bi + 1) (sse + blockSSE) (rate + blockBitCost)
-  processBlock 0 0 0
+trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda actScale coeffProbs aNz0 aNz1 lNz0 lNz1 = do
+  -- Per-block work: fill residuals, DCT, trellis quantize with given ctx,
+  -- dequant + IDCT, SSE. Returns (hasNz, blockBitCost, blockSSE).
+  let doBlock !bi !aboveNz !leftNz = do
+        let !row = bi `shiftR` 1
+            !col = bi .&. 1
+            !subX = col * 4
+            !subY = row * 4
+        let fillRes !r
+              | r >= 4 = return ()
+              | otherwise = do
+                  let fillCol !c
+                        | c >= 4 = fillRes (r + 1)
+                        | otherwise = do
+                            let !idx = (y + subY + r) * stride + (x + subX + c)
+                            !o <- VSM.unsafeRead chromaOrig idx
+                            !p <- VSM.unsafeRead predBuf idx
+                            VSM.unsafeWrite residuals (r * 4 + c) (fromIntegral o - fromIntegral p :: Int16)
+                            fillCol (c + 1)
+                  fillCol 0
+        fillRes 0
+        -- SSIM masking based on chroma block content (mode-invariant, but
+        -- cheap enough to recompute; mirrors luma I16 path).
+        !cVar256 <- blockOrigVar256 chromaOrig stride (x + subX) (y + subY)
+        let !cSsScale = ssimTrellisScale cVar256
+            !ctx = min 2 (aboveNz + leftNz)
+        fdct4x4 residuals
+        !hasNz <- trellisQuantizeBlock dqFactors 2 residuals coeffProbs ctx 0 cSsScale actScale
+        !blockBitCost <- coeffBlockCost residuals coeffProbs 2 ctx 0
+        dequantizeBlock dqFactors 2 residuals
+        idct4x4 residuals
+        !blockSSE <- computeBlockSSEM chromaOrig predBuf residuals stride (x + subX) (y + subY) 0
+        return (if hasNz then 1 else 0 :: Int, blockBitCost, blockSSE)
+  -- 2x2 layout: bi 0 1 / 2 3. Propagate NZ within the MB as the real encoder does.
+  (!nz0, !r0, !s0) <- doBlock 0 aNz0 lNz0
+  (!nz1, !r1, !s1) <- doBlock 1 aNz1 nz0
+  (!nz2, !r2, !s2) <- doBlock 2 nz0 lNz1
+  (!nz3, !r3, !s3) <- doBlock 3 nz1 nz2
+  let !_ = nz3 -- last block's NZ is not consumed inside this plane
+  return (s0 + s1 + s2 + s3, r0 + r1 + r2 + r3)
 
 -- ---------------------------------------------------------------------------
 -- RDO helpers

@@ -21,7 +21,7 @@ import Codec.Picture.WebP.Internal.VP8.IDCT
 import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow, applyNormalLoopFilterRowSegmented)
 import Codec.Picture.WebP.Internal.VP8.ModeSelection
 import Codec.Picture.WebP.Internal.VP8.Predict
-import Codec.Picture.WebP.Internal.VP8.Quantize (blockOrigVar256, qualityToYacQi, rdModeLambda, ssimTrellisScale, trellisQuantizeBlock)
+import Codec.Picture.WebP.Internal.VP8.Quantize (blockResidualVar256, qualityToYacQi, rdModeLambda, ssimTrellisScale, trellisQuantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad (forM_, when)
 import Control.Monad.ST
@@ -449,6 +449,10 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
   aNzY2 <- fromIntegral <$> VSM.read aboveNzY (mbX * 4 + 2)
   aNzY3 <- fromIntegral <$> VSM.read aboveNzY (mbX * 4 + 3)
   aNzDC <- fromIntegral <$> VSM.read aboveNzDC mbX
+  aNzU0 <- fromIntegral <$> VSM.read aboveNzU (mbX * 2)
+  aNzU1 <- fromIntegral <$> VSM.read aboveNzU (mbX * 2 + 1)
+  aNzV0 <- fromIntegral <$> VSM.read aboveNzV (mbX * 2)
+  aNzV1 <- fromIntegral <$> VSM.read aboveNzV (mbX * 2 + 1)
 
   -- Step 1: Select best i16 Y mode using RDO
   (i16Mode, i16Cost) <- selectIntra16x16ModeRDO yOrig yRecon paddedW mbXpix mbYpix dequantFactors lambda actScale coeffProbs aNzY0 aNzY1 aNzY2 aNzY3 leftNzY0 leftNzY1 leftNzY2 leftNzY3 aNzDC leftNzDC
@@ -460,10 +464,11 @@ encodeMacroblock yOrig uOrig vOrig yRecon uRecon vRecon paddedW _paddedH mbY mbX
   -- True RDO: mode encoding costs already included in i16Cost and bpredCost
   let useBPred = bpredCost < i16Cost
 
-  -- Step 3: Select best UV mode using RDO (both U and V)
+  -- Step 3: Select best UV mode using RDO (both U and V), using real NZ
+  -- context so the bit-cost estimate matches what encodeChromaBlocks will see.
   let chromaX = mbX * 8
       chromaY = mbY * 8
-  (uvPredMode, _) <- selectChromaModeRDO uOrig uRecon vOrig vRecon (paddedW `div` 2) chromaX chromaY dequantFactors lambda actScale coeffProbs
+  (uvPredMode, _) <- selectChromaModeRDO uOrig uRecon vOrig vRecon (paddedW `div` 2) chromaX chromaY dequantFactors lambda actScale coeffProbs aNzU0 aNzU1 aNzV0 aNzV1 leftNzU0 leftNzU1 leftNzV0 leftNzV1
 
   if useBPred
     then do
@@ -716,6 +721,11 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda actScale co
   -- Collect 16 Y block DCs for Y2 by doing forward DCT on all blocks
   y2DCs <- VSM.new 16
   residualBlocks <- VSM.new (16 * 16) -- Store all 16 blocks for later encoding
+  -- Per-block residual variance (pre-FDCT, spatial). Used below to drive
+  -- the SSIM trellis scale from "how much signal must be coded" rather than
+  -- from raw pixel variance — so sharp edges (good prediction → small
+  -- residual) aren't misclassified as texture and over-masked.
+  resVars <- VSM.new 16 :: ST s (VSM.MVector s Int)
 
   -- First pass: Compute all residuals and DCTs, collect DCs
   forM_ [0 .. 15] $ \blockIdx -> do
@@ -735,6 +745,10 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda actScale co
         pred <- VSM.read predBuf idx
         let residual = fromIntegral orig - fromIntegral pred :: Int16
         VSM.write residuals (row * 4 + col) residual
+
+    -- Capture residual variance before FDCT (spatial domain)
+    !rvar <- blockResidualVar256 residuals
+    VSM.write resVars blockIdx rvar
 
     -- Forward DCT
     fdct4x4 residuals
@@ -819,7 +833,7 @@ encodeYBlocks yOrig yRecon stride x y predMode dequantFactors lambda actScale co
 
             -- Trellis-quantize AC coefficients (SSIM-weighted distortion)
             let !ctx = min 2 (aboveNz + leftNz)
-            !yVar256 <- blockOrigVar256 yOrig stride (x + col * 4) (y + row * 4)
+            !yVar256 <- VSM.unsafeRead resVars blockIdx
             let !ySsScale = ssimTrellisScale yVar256
             _ <- trellisQuantizeBlock dequantFactors 0 residuals coeffProbs ctx 1 ySsScale actScale
 
@@ -950,6 +964,11 @@ encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda actS
                 !pred <- VSM.read yRecon idx
                 VSM.write residuals (r * 4 + c) (fromIntegral orig - fromIntegral pred :: Int16)
 
+            -- Residual-variance-based SSIM scale (see note in encodeChromaBlocks).
+            -- Captured before FDCT while residuals are still spatial.
+            !bpVar256 <- blockResidualVar256 residuals
+            let !bpSsScale = ssimTrellisScale bpVar256
+
             -- Forward DCT
             fdct4x4 residuals
 
@@ -973,8 +992,6 @@ encodeYBlocksBPred yOrig yRecon stride x y bpredModes dequantFactors lambda actS
             let !ctx = min 2 (aboveNz + leftNz)
 
             -- Trellis-quantize (blockType=3: Y full with DC, SSIM-weighted)
-            !bpVar256 <- blockOrigVar256 yOrig stride (x + subX) (y + subY)
-            let !bpSsScale = ssimTrellisScale bpVar256
             _ <- trellisQuantizeBlock dequantFactors 3 residuals coeffProbs ctx 0 bpSsScale actScale
 
             -- Encode coefficients (blockType=3 for i4-AC, startPos=0 to include DC)
@@ -1091,14 +1108,17 @@ encodeChromaBlocks chromaOrig chromaRecon stride x y predMode dequantFactors lam
                 let residual = fromIntegral orig - fromIntegral pred :: Int16
                 VSM.write residuals (r * 4 + c) residual
 
+            -- SSIM-aware trellis scale from the RESIDUAL variance (not orig
+            -- pixel variance). This distinguishes predictable structure
+            -- (edges/gradients → near-zero residual → scale ≈ 256, preserve
+            -- all coefficients) from true texture/noise (large residual →
+            -- scale drops, masking applies). Must be computed before FDCT
+            -- while residuals are still in the spatial domain.
+            !cVar256 <- blockResidualVar256 residuals
+            let !cSsScale = ssimTrellisScale cVar256
+
             -- Forward DCT
             fdct4x4 residuals
-
-            -- SSIM-aware trellis scale from chroma block variance: flat blocks
-            -- get full distortion weight (preserve DC accuracy), textured blocks
-            -- allow more aggressive zeroing (masked by visual complexity).
-            !cVar256 <- blockOrigVar256 chromaOrig stride (x + subX) (y + subY)
-            let !cSsScale = ssimTrellisScale cVar256
 
             -- Trellis-quantize (always use type 2 = UV quant for both U and V)
             _ <- trellisQuantizeBlock dequantFactors 2 residuals coeffProbs ctx 0 cSsScale actScale

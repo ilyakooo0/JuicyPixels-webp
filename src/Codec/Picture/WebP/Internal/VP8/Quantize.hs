@@ -9,6 +9,7 @@ module Codec.Picture.WebP.Internal.VP8.Quantize
     rdModeLambda,
     ssimC2Scaled,
     blockOrigVar256,
+    blockResidualVar256,
     ssimTrellisScale,
   )
 where
@@ -241,6 +242,35 @@ blockOrigVar256 buf stride bx by = do
                       !v <- fromIntegral <$> VSM.unsafeRead buf ((by + r) * stride + (bx + c))
                       goC (c + 1) (sx + v) (sx2 + v * v)
             goC 0 sX sX2
+  go 0 0 0
+
+-- | Compute 256-scaled variance of a 4x4 residual block (post-prediction,
+-- pre-FDCT). Same formula as 'blockOrigVar256' but reads the 16 spatial
+-- residuals directly from the linear residuals buffer.
+--
+-- Why this signal is better than the original-pixel variance for content-
+-- adaptive SSIM masking:
+--
+--   * Sharp edge with good prediction (V/H/TM) → orig var huge, residual
+--     var near zero. Pixel-based masking wrongly discounts the block's
+--     coefficients; residual-based masking preserves them.
+--   * Smooth gradient → both vars small → no masking, coefficients
+--     preserved (mitigates banding in low-quality encodes).
+--   * Texture/noise → prediction fails, residual var stays high → masking
+--     kicks in where it's actually safe (perceptually hidden by the texture).
+--
+-- In short, residual variance measures how much signal must actually be
+-- coded, which is what the SSIM masking should discount — not the raw
+-- pixel variance, which conflates structure (edges) with noise (texture).
+{-# INLINE blockResidualVar256 #-}
+blockResidualVar256 :: VSM.MVector s Int16 -> ST s Int
+blockResidualVar256 residuals = do
+  let go !i !sX !sX2
+        | i >= 16 = return (16 * sX2 - sX * sX)
+        | otherwise = do
+            !v16 <- VSM.unsafeRead residuals i
+            let !v = fromIntegral v16 :: Int
+            go (i + 1) (sX + v) (sX2 + v * v)
   go 0 0 0
 
 -- | Compute SSIM-based trellis distortion scale from block variance.
