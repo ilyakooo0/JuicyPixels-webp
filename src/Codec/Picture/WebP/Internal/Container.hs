@@ -81,12 +81,24 @@ getWebP = do
     fail "Not a RIFF file"
 
   fileSize <- getWord32le
-  _ <- return fileSize
+  when (fileSize < 4) $
+    fail "RIFF size too small"
 
   webpTag <- getByteString 4
   unless (webpTag == "WEBP") $
     fail "Not a WebP file"
 
+  rest <- getRemainingLazyByteString
+  let declared = fromIntegral fileSize - 4
+      payload = BL.take declared rest
+
+  case runGetOrFail getWebPBody payload of
+    Left (_, _, err) -> fail err
+    Right (_, _, result) -> return result
+
+-- | Parse the WebP payload (chunks after the RIFF header)
+getWebPBody :: Get WebPFile
+getWebPBody = do
   firstChunkTag <- lookAhead (getByteString 4)
 
   case firstChunkTag of
@@ -151,7 +163,10 @@ getChunk = do
     "VP8L" -> ChunkVP8L <$> getByteString size <* skipPadding chunkSize
     "ALPH" -> ChunkALPH <$> getByteString size <* skipPadding chunkSize
     "ANIM" -> do
+      when (size < 6) $
+        fail "ANIM chunk too small"
       chunk <- getANIMChunk
+      skip (size - 6)
       skipPadding chunkSize
       return $ ChunkANIM chunk
     "ANMF" -> do
@@ -185,6 +200,8 @@ getANIMChunk = do
 -- | Parse ANMF chunk
 getANMFChunk :: Int -> Get WebPChunk
 getANMFChunk totalSize = do
+  when (totalSize < 16) $
+    fail "ANMF chunk too small"
   frameX <- (* 2) . fromIntegral <$> getWord24le
   frameY <- (* 2) . fromIntegral <$> getWord24le
   frameWidthMinus1 <- getWord24le
@@ -192,7 +209,7 @@ getANMFChunk totalSize = do
   duration <- fromIntegral <$> getWord24le
 
   flags <- getWord8
-  let blend = testBit flags 1
+  let blend = not (testBit flags 1)
       dispose = testBit flags 0
 
   let headerSize = 16

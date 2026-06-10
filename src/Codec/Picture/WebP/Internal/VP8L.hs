@@ -14,6 +14,7 @@ import Codec.Picture.WebP.Internal.VP8L.Transform
 import Control.Monad (foldM, replicateM, when)
 import Data.Bits
 import qualified Data.ByteString as B
+import qualified Data.Vector as V
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as VU
 import Data.Word
@@ -33,25 +34,27 @@ decodeVP8L bs = do
       width = fromIntegral widthMinus1 + 1
       height = fromIntegral heightMinus1 + 1
 
-  let (alphaIsUsed, reader4) = readBit reader3
+  let (_alphaIsUsed, reader4) = readBit reader3
       (versionNum, reader5) = readBits 3 reader4
 
   when (versionNum /= 0) $
     Left $
       "Unsupported VP8L version: " ++ show versionNum
 
-  decodeVP8LImage width height alphaIsUsed reader5
+  decodeVP8LImage width height reader5
 
--- | Decode a VP8L image without header (for ALPH chunk)
+-- | Decode a VP8L image without header (for ALPH chunk).
+-- The stream starts at the transform-present flag.
 decodeVP8LHeaderless :: Int -> Int -> B.ByteString -> Either String (VS.Vector Word32)
 decodeVP8LHeaderless width height bs = do
   let reader = initBitReader bs
-  (pixels, _) <- decodeVP8LImageData width height reader []
-  return pixels
+  (transforms, effectiveWidth, reader1) <- readTransforms width height reader
+  (pixels, _) <- decodeVP8LImageData effectiveWidth height reader1 transforms
+  applyInverseTransforms transforms width height pixels
 
 -- | Decode the VP8L image data (common path for full and headless)
-decodeVP8LImage :: Int -> Int -> Bool -> BitReader -> Either String (Image PixelRGBA8)
-decodeVP8LImage width height alphaIsUsed reader = do
+decodeVP8LImage :: Int -> Int -> BitReader -> Either String (Image PixelRGBA8)
+decodeVP8LImage width height reader = do
   when (width <= 0 || width > 16384) $
     Left $
       "Invalid width in decodeVP8LImage: " ++ show width
@@ -65,7 +68,7 @@ decodeVP8LImage width height alphaIsUsed reader = do
 
   finalPixels <- applyInverseTransforms transforms width height pixels
 
-  let image = pixelsToImage width height finalPixels alphaIsUsed
+  let image = pixelsToImage width height finalPixels
   return image
 
 -- | Read all transforms, returning the effective width (may be reduced by color-indexing bundling)
@@ -146,7 +149,7 @@ decodeSubresolutionImage width height reader = do
   (group, reader3) <- readPrefixCodeGroup reader2 maybeCache
 
   -- Decode LZ77 data
-  decodeLZ77 width height maybeCache group Nothing reader3
+  decodeLZ77 width height maybeCache (V.singleton group) Nothing reader3
 
 -- | Decode spatially-coded image (main image or entropy image)
 decodeVP8LImageData :: Int -> Int -> BitReader -> [VP8LTransform] -> Either String (VS.Vector Word32, BitReader)
@@ -183,17 +186,17 @@ decodeVP8LImageData width height reader _transforms = do
         (group, r) <- readPrefixCodeGroup reader3 maybeCache
         return ([group], Nothing, r)
 
-  codeGroup <- case prefixCodeGroups of
-    [] -> Left "No prefix code groups"
-    (g : _) -> Right g
+  when (null prefixCodeGroups) $
+    Left "No prefix code groups"
 
-  decodeLZ77 width height maybeCache codeGroup entropyImage reader4
+  decodeLZ77 width height maybeCache (V.fromList prefixCodeGroups) entropyImage reader4
 
--- | Count the number of entropy groups in the entropy image
+-- | Count the number of entropy groups in the entropy image.
+-- The meta prefix code is the 16-bit value (red << 8) | green of each entropy pixel.
 {-# INLINE countEntropyGroups #-}
 countEntropyGroups :: VS.Vector Word32 -> Int
 countEntropyGroups entropyImage =
-  let maxGroup = VS.foldl' (\acc pixel -> max acc (fromIntegral ((pixel `shiftR` 8) .&. 0xFF))) 0 entropyImage
+  let maxGroup = VS.foldl' (\acc pixel -> max acc (fromIntegral ((pixel `shiftR` 8) .&. 0xFFFF))) 0 entropyImage
    in maxGroup + 1
 
 -- | Read multiple prefix code groups sequentially
@@ -260,10 +263,11 @@ addPixels p1 p2 =
       !b = ((p1 .&. 0xFF) + (p2 .&. 0xFF)) .&. 0xFF
    in (a `shiftL` 24) .|. (r `shiftL` 16) .|. (g `shiftL` 8) .|. b
 
--- | Convert pixel data to JuicyPixels image
+-- | Convert pixel data to JuicyPixels image.
+-- The alpha_is_used header bit is only a hint and must not affect decoding.
 {-# INLINE pixelsToImage #-}
-pixelsToImage :: Int -> Int -> VS.Vector Word32 -> Bool -> Image PixelRGBA8
-pixelsToImage width height pixels alphaIsUsed =
+pixelsToImage :: Int -> Int -> VS.Vector Word32 -> Image PixelRGBA8
+pixelsToImage width height pixels =
   let totalComponents = width * height * 4
       !pixelsLen = VS.length pixels
       pixelData = VS.generate totalComponents $ \i ->
@@ -277,6 +281,6 @@ pixelsToImage width height pixels alphaIsUsed =
                       0 -> fromIntegral ((pixel `shiftR` 16) .&. 0xFF) -- R
                       1 -> fromIntegral ((pixel `shiftR` 8) .&. 0xFF) -- G
                       2 -> fromIntegral (pixel .&. 0xFF) -- B
-                      3 -> if alphaIsUsed then fromIntegral ((pixel `shiftR` 24) .&. 0xFF) else 255 -- A
+                      3 -> fromIntegral ((pixel `shiftR` 24) .&. 0xFF) -- A
                       _ -> 0
    in Image width height pixelData

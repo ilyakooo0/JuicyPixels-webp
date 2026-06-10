@@ -232,6 +232,11 @@ minMatchLen = 2
 maxMatchLen :: Int
 maxMatchLen = 4096
 
+-- | Maximum match distance in pixels (libwebp WINDOW_SIZE).
+-- Distances above this cannot be represented by the 40 distance prefix codes.
+maxMatchDist :: Int
+maxMatchDist = (1 `shiftL` 20) - 120
+
 -- | Hash a single ARGB pixel to an index in [0, 2^hashBits - 1].
 {-# INLINE hashPixel #-}
 hashPixel :: Word32 -> Int
@@ -279,6 +284,9 @@ lz77Compress _width _height pixels = runST $ do
         where
           go !cand !bestLen !bestDist !depth !maxLen
             | cand < 0 || depth >= maxChainDepth = return (bestLen, bestDist)
+            -- Chain positions only get older, so all further candidates
+            -- are also out of the window.
+            | pos - cand > maxMatchDist = return (bestLen, bestDist)
             | otherwise = do
                 let !dist = pos - cand
                 -- Match: compare pixels starting at cand and pos

@@ -19,6 +19,7 @@ import Control.Monad (forM_, when)
 import Control.Monad.ST
 import Data.Bits
 import Data.STRef
+import qualified Data.Vector as V
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as VU
@@ -251,11 +252,11 @@ decodeLZ77 ::
   Int ->
   Int ->
   Maybe ColorCache ->
-  PrefixCodeGroup ->
+  V.Vector PrefixCodeGroup ->
   Maybe (VS.Vector Word32, Int) ->
   BitReader ->
   Either String (VS.Vector Word32, BitReader)
-decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ do
+decodeLZ77 width height maybeCache codeGroups maybeEntropyImage reader = runST $ do
   when (width <= 0 || width > 16384 || height <= 0 || height > 16384) $
     error $
       "Invalid dimensions in decodeLZ77: " ++ show width ++ "x" ++ show height
@@ -272,86 +273,92 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
       useCache = cacheBits > 0
   mutableCache <- createMutableColorCache cacheBits
 
+  let !numGroups = V.length codeGroups
+
   let loop !pos !r
         | pos >= totalPixels = do
             result <- VS.unsafeFreeze output
             return $ Right (result, r)
         | otherwise = do
-            let (y, x) = pos `divMod` width -- Fixed: y is row (quotient), x is column (remainder)
-                _groupIdx = getEntropyGroup x y maybeEntropyImage width
+            let (y, x) = pos `divMod` width -- y is row (quotient), x is column (remainder)
+                !groupIdx = getEntropyGroup x y maybeEntropyImage width
+            if groupIdx < 0 || groupIdx >= numGroups
+              then return $ Left $ "Entropy group index out of bounds: " ++ show groupIdx ++ " (groups: " ++ show numGroups ++ ")"
+              else loopWithGroup pos (codeGroups `V.unsafeIndex` groupIdx) r
 
-            let (greenSym, r1) = decodeSymbol (pcgGreen codeGroup) r
+      loopWithGroup !pos !codeGroup !r = do
+        let (greenSym, r1) = decodeSymbol (pcgGreen codeGroup) r
 
-            if greenSym < 256
+        if greenSym < 256
+          then do
+            let (redSym, r2) = decodeSymbol (pcgRed codeGroup) r1
+                (blueSym, r3) = decodeSymbol (pcgBlue codeGroup) r2
+                (alphaSym, r4) = decodeSymbol (pcgAlpha codeGroup) r3
+
+                !color = packColor (fromIntegral alphaSym) (fromIntegral redSym) (fromIntegral greenSym) (fromIntegral blueSym)
+
+            VSM.unsafeWrite output pos color
+
+            -- Insert into mutable cache (no allocation)
+            when useCache $ insertColorM color mutableCache
+
+            loop (pos + 1) r4
+          else
+            if greenSym < 280
               then do
-                let (redSym, r2) = decodeSymbol (pcgRed codeGroup) r1
-                    (blueSym, r3) = decodeSymbol (pcgBlue codeGroup) r2
-                    (alphaSym, r4) = decodeSymbol (pcgAlpha codeGroup) r3
+                let lengthCode = fromIntegral greenSym
+                when (lengthCode < 256 || lengthCode >= 280) $
+                  error $
+                    "Invalid length code: " ++ show lengthCode
 
-                    !color = packColor (fromIntegral alphaSym) (fromIntegral redSym) (fromIntegral greenSym) (fromIntegral blueSym)
+                let (baseLen, extraBits) = lengthPrefixTable VU.! lengthCode
+                when (extraBits > 20) $
+                  error $
+                    "Length extra bits too large: " ++ show extraBits
 
-                VSM.unsafeWrite output pos color
+                let (extra, r2) = readBits extraBits r1
+                    !len = baseLen + fromIntegral extra
 
-                -- Insert into mutable cache (no allocation)
-                when useCache $ insertColorM color mutableCache
+                when (len > 100000) $
+                  error $
+                    "Length too large: " ++ show len
 
-                loop (pos + 1) r4
-              else
-                if greenSym < 280
-                  then do
-                    let lengthCode = fromIntegral greenSym
-                    when (lengthCode < 256 || lengthCode >= 280) $
-                      error $
-                        "Invalid length code: " ++ show lengthCode
+                -- Decode distance symbol (0-39) and apply prefix decoding
+                -- to get the actual distance code, then use 2D map or 1D offset.
+                let (distSym, r3) = decodeSymbol (pcgDistance codeGroup) r2
+                    !distPrefixCode = fromIntegral distSym :: Int
 
-                    let (baseLen, extraBits) = lengthPrefixTable VU.! lengthCode
-                    when (extraBits > 20) $
-                      error $
-                        "Length extra bits too large: " ++ show extraBits
+                let (!distCode, !r4) =
+                      if distPrefixCode < 4
+                        then (distPrefixCode + 1, r3)
+                        else
+                          let !distExtraBits = (distPrefixCode - 2) `shiftR` 1
+                              !distOffset = (2 + (distPrefixCode .&. 1)) `shiftL` distExtraBits
+                              (!distExtra, !r3') = readBits distExtraBits r3
+                           in (distOffset + fromIntegral distExtra + 1, r3')
 
-                    let (extra, r2) = readBits extraBits r1
-                        !len = baseLen + fromIntegral extra
+                -- Convert distance code to scan-line pixel distance
+                let !dist =
+                      if distCode <= 120
+                        then
+                          let (!xi, !yi) = kDistanceMapXY VU.! (distCode - 1)
+                           in max 1 (xi + yi * width)
+                        else distCode - 120
 
-                    when (len > 100000) $
-                      error $
-                        "Length too large: " ++ show len
+                when (dist > pos) $
+                  error $
+                    "Distance " ++ show dist ++ " exceeds position " ++ show pos
 
-                    -- Decode distance symbol (0-39) and apply prefix decoding
-                    -- to get the actual distance code, then use 2D map or 1D offset.
-                    let (distSym, r3) = decodeSymbol (pcgDistance codeGroup) r2
-                        !distPrefixCode = fromIntegral distSym :: Int
-
-                    let (!distCode, !r4) =
-                          if distPrefixCode < 4
-                            then (distPrefixCode + 1, r3)
-                            else
-                              let !distExtraBits = (distPrefixCode - 2) `shiftR` 1
-                                  !distOffset = (2 + (distPrefixCode .&. 1)) `shiftL` distExtraBits
-                                  (!distExtra, !r3') = readBits distExtraBits r3
-                               in (distOffset + fromIntegral distExtra + 1, r3')
-
-                    -- Convert distance code to scan-line pixel distance
-                    let !dist =
-                          if distCode <= 120
-                            then
-                              let (!xi, !yi) = kDistanceMapXY VU.! (distCode - 1)
-                               in max 1 (xi + yi * width)
-                            else distCode - 120
-
-                    when (dist > pos) $
-                      error $
-                        "Distance " ++ show dist ++ " exceeds position " ++ show pos
-
-                    copyLoop pos dist len output mutableCache useCache r4
+                copyLoop pos dist len output mutableCache useCache r4
+              else do
+                let cacheIdx = fromIntegral greenSym - 280
+                if not useCache
+                  then return $ Left $ "Color cache symbol " ++ show greenSym ++ " (cache idx " ++ show cacheIdx ++ ") decoded but no cache initialized. Alphabet was 280 symbols (256 lit + 24 len), but got symbol >= 280. Decoder bug or invalid bitstream."
                   else do
-                    let cacheIdx = fromIntegral greenSym - 280
-                    if not useCache
-                      then return $ Left $ "Color cache symbol " ++ show greenSym ++ " (cache idx " ++ show cacheIdx ++ ") decoded but no cache initialized. Alphabet was 280 symbols (256 lit + 24 len), but got symbol >= 280. Decoder bug or invalid bitstream."
-                      else do
-                        color <- lookupColorM cacheIdx mutableCache
-                        VSM.unsafeWrite output pos color
-                        insertColorM color mutableCache
-                        loop (pos + 1) r1
+                    color <- lookupColorM cacheIdx mutableCache
+                    VSM.unsafeWrite output pos color
+                    insertColorM color mutableCache
+                    loop (pos + 1) r1
 
       -- CRITICAL OPTIMIZATION: Batched copy loop with special cases
       copyLoop !pos !dist !len !out !cache !doCache !r
@@ -380,19 +387,10 @@ decodeLZ77 width height maybeCache codeGroup maybeEntropyImage reader = runST $ 
                 if dist >= actualLen
                   then do
                     -- Non-overlapping: can use bulk copy
-                    -- Copy in one batch using slice operations
                     forM_ [0 .. actualLen - 1] $ \i -> do
                       color <- VSM.unsafeRead out (srcPos + i)
                       VSM.unsafeWrite out (pos + i) color
-                    -- Sample cache insertions (every 8th pixel to reduce overhead)
-                    when doCache $ do
-                      forM_ [0, 8 .. actualLen - 1] $ \i -> do
-                        color <- VSM.unsafeRead out (pos + i)
-                        insertColorM color cache
-                      -- Always insert the last pixel to ensure cache coherency
-                      when (actualLen > 0 && ((actualLen - 1) .&. 7) /= 0) $ do
-                        lastColor <- VSM.unsafeRead out (pos + actualLen - 1)
-                        insertColorM lastColor cache
+                      when doCache $ insertColorM color cache
                     loop (pos + actualLen) r
                   else do
                     -- Overlapping case: must copy pixel-by-pixel but still use mutable cache
@@ -422,8 +420,8 @@ getEntropyGroup x y (Just (entropyImage, prefixBits)) width =
         then error $ "Entropy index out of bounds: " ++ show entropyIdx ++ " (entropyImage length: " ++ show entropyLen ++ ")"
         else
           let !pixel = entropyImage `VS.unsafeIndex` entropyIdx
-              !green = (pixel `shiftR` 8) .&. 0xFF
-           in fromIntegral green
+              !metaCode = (pixel `shiftR` 8) .&. 0xFFFF
+           in fromIntegral metaCode
 
 -- | Pack ARGB components into a Word32
 {-# INLINE packColor #-}

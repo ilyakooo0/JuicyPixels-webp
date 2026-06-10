@@ -66,7 +66,7 @@ computePredictorTransform sizeBits width height pixels =
                 then 0xFF000000
                 else
                   if x >= width - 1
-                    then pixels VS.! ((y - 1) * width) -- leftmost pixel of row above
+                    then pixels VS.! (y * width) -- leftmost pixel of the same row
                     else pixels VS.! (i - width + 1)
 
             -- Border pixels use fixed predictions regardless of mode (spec Section 4.2.1)
@@ -140,7 +140,7 @@ pixelSAD width _height pixels mode (x, y) =
           then 0xFF000000
           else
             if x >= width - 1
-              then pixels VS.! ((y - 1) * width)
+              then pixels VS.! (y * width)
               else pixels VS.! (i - width + 1)
 
       -- Border pixels use fixed predictions regardless of mode
@@ -319,8 +319,8 @@ clampAddSubtractHalf p1 p2 =
       bG = fromIntegral ((p2 `shiftR` 8) .&. 0xFF) :: Int
       bB = fromIntegral (p2 .&. 0xFF) :: Int
 
-      a = clip (aA + (aA - bA) `div` 2)
-      r = clip (aR + (aR - bR) `div` 2)
-      g = clip (aG + (aG - bG) `div` 2)
-      b = clip (aB + (aB - bB) `div` 2)
+      a = clip (aA + (aA - bA) `quot` 2)
+      r = clip (aR + (aR - bR) `quot` 2)
+      g = clip (aG + (aG - bG) `quot` 2)
+      b = clip (aB + (aB - bB) `quot` 2)
    in (fromIntegral a `shiftL` 24) .|. (fromIntegral r `shiftL` 16) .|. (fromIntegral g `shiftL` 8) .|. fromIntegral b

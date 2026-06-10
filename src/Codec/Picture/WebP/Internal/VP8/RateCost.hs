@@ -182,7 +182,8 @@ valueBitCost ::
   Word8 ->
   Word8 ->
   Word8 -> -- p[6], p[7], p[8], p[9], p[10]
-  Int -> -- |coeff|
+  Int ->
+  -- | coeff|
   Int -- Cost in 256ths of a bit
 valueBitCost !p2 !p3 !p4 !p5 !p6 !p7 !p8 !p9 !p10 !absVal
   | absVal == 1 =
@@ -195,32 +196,54 @@ valueBitCost !p2 !p3 !p4 !p5 !p6 !p7 !p8 !p9 !p10 !absVal
       branchCost p2 True + branchCost p3 False + branchCost p4 True + branchCost p5 True + 256
   | absVal <= 6 =
       -- CAT1 (5-6)
-      branchCost p2 True + branchCost p3 True + branchCost p6 False + branchCost p7 False
+      branchCost p2 True
+        + branchCost p3 True
+        + branchCost p6 False
+        + branchCost p7 False
         + catExtraCost 0 (absVal - 5)
         + 256
   | absVal <= 10 =
       -- CAT2 (7-10)
-      branchCost p2 True + branchCost p3 True + branchCost p6 False + branchCost p7 True
+      branchCost p2 True
+        + branchCost p3 True
+        + branchCost p6 False
+        + branchCost p7 True
         + catExtraCost 1 (absVal - 7)
         + 256
   | absVal <= 18 =
       -- CAT3 (11-18)
-      branchCost p2 True + branchCost p3 True + branchCost p6 True + branchCost p8 False + branchCost p9 False
+      branchCost p2 True
+        + branchCost p3 True
+        + branchCost p6 True
+        + branchCost p8 False
+        + branchCost p9 False
         + catExtraCost 2 (absVal - 11)
         + 256
   | absVal <= 34 =
       -- CAT4 (19-34)
-      branchCost p2 True + branchCost p3 True + branchCost p6 True + branchCost p8 False + branchCost p9 True
+      branchCost p2 True
+        + branchCost p3 True
+        + branchCost p6 True
+        + branchCost p8 False
+        + branchCost p9 True
         + catExtraCost 3 (absVal - 19)
         + 256
   | absVal <= 66 =
       -- CAT5 (35-66)
-      branchCost p2 True + branchCost p3 True + branchCost p6 True + branchCost p8 True + branchCost p10 False
+      branchCost p2 True
+        + branchCost p3 True
+        + branchCost p6 True
+        + branchCost p8 True
+        + branchCost p10 False
         + catExtraCost 4 (absVal - 35)
         + 256
   | otherwise =
       -- CAT6 (67-2048)
-      branchCost p2 True + branchCost p3 True + branchCost p6 True + branchCost p8 True + branchCost p10 True
+      branchCost p2 True
+        + branchCost p3 True
+        + branchCost p6 True
+        + branchCost p8 True
+        + branchCost p10 True
         + catExtraCost 5 (absVal - 67)
         + 256
 
@@ -281,36 +304,50 @@ bSubModeCost !aboveMode !leftMode !subMode =
         1 -> branchCost p0 True + branchCost p1 False -- B_TM
         2 -> branchCost p0 True + branchCost p1 True + branchCost p2 False -- B_VE
         3 ->
-          branchCost p0 True + branchCost p1 True + branchCost p2 True
+          branchCost p0 True
+            + branchCost p1 True
+            + branchCost p2 True
             + branchCost p3 False
             + branchCost p4 False -- B_HE
         4 ->
-          branchCost p0 True + branchCost p1 True + branchCost p2 True
+          branchCost p0 True
+            + branchCost p1 True
+            + branchCost p2 True
+            + branchCost p3 True
+            + branchCost p6 False -- B_LD
+        5 ->
+          branchCost p0 True
+            + branchCost p1 True
+            + branchCost p2 True
             + branchCost p3 False
             + branchCost p4 True
             + branchCost p5 False -- B_RD
-        5 ->
-          branchCost p0 True + branchCost p1 True + branchCost p2 True
+        6 ->
+          branchCost p0 True
+            + branchCost p1 True
+            + branchCost p2 True
             + branchCost p3 False
             + branchCost p4 True
-            + branchCost p5 True -- B_LD
-        6 ->
-          branchCost p0 True + branchCost p1 True + branchCost p2 True
-            + branchCost p3 True
-            + branchCost p6 False -- B_VR
+            + branchCost p5 True -- B_VR
         7 ->
-          branchCost p0 True + branchCost p1 True + branchCost p2 True
+          branchCost p0 True
+            + branchCost p1 True
+            + branchCost p2 True
             + branchCost p3 True
             + branchCost p6 True
             + branchCost p7 False -- B_VL
         8 ->
-          branchCost p0 True + branchCost p1 True + branchCost p2 True
+          branchCost p0 True
+            + branchCost p1 True
+            + branchCost p2 True
             + branchCost p3 True
             + branchCost p6 True
             + branchCost p7 True
             + branchCost p8 False -- B_HD
         9 ->
-          branchCost p0 True + branchCost p1 True + branchCost p2 True
+          branchCost p0 True
+            + branchCost p1 True
+            + branchCost p2 True
             + branchCost p3 True
             + branchCost p6 True
             + branchCost p7 True

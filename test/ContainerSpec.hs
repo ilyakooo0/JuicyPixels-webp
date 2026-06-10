@@ -141,10 +141,12 @@ spec = describe "Container" $ do
 
 -- Helper functions
 
+-- The RIFF size field counts from offset 8, so it includes the 4-byte
+-- format FourCC ("WEBP") in addition to the chunk payload passed in.
 makeRIFFHeader :: B.ByteString -> Word32 -> B.ByteString
 makeRIFFHeader fourCC size =
   B.pack [82, 73, 70, 70] -- "RIFF"
-    <> word32ToBytes size
+    <> word32ToBytes (size + 4)
     <> fourCC
 
 makeVP8LChunk :: [Word8] -> B.ByteString

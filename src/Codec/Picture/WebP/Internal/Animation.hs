@@ -3,6 +3,8 @@
 module Codec.Picture.WebP.Internal.Animation
   ( decodeAnimation,
     decodeAnimationWithCompositing,
+    decodeAnimFrame,
+    combineRGBAlpha,
     WebPAnimFrame (..),
   )
 where
@@ -12,10 +14,11 @@ import Codec.Picture.WebP.Internal.Alpha
 import Codec.Picture.WebP.Internal.Container
 import Codec.Picture.WebP.Internal.VP8
 import Codec.Picture.WebP.Internal.VP8L
-import Control.Monad (forM_, mapM_, when)
+import Control.Monad (forM_, when)
 import Control.Monad.ST
 import Data.Bits
 import qualified Data.ByteString as B
+import Data.Maybe (catMaybes)
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
 import Data.Word
@@ -55,22 +58,18 @@ findAnimFrames chunks = Right $ collectFrames chunks
 -- | Decode a single animation frame
 decodeAnimFrame :: (AnimFrame, [WebPChunk]) -> Either String WebPAnimFrame
 decodeAnimFrame (frame, subChunks) = do
-  let width = anmfWidth frame
-      height = anmfHeight frame
-      x = anmfX frame
+  let x = anmfX frame
       y = anmfY frame
       duration = anmfDuration frame
-
-  maybeAlpha <- case findAlphaChunk subChunks of
-    Right alphaData -> do
-      alpha <- decodeAlpha width height alphaData
-      return $ Just alpha
-    Left _ -> return Nothing
 
   img <- case (findVP8InChunks subChunks, findVP8LInChunks subChunks) of
     (Right vp8Data, _) -> do
       baseImg <- decodeVP8 vp8Data
-      return $ ImageRGB8 baseImg
+      case findAlphaChunk subChunks of
+        Right alphaData -> do
+          alphaVec <- decodeAlpha (imageWidth baseImg) (imageHeight baseImg) alphaData
+          return $ ImageRGBA8 (combineRGBAlpha baseImg alphaVec)
+        Left _ -> return $ ImageRGB8 baseImg
     (_, Right vp8lData) -> do
       losslessImg <- decodeVP8L vp8lData
       return $ ImageRGBA8 losslessImg
@@ -105,70 +104,96 @@ findVP8LInChunks (_ : rest) = findVP8LInChunks rest
 -- Returns composited frames as RGBA8 images
 decodeAnimationWithCompositing :: Int -> Int -> WebPFile -> Either String [Image PixelRGBA8]
 decodeAnimationWithCompositing canvasWidth canvasHeight (WebPExtended _header chunks) = do
+  when (canvasWidth <= 0 || canvasHeight <= 0) $
+    Left "Invalid canvas dimensions"
+  when (canvasWidth * canvasHeight > maxCanvasPixels) $
+    Left "Canvas dimensions exceed maximum supported size"
   animHeader <- findAnimHeader chunks
   anmfChunks <- findAnimFrames chunks
 
   let bgColor = animBackgroundColor animHeader
-  return $ composeFrames canvasWidth canvasHeight bgColor anmfChunks
+  composeFrames canvasWidth canvasHeight bgColor anmfChunks
 decodeAnimationWithCompositing _ _ _ = Left "Not an animated WebP file"
 
+-- | Maximum supported canvas size in pixels (2^28 ~ 1 GiB of RGBA data)
+maxCanvasPixels :: Int
+maxCanvasPixels = 1 `shiftL` 28
+
 -- | Compose animation frames onto a canvas
-composeFrames :: Int -> Int -> Word32 -> [(AnimFrame, [WebPChunk])] -> [Image PixelRGBA8]
-composeFrames canvasWidth canvasHeight bgColor frames = runST $ do
-  -- Create initial canvas with background color
-  canvas <- VSM.replicate (canvasWidth * canvasHeight * 4) 0
-  fillCanvas canvas canvasWidth canvasHeight bgColor
+composeFrames :: Int -> Int -> Word32 -> [(AnimFrame, [WebPChunk])] -> Either String [Image PixelRGBA8]
+composeFrames canvasWidth canvasHeight bgColor frames = do
+  decoded <- traverse decodeOne frames
+  return $ runST $ do
+    -- Create initial canvas with background color
+    canvas <- VSM.replicate (canvasWidth * canvasHeight * 4) 0
+    fillCanvas canvas canvasWidth canvasHeight bgColor
 
-  let processFrame prevDispose (frame, subChunks) = do
-        -- Apply disposal method from previous frame
-        when prevDispose $
-          fillCanvas canvas canvasWidth canvasHeight bgColor
+    let go _ [] = return []
+        go prevDisposeRect ((frame, webpFrame) : rest) = do
+          -- Apply disposal method from previous frame (its rectangle only)
+          case prevDisposeRect of
+            Just (px, py, pw, ph) -> fillRect canvas canvasWidth bgColor px py pw ph
+            Nothing -> return ()
 
-        -- Decode current frame
-        case decodeAnimFrame (frame, subChunks) of
-          Left _ -> return Nothing -- Skip frames that fail to decode
-          Right webpFrame -> do
-            let frameImg = webpFrameImage webpFrame
-                x = anmfX frame
-                y = anmfY frame
-                blend = anmfBlend frame
+          let frameImg = webpFrameImage webpFrame
+              x = anmfX frame
+              y = anmfY frame
+              blend = anmfBlend frame
 
-            -- Composite frame onto canvas
-            compositeFrame canvas canvasWidth canvasHeight frameImg x y blend
+          -- Composite frame onto canvas
+          compositeFrame canvas canvasWidth canvasHeight frameImg x y blend
 
-            -- Freeze canvas to create output image
-            frozenCanvas <- VS.freeze canvas
-            let outputImg = Image canvasWidth canvasHeight frozenCanvas :: Image PixelRGBA8
+          -- Freeze canvas to create output image
+          frozenCanvas <- VS.freeze canvas
+          let outputImg = Image canvasWidth canvasHeight frozenCanvas :: Image PixelRGBA8
+              disposeRect =
+                if anmfDispose frame
+                  then Just (x, y, dynWidth frameImg, dynHeight frameImg)
+                  else Nothing
 
-            return $ Just (outputImg, anmfDispose frame)
+          restImgs <- go disposeRect rest
+          return (outputImg : restImgs)
 
-  -- Process all frames
-  let go _ [] = return []
-      go prevDispose (frame : rest) = do
-        result <- processFrame prevDispose frame
-        case result of
-          Nothing -> go prevDispose rest -- Skip failed frames
-          Just (img, dispose) -> do
-            restImgs <- go dispose rest
-            return (img : restImgs)
+    go Nothing (catMaybes decoded)
+  where
+    decodeOne (frame, subChunks) =
+      case decodeAnimFrame (frame, subChunks) of
+        Left _ -> Right Nothing -- Skip frames that fail to decode
+        Right webpFrame ->
+          let img = webpFrameImage webpFrame
+              x = anmfX frame
+              y = anmfY frame
+           in if x < 0
+                || y < 0
+                || x + dynWidth img > canvasWidth
+                || y + dynHeight img > canvasHeight
+                then Left "Animation frame exceeds canvas bounds"
+                else Right (Just (frame, webpFrame))
 
-  go False frames
+dynWidth, dynHeight :: DynamicImage -> Int
+dynWidth = dynamicMap imageWidth
+dynHeight = dynamicMap imageHeight
 
 -- | Fill canvas with background color
 fillCanvas :: VSM.MVector s Word8 -> Int -> Int -> Word32 -> ST s ()
-fillCanvas canvas width height bgColor = do
+fillCanvas canvas width height bgColor =
+  fillRect canvas width bgColor 0 0 width height
+
+-- | Fill a rectangle of the canvas with the background color
+fillRect :: VSM.MVector s Word8 -> Int -> Word32 -> Int -> Int -> Int -> Int -> ST s ()
+fillRect canvas canvasWidth bgColor rx ry rw rh = do
   let b = fromIntegral (bgColor .&. 0xFF)
       g = fromIntegral ((bgColor `shiftR` 8) .&. 0xFF)
       r = fromIntegral ((bgColor `shiftR` 16) .&. 0xFF)
       a = fromIntegral ((bgColor `shiftR` 24) .&. 0xFF)
 
-  let fillPixel i = do
-        VSM.write canvas (i * 4) r
-        VSM.write canvas (i * 4 + 1) g
-        VSM.write canvas (i * 4 + 2) b
-        VSM.write canvas (i * 4 + 3) a
-
-  mapM_ fillPixel [0 .. width * height - 1]
+  forM_ [ry .. ry + rh - 1] $ \y ->
+    forM_ [rx .. rx + rw - 1] $ \x -> do
+      let i = (y * canvasWidth + x) * 4
+      VSM.write canvas i r
+      VSM.write canvas (i + 1) g
+      VSM.write canvas (i + 2) b
+      VSM.write canvas (i + 3) a
 
 -- | Composite a frame onto the canvas
 compositeFrame :: VSM.MVector s Word8 -> Int -> Int -> DynamicImage -> Int -> Int -> Bool -> ST s ()
@@ -270,3 +295,31 @@ alphaBlend srcR srcG srcB srcA dstR dstG dstB dstA =
                   fromIntegral (numeratorB `div` blendA)
                 )
    in (blendR, blendG, blendB, fromIntegral blendA)
+
+-- | Combine RGB8 image with alpha channel to create RGBA8
+combineRGBAlpha :: Image PixelRGB8 -> VS.Vector Word8 -> Image PixelRGBA8
+combineRGBAlpha rgbImg alphaVec = runST $ do
+  let width = imageWidth rgbImg
+      height = imageHeight rgbImg
+      rgbData = imageData rgbImg
+
+  pixels <- VSM.new (width * height * 4)
+
+  forM_ [0 .. height - 1] $ \y ->
+    forM_ [0 .. width - 1] $ \x -> do
+      let rgbIdx = (y * width + x) * 3
+          alphaIdx = y * width + x
+          pixelIdx = (y * width + x) * 4
+
+      let r = rgbData VS.! rgbIdx
+          g = rgbData VS.! (rgbIdx + 1)
+          b = rgbData VS.! (rgbIdx + 2)
+          a = alphaVec VS.! alphaIdx
+
+      VSM.write pixels pixelIdx r
+      VSM.write pixels (pixelIdx + 1) g
+      VSM.write pixels (pixelIdx + 2) b
+      VSM.write pixels (pixelIdx + 3) a
+
+  finalPixels <- VS.unsafeFreeze pixels
+  return $ Image width height finalPixels

@@ -7,7 +7,6 @@ module Codec.Picture.WebP.Internal.AlphaEncode
 where
 
 import Codec.Picture.Types
-import Codec.Picture.WebP.Internal.VP8L.EncodeUncompressed
 import Control.Monad (forM_)
 import Control.Monad.ST
 import Data.Binary.Put

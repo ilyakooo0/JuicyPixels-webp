@@ -338,12 +338,19 @@ readCodeLengths alphabetSize reader = do
           symbolBits = if isFirst8Bits then 8 else 1
           (symbol1, reader3) = readBits symbolBits reader2a
 
+      when (fromIntegral symbol1 >= alphabetSize) $
+        Left $
+          "Simple prefix code symbol " ++ show symbol1 ++ " out of range for alphabet size " ++ show alphabetSize
+
       if numSymbols == 1
         then do
           let lengths = VU.replicate alphabetSize 0 VU.// [(fromIntegral symbol1, 1)]
           return (lengths, reader3)
         else do
           let (symbol2, reader4) = readBits 8 reader3
+          when (fromIntegral symbol2 >= alphabetSize) $
+            Left $
+              "Simple prefix code symbol " ++ show symbol2 ++ " out of range for alphabet size " ++ show alphabetSize
           let lengths =
                 VU.replicate alphabetSize 0
                   VU.// [(fromIntegral symbol1, 1), (fromIntegral symbol2, 1)]
@@ -375,59 +382,71 @@ readCodeLengthLengths numCodeLengths reader = runST $ do
             loop (i + 1) r'
   loop 0 reader
 
--- | Read symbol code lengths using the code length code
+-- | Read symbol code lengths using the code length code.
+-- max_symbol is a budget of code-length tokens (a repeat token counts as one),
+-- not an upper bound on the symbol index. Remaining symbols keep length 0.
 {-# INLINE readSymbolCodeLengths #-}
 readSymbolCodeLengths :: Int -> PrefixCode -> BitReader -> Either String (VU.Vector Int, BitReader)
-readSymbolCodeLengths alphabetSize codeLengthCode reader =
+readSymbolCodeLengths alphabetSize codeLengthCode reader = do
   let (useMaxSymbol, reader1) = readBit reader
-      (maxSymbol, reader2) =
-        if not useMaxSymbol
-          then (alphabetSize, reader1)
-          else
-            let (lengthNbits1, reader1a) = readBits 3 reader1
-                lengthNbits = 2 + 2 * fromIntegral lengthNbits1
-                (maxSym1, reader1b) = readBits lengthNbits reader1a
-                maxSym = 2 + fromIntegral maxSym1
-             in (min maxSym alphabetSize, reader1b) -- Clamp to alphabet_size
-   in runST $ do
-        lengths <- VUM.replicate alphabetSize 0
-        prevCodeLen <- VUM.new 1
-        VUM.write prevCodeLen 0 8
+  (maxSymbol, reader2) <-
+    if not useMaxSymbol
+      then return (alphabetSize, reader1)
+      else do
+        let (lengthNbits1, reader1a) = readBits 3 reader1
+            lengthNbits = 2 + 2 * fromIntegral lengthNbits1
+            (maxSym1, reader1b) = readBits lengthNbits reader1a
+            maxSym = 2 + fromIntegral maxSym1
+        when (maxSym > alphabetSize) $
+          Left $
+            "max_symbol " ++ show maxSym ++ " exceeds alphabet size " ++ show alphabetSize
+        return (maxSym, reader1b)
+  runST $ do
+    lengths <- VUM.replicate alphabetSize 0
+    prevCodeLen <- VUM.new 1
+    VUM.write prevCodeLen 0 8
 
-        let loop !i !r
-              | i >= maxSymbol = do
-                  frozen <- VU.unsafeFreeze lengths
-                  return $ Right (frozen, r)
-              | otherwise = do
-                  let (sym, r') = decodeSymbol codeLengthCode r
-                  case sym of
-                    _ | sym < 16 -> do
-                      VUM.write lengths i (fromIntegral sym)
-                      when (sym /= 0) $
-                        VUM.write prevCodeLen 0 (fromIntegral sym)
-                      loop (i + 1) r'
-                    16 -> do
-                      let (extra, r'') = readBits 2 r'
-                          repeatCount = 3 + fromIntegral extra
+    let finish !r = do
+          frozen <- VU.unsafeFreeze lengths
+          return $ Right (frozen, r)
+
+        loop !i !budget !r
+          | i >= alphabetSize = finish r
+          | budget <= 0 = finish r
+          | otherwise = do
+              let (sym, r') = decodeSymbol codeLengthCode r
+                  !budget' = budget - 1
+              case sym of
+                _ | sym < 16 -> do
+                  VUM.write lengths i (fromIntegral sym)
+                  when (sym /= 0) $
+                    VUM.write prevCodeLen 0 (fromIntegral sym)
+                  loop (i + 1) budget' r'
+                16 -> do
+                  let (extra, r'') = readBits 2 r'
+                      repeatCount = 3 + fromIntegral extra
+                  if i + repeatCount > alphabetSize
+                    then return $ Left $ "Code length repeat overflows alphabet: " ++ show (i + repeatCount) ++ " > " ++ show alphabetSize
+                    else do
                       prev <- VUM.read prevCodeLen 0
-                      let writeRepeats !j !r2
-                            | j >= i + repeatCount = loop (i + repeatCount) r2
-                            | j >= maxSymbol = loop maxSymbol r2
-                            | otherwise = do
-                                VUM.write lengths j prev
-                                writeRepeats (j + 1) r2
-                      writeRepeats i r''
-                    17 -> do
-                      let (extra, r'') = readBits 3 r'
-                          repeatCount = 3 + fromIntegral extra
-                      loop (i + repeatCount) r''
-                    18 -> do
-                      let (extra, r'') = readBits 7 r'
-                          repeatCount = 11 + fromIntegral extra
-                      loop (i + repeatCount) r''
-                    _ -> return $ Left $ "Invalid code length symbol: " ++ show sym
+                      forM_ [i .. i + repeatCount - 1] $ \j ->
+                        VUM.write lengths j prev
+                      loop (i + repeatCount) budget' r''
+                17 -> do
+                  let (extra, r'') = readBits 3 r'
+                      repeatCount = 3 + fromIntegral extra
+                  if i + repeatCount > alphabetSize
+                    then return $ Left $ "Code length repeat overflows alphabet: " ++ show (i + repeatCount) ++ " > " ++ show alphabetSize
+                    else loop (i + repeatCount) budget' r''
+                18 -> do
+                  let (extra, r'') = readBits 7 r'
+                      repeatCount = 11 + fromIntegral extra
+                  if i + repeatCount > alphabetSize
+                    then return $ Left $ "Code length repeat overflows alphabet: " ++ show (i + repeatCount) ++ " > " ++ show alphabetSize
+                    else loop (i + repeatCount) budget' r''
+                _ -> return $ Left $ "Invalid code length symbol: " ++ show sym
 
-        loop 0 reader2
+    loop 0 maxSymbol reader2
 
 -- Helper functions
 

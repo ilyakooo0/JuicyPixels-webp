@@ -25,14 +25,27 @@ data VP8LTransform
 -- | Apply inverse transforms in reverse order.
 -- Color-indexing is handled separately because it may change image dimensions (pixel bundling).
 applyInverseTransforms :: [VP8LTransform] -> Int -> Int -> VS.Vector Word32 -> Either String (VS.Vector Word32)
-applyInverseTransforms transforms origWidth height pixels =
+applyInverseTransforms transforms origWidth height pixels = do
   let -- Separate color-indexing from other transforms
       (maybeCI, otherTransforms) = extractColorIndex transforms
 
-      -- Width used for in-place transforms (packed width if bundling)
+      isColorIndex t = case t of
+        TransformColorIndex _ _ -> True
+        _ -> False
+
+  -- Inverse transforms are applied in reverse read order; pulling color-indexing
+  -- to the end of the inverse chain is only valid when it was read first.
+  case (maybeCI, transforms) of
+    (Just _, t : _)
+      | not (isColorIndex t) ->
+          Left "Unsupported transform order: color-indexing transform is not the first transform"
+    _ -> return ()
+
+  let -- Width used for in-place transforms (packed width if bundling)
       effectiveWidth = case maybeCI of
-        Just (TransformColorIndex _ wb) | wb > 0 ->
-          (origWidth + (1 `shiftL` wb) - 1) `shiftR` wb
+        Just (TransformColorIndex _ wb)
+          | wb > 0 ->
+              (origWidth + (1 `shiftL` wb) - 1) `shiftR` wb
         _ -> origWidth
 
       -- Apply non-color-indexing inverse transforms in-place (reverse order)
@@ -40,11 +53,12 @@ applyInverseTransforms transforms origWidth height pixels =
         mp <- VS.thaw pixels
         mapM_ (\t -> applyInPlaceInverseTransform t effectiveWidth height mp) (reverse otherTransforms)
         VS.unsafeFreeze mp
-   in -- Apply color-indexing inverse (creates new vector at original dimensions)
-      case maybeCI of
-        Just (TransformColorIndex palette widthBits) ->
-          Right $ inverseColorIndexingPure palette widthBits origWidth height afterInPlace
-        _ -> Right afterInPlace
+
+  -- Apply color-indexing inverse (creates new vector at original dimensions)
+  case maybeCI of
+    Just (TransformColorIndex palette widthBits) ->
+      Right $ inverseColorIndexingPure palette widthBits origWidth height afterInPlace
+    _ -> Right afterInPlace
 
 -- | Extract the color-indexing transform (if any) from the list.
 -- Returns (color-indexing transform, remaining transforms in original order).
@@ -186,7 +200,7 @@ inversePredictorTransform sizeBits transformData width height pixels = do
           then return 0xFF000000
           else
             if x >= width - 1
-              then VSM.unsafeRead pixels prevRowBase -- leftmost pixel of row above
+              then VSM.unsafeRead pixels rowBase -- leftmost pixel of current row
               else VSM.unsafeRead pixels (prevRowBase + x + 1)
 
       -- Border pixels use fixed predictions regardless of mode (spec Section 4.2.1)
@@ -335,10 +349,10 @@ clampAddSubtractHalf p1 p2 =
       !bG = fromIntegral ((p2 `shiftR` 8) .&. 0xFF) :: Int
       !bB = fromIntegral (p2 .&. 0xFF) :: Int
 
-      !a = clip255Int (aA + (aA - bA) `div` 2)
-      !r = clip255Int (aR + (aR - bR) `div` 2)
-      !g = clip255Int (aG + (aG - bG) `div` 2)
-      !b = clip255Int (aB + (aB - bB) `div` 2)
+      !a = clip255Int (aA + (aA - bA) `quot` 2)
+      !r = clip255Int (aR + (aR - bR) `quot` 2)
+      !g = clip255Int (aG + (aG - bG) `quot` 2)
+      !b = clip255Int (aB + (aB - bB) `quot` 2)
    in (fromIntegral a `shiftL` 24) .|. (fromIntegral r `shiftL` 16) .|. (fromIntegral g `shiftL` 8) .|. fromIntegral b
 
 -- | Clip Int to 0-255 range

@@ -22,8 +22,8 @@ import Data.Word
 data AnimationFrame = AnimationFrame
   { frameImage :: DynamicImage,
     frameDuration :: Int, -- milliseconds
-    frameX :: Int,
-    frameY :: Int,
+    frameX :: Int, -- must be even (odd values are rounded down)
+    frameY :: Int, -- must be even (odd values are rounded down)
     frameBlend :: Bool, -- True = alpha blend, False = no blend
     frameDispose :: Bool -- True = dispose to background, False = don't dispose
   }
@@ -40,7 +40,8 @@ encodeAnimation ::
   B.ByteString
 encodeAnimation frames canvasWidth canvasHeight bgColor loopCount quality =
   let -- Create VP8X header
-      vp8xChunk = makeVP8XChunk canvasWidth canvasHeight False True -- hasAlpha=False, hasAnim=True
+      hasAlpha = any frameHasAlpha frames
+      vp8xChunk = makeVP8XChunk canvasWidth canvasHeight hasAlpha True
 
       -- Create ANIM chunk
       animChunk = makeANIMChunk bgColor loopCount
@@ -52,6 +53,10 @@ encodeAnimation frames canvasWidth canvasHeight bgColor loopCount quality =
       allChunks = vp8xChunk <> animChunk <> mconcat anmfChunks
       totalSize = B.length allChunks
    in makeRIFFContainer (fromIntegral totalSize) allChunks
+  where
+    frameHasAlpha f = case frameImage f of
+      ImageRGBA8 _ -> True
+      _ -> False
 
 -- | Encode a single animation frame
 encodeAnimFrame :: Int -> AnimationFrame -> B.ByteString
@@ -87,26 +92,24 @@ makeANMFChunk :: AnimationFrame -> B.ByteString -> B.ByteString
 makeANMFChunk frame imageData =
   let fourCC = B.pack [65, 78, 77, 70] -- "ANMF"
 
-      -- Frame coordinates (2x the actual value, 24 bits each)
-      x24 = fromIntegral (frameX frame * 2) :: Word32
-      y24 = fromIntegral (frameY frame * 2) :: Word32
+      -- Frame coordinates (stored divided by 2, 24 bits each)
+      x24 = fromIntegral (frameX frame `div` 2) :: Word32
+      y24 = fromIntegral (frameY frame `div` 2) :: Word32
 
-      -- Frame dimensions come from the image data
-      -- For now, assume full canvas
-      width24 = 0 :: Word32 -- Will be set from image
-      height24 = 0 :: Word32
+      -- Frame dimensions (stored minus 1, 24 bits each)
+      width24 = fromIntegral (dynamicMap imageWidth (frameImage frame) - 1) :: Word32
+      height24 = fromIntegral (dynamicMap imageHeight (frameImage frame) - 1) :: Word32
 
       -- Duration in milliseconds (24 bits)
       duration24 = fromIntegral (frameDuration frame) :: Word32
 
       -- Flags byte:
-      -- Bit 0: reserved
-      -- Bit 1: dispose (0 = none, 1 = dispose to background)
-      -- Bit 2: blend (0 = no blend/replace, 1 = alpha blend)
-      -- Bits 3-7: reserved
+      -- Bit 0: dispose (0 = none, 1 = dispose to background)
+      -- Bit 1: blend (0 = alpha blend, 1 = do not blend)
+      -- Bits 2-7: reserved
       flags =
-        (if frameDispose frame then bit 1 else 0)
-          .|. (if frameBlend frame then bit 2 else 0)
+        (if frameDispose frame then bit 0 else 0)
+          .|. (if frameBlend frame then 0 else bit 1)
 
       header = BL.toStrict $ runPut $ do
         -- X coordinate (24 bits)

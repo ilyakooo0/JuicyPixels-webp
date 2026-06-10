@@ -8,7 +8,6 @@ module Codec.Picture.WebP.Internal.VP8.BoolEncoder
     boolWrite,
     boolWriteLiteral,
     boolWriteSigned,
-    boolWriteTree,
     finalizeBoolEncoder,
   )
 where
@@ -437,37 +436,3 @@ finalizeBoolEncoder !enc =
 
     flushRun 0 _ bytes = bytes
     flushRun n val bytes = flushRun (n - 1) val (val : bytes)
-
--- | Write a value using a tree structure and probability table
--- This matches the RFC 6386 tree format where:
--- - Tree is structured as pairs: indices (i, i+1) are left/right children
--- - We write a bit (False=left, True=right) to select which child
--- - Negative values are leaves (-token), positive values are branch indices
-boolWriteTree :: VU.Vector Int8 -> VU.Vector Word8 -> Int -> BoolEncoder -> BoolEncoder
-boolWriteTree !tree !probs !targetValue !enc =
-  case findPath 0 0 [] of
-    Just path -> writePath (reverse path) probs 0 enc
-    Nothing -> error $ "VP8 encoder: value " ++ show targetValue ++ " not in tree"
-  where
-    -- Find path to target value starting at tree position i
-    -- i is the base index for the current pair (i, i+1)
-    findPath !i !depth !path
-      | i >= VU.length tree || i + 1 >= VU.length tree = Nothing
-      | otherwise =
-          let leftNode = tree VU.! i
-              rightNode = tree VU.! (i + 1)
-           in -- Check left child (bit = False)
-              case checkNode leftNode (False : path) of
-                Just p -> Just p
-                Nothing ->
-                  -- Check right child (bit = True)
-                  checkNode rightNode (True : path)
-      where
-        checkNode node path'
-          | node == 0 = if targetValue == 0 then Just path' else Nothing
-          | node < 0 = if fromIntegral (negate node) == targetValue then Just path' else Nothing
-          | otherwise = findPath (fromIntegral node) (depth + 1) path'
-
-    writePath [] _ _ e = e
-    writePath (bit : rest) ps probIdx e =
-      writePath rest ps (probIdx + 1) (boolWrite (ps VU.! probIdx) bit e)

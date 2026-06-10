@@ -19,17 +19,14 @@ where
 
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.Alpha (decodeAlpha)
-import Codec.Picture.WebP.Internal.Animation (WebPAnimFrame (..), decodeAnimation, decodeAnimationWithCompositing)
+import Codec.Picture.WebP.Internal.Animation (WebPAnimFrame (..), combineRGBAlpha, decodeAnimFrame, decodeAnimation, decodeAnimationWithCompositing)
 import Codec.Picture.WebP.Internal.AnimationEncode (AnimationFrame (..), encodeAnimation)
 import Codec.Picture.WebP.Internal.Container
 import Codec.Picture.WebP.Internal.Encode (encodeWebPLossless, encodeWebPLossy, encodeWebPLossyWithAlpha)
 import Codec.Picture.WebP.Internal.VP8
 import Codec.Picture.WebP.Internal.VP8L
-import Control.Monad (forM_)
-import Control.Monad.ST
 import qualified Data.ByteString as B
 import qualified Data.Vector.Storable as VS
-import qualified Data.Vector.Storable.Mutable as VSM
 import Data.Word
 
 -- | Frame for encoding animations
@@ -75,13 +72,15 @@ decodeWebP bs = do
     WebPSimpleLossy vp8Data -> do
       img <- decodeVP8 vp8Data
       return $ ImageRGB8 img
-    WebPExtended header chunks -> do
+    WebPExtended _header chunks -> do
       -- Check for alpha channel
       case (findVP8Chunk chunks, findALPHChunk chunks) of
         (Right vp8Data, Right alphData) -> do
           -- VP8 + ALPH: decode both and combine
+          -- The alpha plane has the VP8 frame's dimensions, which take
+          -- precedence over the VP8X canvas size if they disagree
           rgbImg <- decodeVP8 vp8Data
-          alphaVec <- decodeAlphaChunk alphData (vp8xCanvasWidth header) (vp8xCanvasHeight header)
+          alphaVec <- decodeAlphaChunk alphData (imageWidth rgbImg) (imageHeight rgbImg)
           let rgbaImg = combineRGBAlpha rgbImg alphaVec
           return $ ImageRGBA8 rgbaImg
         (Right vp8Data, Left _) -> do
@@ -97,7 +96,14 @@ decodeWebP bs = do
 
 -- | Decode first frame only (for animated images)
 decodeWebPFirstFrame :: B.ByteString -> Either String DynamicImage
-decodeWebPFirstFrame = decodeWebP
+decodeWebPFirstFrame bs = do
+  webpFile <- parseWebP bs
+  case webpFile of
+    WebPExtended header chunks
+      | vp8xHasAnimation header,
+        (anmf : _) <- [(frame, sub) | ChunkANMF frame sub <- chunks] ->
+          webpFrameImage <$> decodeAnimFrame anmf
+    _ -> decodeWebP bs
 
 -- | Decode animation frames
 decodeWebPAnimation :: B.ByteString -> Either String [WebPAnimFrame]
@@ -125,34 +131,6 @@ findALPHChunk (_ : rest) = findALPHChunk rest
 -- | Decode ALPH chunk
 decodeAlphaChunk :: B.ByteString -> Int -> Int -> Either String (VS.Vector Word8)
 decodeAlphaChunk alphData width height = decodeAlpha width height alphData
-
--- | Combine RGB8 image with alpha channel to create RGBA8
-combineRGBAlpha :: Image PixelRGB8 -> VS.Vector Word8 -> Image PixelRGBA8
-combineRGBAlpha rgbImg alphaVec = runST $ do
-  let width = imageWidth rgbImg
-      height = imageHeight rgbImg
-      rgbData = imageData rgbImg
-
-  pixels <- VSM.new (width * height * 4)
-
-  forM_ [0 .. height - 1] $ \y ->
-    forM_ [0 .. width - 1] $ \x -> do
-      let rgbIdx = (y * width + x) * 3
-          alphaIdx = y * width + x
-          pixelIdx = (y * width + x) * 4
-
-      let r = rgbData VS.! rgbIdx
-          g = rgbData VS.! (rgbIdx + 1)
-          b = rgbData VS.! (rgbIdx + 2)
-          a = alphaVec VS.! alphaIdx
-
-      VSM.write pixels pixelIdx r
-      VSM.write pixels (pixelIdx + 1) g
-      VSM.write pixels (pixelIdx + 2) b
-      VSM.write pixels (pixelIdx + 3) a
-
-  finalPixels <- VS.unsafeFreeze pixels
-  return $ Image width height finalPixels
 
 -- | Decode animation frames with proper canvas compositing
 -- Returns fully composited RGBA8 frames ready for display

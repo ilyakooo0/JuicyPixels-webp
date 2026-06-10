@@ -168,7 +168,7 @@ fixOversubscribed syms excess = go syms excess
   where
     go xs 0 = xs
     go xs ex
-      | ex < 0 = xs
+      | ex < 0 = shorten xs (negate ex)
       | otherwise =
           let (atMax, rest) = break (\(_, d) -> d < maxCodeLength) xs
            in case rest of
@@ -178,6 +178,11 @@ fixOversubscribed syms excess = go syms excess
                       freed = (1 `shiftL` (maxCodeLength - d)) - (1 `shiftL` (maxCodeLength - newLen))
                       newList = atMax ++ ((s, newLen) : after)
                    in go newList (ex - freed)
+    shorten xs 0 = xs
+    shorten ((s, d) : xs) deficit
+      | d == maxCodeLength = (s, d - 1) : shorten xs (deficit - 1)
+      | otherwise = (s, d) : shorten xs deficit
+    shorten [] _ = []
 
 -- | Build a Huffman tree from (symbol, frequency) pairs and return (symbol, depth) pairs.
 huffmanDepths :: [(Int, Int)] -> [(Int, Int)]

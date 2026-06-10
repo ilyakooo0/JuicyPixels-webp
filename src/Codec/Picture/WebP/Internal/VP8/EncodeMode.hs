@@ -54,8 +54,8 @@ encodeYModeBPred enc = boolWrite 145 False enc
 -- | Encode a 4x4 sub-block intra mode using kfBmodeProbs[above][left] context.
 -- Tree from RFC 6386 kf_bmode_tree:
 --   B_DC=0 "0", B_TM=1 "10", B_VE=2 "110",
---   B_HE=3 "11100", B_RD=4 "111010", B_LD=5 "111011",
---   B_VR=6 "11110", B_VL=7 "111110", B_HD=8 "1111110", B_HU=9 "1111111"
+--   B_HE=3 "11100", B_LD=4 "11110", B_RD=5 "111010",
+--   B_VR=6 "111011", B_VL=7 "111110", B_HD=8 "1111110", B_HU=9 "1111111"
 -- 9 decision nodes → 9 probabilities per context (above*90 + left*9 + nodeIdx)
 {-# INLINE encodeBSubMode #-}
 encodeBSubMode :: Int -> Int -> Int -> BoolEncoder -> BoolEncoder
@@ -91,6 +91,13 @@ encodeBSubMode !aboveMode !leftMode !subMode !enc =
               e4 = boolWrite p3 False e3
            in boolWrite p4 False e4
         4 ->
+          -- B_LD_PRED: node0=T, node2=T, node4=T, node6=T, node12=F
+          let e1 = boolWrite p0 True enc
+              e2 = boolWrite p1 True e1
+              e3 = boolWrite p2 True e2
+              e4 = boolWrite p3 True e3
+           in boolWrite p6 False e4
+        5 ->
           -- B_RD_PRED: ..., node6=F, node8=T, node10=F
           let e1 = boolWrite p0 True enc
               e2 = boolWrite p1 True e1
@@ -98,21 +105,14 @@ encodeBSubMode !aboveMode !leftMode !subMode !enc =
               e4 = boolWrite p3 False e3
               e5 = boolWrite p4 True e4
            in boolWrite p5 False e5
-        5 ->
-          -- B_LD_PRED: ..., node6=F, node8=T, node10=T
+        6 ->
+          -- B_VR_PRED: ..., node6=F, node8=T, node10=T
           let e1 = boolWrite p0 True enc
               e2 = boolWrite p1 True e1
               e3 = boolWrite p2 True e2
               e4 = boolWrite p3 False e3
               e5 = boolWrite p4 True e4
            in boolWrite p5 True e5
-        6 ->
-          -- B_VR_PRED: node0=T, node2=T, node4=T, node6=T, node12=F
-          let e1 = boolWrite p0 True enc
-              e2 = boolWrite p1 True e1
-              e3 = boolWrite p2 True e2
-              e4 = boolWrite p3 True e3
-           in boolWrite p6 False e4
         7 ->
           -- B_VL_PRED: ..., node6=T, node12=T, node14=F
           let e1 = boolWrite p0 True enc

@@ -30,7 +30,12 @@ decodeAlpha width height bs
 
       alphaData <-
         if compression == 0
-          then Right $ VS.fromList $ B.unpack $ B.drop 1 bs
+          then do
+            let raw = B.drop 1 bs
+            when (B.length raw < width * height) $
+              Left $
+                "ALPH chunk too short: " ++ show (B.length raw) ++ " bytes for " ++ show width ++ "x" ++ show height ++ " alpha plane"
+            Right $ VS.fromList $ B.unpack $ B.take (width * height) raw
           else do
             let vp8lData = B.drop 1 bs
             pixels <- decodeVP8LHeaderless width height vp8lData
@@ -63,20 +68,21 @@ applyAlphaFiltering width height filterMethod alphaData
 
       VS.unsafeFreeze output
 
--- | Horizontal filter: left prediction (filter method 1)
+-- | Horizontal filter: left prediction (filter method 1).
+-- The first pixel of each row (except the very first) predicts from the pixel above.
 {-# INLINE applyHorizontalFilter #-}
 applyHorizontalFilter :: Int -> Int -> VS.Vector Word8 -> VSM.MVector s Word8 -> ST s ()
 applyHorizontalFilter width height alphaData output = do
-  -- First column: no left neighbor (predict from 0)
-  forM_ [0 .. height - 1] $ \y -> do
-    let !idx = y * width
-        !encoded = alphaData `VS.unsafeIndex` idx
-        !decoded = fromIntegral encoded :: Word8
-    VSM.unsafeWrite output idx decoded
-
-  -- Rest of columns: has left neighbor (no boundary check needed)
   forM_ [0 .. height - 1] $ \y -> do
     let !rowBase = y * width
+        !encoded0 = alphaData `VS.unsafeIndex` rowBase
+    !pred0 <-
+      if y == 0
+        then return (0 :: Word8)
+        else VSM.unsafeRead output (rowBase - width)
+    let !decoded0 = fromIntegral ((fromIntegral encoded0 + fromIntegral pred0) .&. 0xFF :: Int) :: Word8
+    VSM.unsafeWrite output rowBase decoded0
+
     forM_ [1 .. width - 1] $ \x -> do
       let !idx = rowBase + x
           !encoded = alphaData `VS.unsafeIndex` idx
@@ -88,10 +94,13 @@ applyHorizontalFilter width height alphaData output = do
 {-# INLINE applyVerticalFilter #-}
 applyVerticalFilter :: Int -> Int -> VS.Vector Word8 -> VSM.MVector s Word8 -> ST s ()
 applyVerticalFilter width height alphaData output = do
-  -- First row: no above neighbor (predict from 0)
-  forM_ [0 .. width - 1] $ \x -> do
+  -- First row: no above neighbor; (0,0) predicts from 0, the rest from the left
+  let !encoded00 = alphaData `VS.unsafeIndex` 0
+  VSM.unsafeWrite output 0 encoded00
+  forM_ [1 .. width - 1] $ \x -> do
     let !encoded = alphaData `VS.unsafeIndex` x
-        !decoded = fromIntegral encoded :: Word8
+    !left <- VSM.unsafeRead output (x - 1)
+    let !decoded = fromIntegral ((fromIntegral encoded + fromIntegral left) .&. 0xFF :: Int) :: Word8
     VSM.unsafeWrite output x decoded
 
   -- Rest of rows: has above neighbor (no boundary check needed)

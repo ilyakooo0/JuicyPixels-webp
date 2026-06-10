@@ -15,7 +15,7 @@ import Codec.Picture.WebP.Internal.VP8.DCT (fdct4x4, fwht4x4)
 import Codec.Picture.WebP.Internal.VP8.Dequant (DequantFactors, dequantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.IDCT (idct4x4, iwht4x4)
 import Codec.Picture.WebP.Internal.VP8.Predict
-import Codec.Picture.WebP.Internal.VP8.Quantize (blockOrigVar256, ssimC2Scaled, ssimTrellisScale, trellisQuantizeBlock)
+import Codec.Picture.WebP.Internal.VP8.Quantize (blockResidualVar256, ssimC2Scaled, ssimTrellisScale, trellisQuantizeBlock)
 import Codec.Picture.WebP.Internal.VP8.RateCost
   ( bPredYModeCost,
     bSubModeCost,
@@ -329,9 +329,16 @@ selectIntra16x16ModeRDO ::
   Int -> -- Lambda (rate-distortion tradeoff)
   Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities (1056 flat entries)
-  Int -> Int -> Int -> Int -> -- aboveNzY[0..3] (from MB above)
-  Int -> Int -> Int -> Int -> -- leftNzY[0..3] (from MB to the left)
-  Int -> Int -> -- aboveDcNz, leftDcNz (Y2 DC NZ context)
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- aboveNzY[0..3] (from MB above)
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- leftNzY[0..3] (from MB to the left)
+  Int ->
+  Int -> -- aboveDcNz, leftDcNz (Y2 DC NZ context)
   ST s (Int, Int) -- (mode, rdCost)
 selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale coeffProbs aNzY0 aNzY1 aNzY2 aNzY3 lNzY0 lNzY1 lNzY2 lNzY3 aDcNz lDcNz = do
   predBuf <- VSM.clone yRecon
@@ -339,6 +346,10 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale co
   residuals <- VSM.new 16
   dctStore <- VSM.new (16 * 16)
   nzGrid <- VSM.new 16 :: ST s (VSM.MVector s Word8)
+  -- Per-block residual variance (spatial, pre-FDCT), captured per mode trial.
+  -- Drives the SSIM trellis scale from the same residuals being quantized,
+  -- mirroring the final encode (Encode.encodeYBlocks).
+  resVars <- VSM.new 16 :: ST s (VSM.MVector s Int)
 
   let tryMode !mode !bestMode !bestCost
         | mode > 3 = return (bestMode, bestCost)
@@ -364,6 +375,9 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale co
                                           fillCol (c + 1)
                                 fillCol 0
                       fillRes 0
+                      -- Capture residual variance before FDCT (spatial domain)
+                      !rvar <- blockResidualVar256 residuals
+                      VSM.unsafeWrite resVars bi rvar
                       fdct4x4 residuals
                       !dc <- VSM.unsafeRead residuals 0
                       VSM.unsafeWrite y2DCs bi dc
@@ -404,14 +418,22 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale co
                           !subX = col * 4
                           !subY = row * 4
                       -- Compute NZ context from above/left neighbors
-                      !aboveNz <- if row == 0
-                        then return $ case col of
-                          0 -> aNzY0; 1 -> aNzY1; 2 -> aNzY2; _ -> aNzY3
-                        else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 4)
-                      !leftNz <- if col == 0
-                        then return $ case row of
-                          0 -> lNzY0; 1 -> lNzY1; 2 -> lNzY2; _ -> lNzY3
-                        else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 1)
+                      !aboveNz <-
+                        if row == 0
+                          then return $ case col of
+                            0 -> aNzY0
+                            1 -> aNzY1
+                            2 -> aNzY2
+                            _ -> aNzY3
+                          else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 4)
+                      !leftNz <-
+                        if col == 0
+                          then return $ case row of
+                            0 -> lNzY0
+                            1 -> lNzY1
+                            2 -> lNzY2
+                            _ -> lNzY3
+                          else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 1)
                       let !ctx = min 2 (aboveNz + leftNz)
                       let loadCoeffs !i
                             | i >= 16 = return ()
@@ -421,7 +443,7 @@ selectIntra16x16ModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale co
                                 loadCoeffs (i + 1)
                       loadCoeffs 0
                       VSM.unsafeWrite residuals 0 0
-                      !var256 <- blockOrigVar256 yOrig stride (mbX + subX) (mbY + subY)
+                      !var256 <- VSM.unsafeRead resVars bi
                       let !ssScale = ssimTrellisScale var256
                       !hasNz <- trellisQuantizeBlock dqFactors 0 residuals coeffProbs ctx 1 ssScale actScale
                       !blockBitCost <- coeffBlockCost residuals coeffProbs 0 ctx 1
@@ -460,8 +482,14 @@ selectBPredModeRDO ::
   Int ->
   Int ->
   Int -> -- Left B-modes from MB to the left (rows 0-3)
-  Int -> Int -> Int -> Int -> -- aboveNzY[0..3] (from MB above)
-  Int -> Int -> Int -> Int -> -- leftNzY[0..3] (from MB to the left)
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- aboveNzY[0..3] (from MB above)
+  Int ->
+  Int ->
+  Int ->
+  Int -> -- leftNzY[0..3] (from MB to the left)
   ST s (VS.Vector Word8, Int) -- (16 modes, total RD cost)
 selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale coeffProbs extAbove0 extAbove1 extAbove2 extAbove3 extLeft0 extLeft1 extLeft2 extLeft3 aNzY0 aNzY1 aNzY2 aNzY3 lNzY0 lNzY1 lNzY2 lNzY3 = do
   modesMut <- VSM.new 16 :: ST s (VSM.MVector s Word8)
@@ -496,19 +524,23 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale coeffPr
                   return (fromIntegral m)
 
             -- Compute NZ context from committed blocks
-            !aboveNz <- if row == 0
-              then return $ case col of
-                0 -> aNzY0; 1 -> aNzY1; 2 -> aNzY2; _ -> aNzY3
-              else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 4)
-            !leftNz <- if col == 0
-              then return $ case row of
-                0 -> lNzY0; 1 -> lNzY1; 2 -> lNzY2; _ -> lNzY3
-              else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 1)
+            !aboveNz <-
+              if row == 0
+                then return $ case col of
+                  0 -> aNzY0
+                  1 -> aNzY1
+                  2 -> aNzY2
+                  _ -> aNzY3
+                else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 4)
+            !leftNz <-
+              if col == 0
+                then return $ case row of
+                  0 -> lNzY0
+                  1 -> lNzY1
+                  2 -> lNzY2
+                  _ -> lNzY3
+                else fromIntegral <$> VSM.unsafeRead nzGrid (bi - 1)
             let !ctx = min 2 (aboveNz + leftNz)
-
-            -- SSIM trellis scale for this sub-block (invariant across modes)
-            !bpVar256 <- blockOrigVar256 yOrig stride subX subY
-            let !bpSsScale = ssimTrellisScale bpVar256
 
             -- Try all 10 modes, pick best by RD cost
             let tryMode !m !bestMode !bestCost
@@ -531,6 +563,11 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale coeffPr
                                           fillCol (c + 1)
                                 fillCol 0
                       fillRes 0
+
+                      -- SSIM trellis scale from this mode's residual variance
+                      -- (spatial, pre-FDCT), matching the final encode
+                      !bpVar256 <- blockResidualVar256 residuals
+                      let !bpSsScale = ssimTrellisScale bpVar256
 
                       fdct4x4 residuals
                       _ <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 bpSsScale actScale
@@ -562,6 +599,8 @@ selectBPredModeRDO yOrig yRecon stride mbX mbY dqFactors lambda actScale coeffPr
                                 fillCol (c + 1)
                       fillCol 0
             fillRes 0
+            !bpVar256 <- blockResidualVar256 residuals
+            let !bpSsScale = ssimTrellisScale bpVar256
             fdct4x4 residuals
             !hasNz <- trellisQuantizeBlock dqFactors 3 residuals coeffProbs ctx 0 bpSsScale actScale
             dequantizeBlock dqFactors 3 residuals
@@ -606,10 +645,14 @@ selectChromaModeRDO ::
   Int -> -- Lambda
   Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities (1056 flat entries)
-  Int -> Int -> -- aboveNzU[0..1] (from MB above)
-  Int -> Int -> -- aboveNzV[0..1]
-  Int -> Int -> -- leftNzU[0..1] (from MB to the left)
-  Int -> Int -> -- leftNzV[0..1]
+  Int ->
+  Int -> -- aboveNzU[0..1] (from MB above)
+  Int ->
+  Int -> -- aboveNzV[0..1]
+  Int ->
+  Int -> -- leftNzU[0..1] (from MB to the left)
+  Int ->
+  Int -> -- leftNzV[0..1]
   ST s (Int, Int) -- (mode, rdCost)
 selectChromaModeRDO uOrig uRecon vOrig vRecon stride x y dqFactors lambda actScale coeffProbs aNzU0 aNzU1 aNzV0 aNzV1 lNzU0 lNzU1 lNzV0 lNzV1 = do
   uPredBuf <- VSM.clone uRecon
@@ -647,8 +690,10 @@ trialEncodeChroma8x8 ::
   Int -> -- Lambda for trellis quantization
   Int -> -- Activity scale (8.8 fixed, 256 = unity) for trellis lambda masking
   VU.Vector Word8 -> -- Coefficient probabilities
-  Int -> Int -> -- aboveNz[0..1] (one bit per chroma column from MB above)
-  Int -> Int -> -- leftNz[0..1] (one bit per chroma row from MB to the left)
+  Int ->
+  Int -> -- aboveNz[0..1] (one bit per chroma column from MB above)
+  Int ->
+  Int -> -- leftNz[0..1] (one bit per chroma row from MB to the left)
   ST s (Int, Int) -- (SSE, bitCost in 256ths)
 trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda actScale coeffProbs aNz0 aNz1 lNz0 lNz1 = do
   -- Per-block work: fill residuals, DCT, trellis quantize with given ctx,
@@ -671,9 +716,9 @@ trialEncodeChroma8x8 chromaOrig predBuf residuals stride x y dqFactors _lambda a
                             fillCol (c + 1)
                   fillCol 0
         fillRes 0
-        -- SSIM masking based on chroma block content (mode-invariant, but
-        -- cheap enough to recompute; mirrors luma I16 path).
-        !cVar256 <- blockOrigVar256 chromaOrig stride (x + subX) (y + subY)
+        -- SSIM masking from this mode's residual variance (spatial, pre-FDCT;
+        -- mode-dependent). Matches the final encode (Encode.encodeChromaBlocks).
+        !cVar256 <- blockResidualVar256 residuals
         let !cSsScale = ssimTrellisScale cVar256
             !ctx = min 2 (aboveNz + leftNz)
         fdct4x4 residuals

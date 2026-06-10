@@ -47,8 +47,8 @@ spec = describe "ColorConvert" $ do
             vFrozen <- VS.unsafeFreeze v
             return (yFrozen, uFrozen, vFrozen)
 
-      -- Black should produce Y=0 (or close to it), Cb=Cr=128 (neutral)
-      VS.head yBuf `shouldSatisfy` (< 5)
+      -- Studio swing: black produces Y=16, Cb=Cr=128 (neutral)
+      VS.head yBuf `shouldBe` 16
       VS.head uBuf `shouldSatisfy` (\x -> x >= 125 && x <= 131)
       VS.head vBuf `shouldSatisfy` (\x -> x >= 125 && x <= 131)
 
@@ -61,8 +61,8 @@ spec = describe "ColorConvert" $ do
             vFrozen <- VS.unsafeFreeze v
             return (yFrozen, uFrozen, vFrozen)
 
-      -- White should produce Y=255, Cb=Cr=128 (neutral)
-      VS.head yBuf `shouldSatisfy` (> 250)
+      -- Studio swing: white produces Y=235, Cb=Cr=128 (neutral)
+      VS.head yBuf `shouldBe` 235
       VS.head uBuf `shouldSatisfy` (\x -> x >= 125 && x <= 131)
       VS.head vBuf `shouldSatisfy` (\x -> x >= 125 && x <= 131)
 
@@ -75,8 +75,8 @@ spec = describe "ColorConvert" $ do
             vFrozen <- VS.unsafeFreeze v
             return (yFrozen, uFrozen, vFrozen)
 
-      -- Red should produce Y~76, Cb<128, Cr>128
-      VS.head yBuf `shouldSatisfy` (\y -> y >= 70 && y <= 85)
+      -- Studio swing: red produces Y=82, Cb=90 (<128), Cr=240 (>128)
+      VS.head yBuf `shouldBe` 82
       VS.head uBuf `shouldSatisfy` (< 128) -- Blue-yellow axis
       VS.head vBuf `shouldSatisfy` (> 128) -- Red-cyan axis
     it "converts solid green image" $ do
@@ -88,8 +88,8 @@ spec = describe "ColorConvert" $ do
             vFrozen <- VS.unsafeFreeze v
             return (yFrozen, uFrozen, vFrozen)
 
-      -- Green should produce high Y (main luma contributor), Cb<128, Cr<128
-      VS.head yBuf `shouldSatisfy` (\y -> y >= 145 && y <= 155)
+      -- Studio swing: green produces Y=145 (main luma contributor), Cb=54, Cr=34
+      VS.head yBuf `shouldBe` 145
       VS.head uBuf `shouldSatisfy` (< 128)
       VS.head vBuf `shouldSatisfy` (< 128)
 
@@ -102,8 +102,8 @@ spec = describe "ColorConvert" $ do
             vFrozen <- VS.unsafeFreeze v
             return (yFrozen, uFrozen, vFrozen)
 
-      -- Blue should produce low Y, Cb>128, Cr<128
-      VS.head yBuf `shouldSatisfy` (\y -> y >= 25 && y <= 35)
+      -- Studio swing: blue produces Y=41, Cb=240 (>128), Cr=110 (<128)
+      VS.head yBuf `shouldBe` 41
       VS.head uBuf `shouldSatisfy` (> 128)
       VS.head vBuf `shouldSatisfy` (< 128)
 

@@ -11,7 +11,7 @@ import Codec.Picture.WebP.Internal.VP8.Coefficients
 import Codec.Picture.WebP.Internal.VP8.Dequant
 import Codec.Picture.WebP.Internal.VP8.Header
 import Codec.Picture.WebP.Internal.VP8.IDCT
-import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyNormalLoopFilterRow, applySimpleLoopFilterRow)
+import Codec.Picture.WebP.Internal.VP8.LoopFilter (applyLoopFilterFrame)
 import Codec.Picture.WebP.Internal.VP8.Predict
 import Codec.Picture.WebP.Internal.VP8.Tables
 import Control.Monad (forM_, when)
@@ -23,6 +23,7 @@ import qualified Data.Vector as V
 import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as VU
+import qualified Data.Vector.Unboxed.Mutable as VUM
 import Data.Word
 
 -- | Decode a VP8 lossy WebP image
@@ -35,12 +36,13 @@ decodeVP8 bs = do
       mbWidth = (width + 15) `div` 16
       mbHeight = (height + 15) `div` 16
 
-  -- Initialize the DCT partition decoder
-  -- With 1 DCT partition, the data follows immediately after partition 0
+  -- Initialize one decoder per DCT partition
+  -- MB row r reads its coefficients from partition (r mod N)
   let dctPartitions = vp8DCTPartitions header
-      dctDecoder = case dctPartitions of
-        (p : _) -> initBoolDecoder p
-        [] -> initBoolDecoder B.empty -- Fallback: empty partition
+      dctDecoders = case dctPartitions of
+        [] -> V.singleton (initBoolDecoder B.empty) -- Fallback: empty partition
+        ps -> V.fromList (map initBoolDecoder ps)
+      numDctPartitions = V.length dctDecoders
   let pixelData = runST $ do
         -- Allocate YUV buffers
         yBuf <- VSM.replicate (mbWidth * 16 * mbHeight * 16) (128 :: Word8)
@@ -68,17 +70,20 @@ decodeVP8 bs = do
         -- B_PRED sub-block mode context (4 modes per MB column, bottom row)
         aboveBModes <- VSM.replicate (mbWidth * 4) (0 :: Word8)
 
+        -- Per-MB loop filter info, recorded during decode and consumed by the
+        -- whole-frame loop filter pass after reconstruction completes
+        mbFilterLevels <- VUM.replicate (mbWidth * mbHeight) (0 :: Int)
+        mbFilterInner <- VUM.replicate (mbWidth * mbHeight) False
+
         -- Decode all macroblocks with separate decoders for modes and coefficients
         -- NZ state is threaded: left NZ resets to 0 at each row start
-        let decodeMacroblocks !mbY !mbX !modeDec !coeffDec !lY0 !lY1 !lY2 !lY3 !lU0 !lU1 !lV0 !lV1 !lDC !lBM0 !lBM1 !lBM2 !lBM3
-              | mbY >= mbHeight = return (modeDec, coeffDec)
-              | mbX >= mbWidth = do
-                  -- Apply per-row loop filter to completed row
-                  when (filterLevel > 0) $
-                    if filterType == 1
-                      then applySimpleLoopFilterRow yBuf (mbWidth * 16) mbY mbWidth filterLevel
-                      else applyNormalLoopFilterRow yBuf (mbWidth * 16) uBuf (mbWidth * 8) vBuf (mbWidth * 8) mbY mbWidth filterLevel
-                  decodeMacroblocks (mbY + 1) 0 modeDec coeffDec 0 0 0 0 0 0 0 0 0 0 0 0 0
+        let decodeMacroblocks !mbY !mbX !modeDec !coeffDecs !lY0 !lY1 !lY2 !lY3 !lU0 !lU1 !lV0 !lV1 !lDC !lBM0 !lBM1 !lBM2 !lBM3
+              | mbY >= mbHeight = return (modeDec, coeffDecs)
+              | mbX >= mbWidth =
+                  -- NOTE: the loop filter runs as a separate whole-frame pass
+                  -- after all MBs are reconstructed, so intra prediction always
+                  -- reads UNFILTERED pixels (RFC 6386 reference decoder behavior)
+                  decodeMacroblocks (mbY + 1) 0 modeDec coeffDecs 0 0 0 0 0 0 0 0 0 0 0 0 0
               | otherwise = do
                   -- Read segment ID from partition 0 (if segmentation enabled)
                   let (!segId, !modeDec0) = case segReadInfo of
@@ -86,12 +91,22 @@ decodeVP8 bs = do
                         Just (sp0, sp1, sp2) -> decodeSegmentId sp0 sp1 sp2 modeDec
                       !dequantFact = dequantFactorsVec V.! segId
 
+                  -- RFC 6386 §19.3: mb_skip_coeff follows segment_id and precedes Y mode
+                  let (!skip, !modeDecS) =
+                        if vp8SkipEnabled header
+                          then boolRead (vp8ProbSkipFalse header) modeDec0
+                          else (False, modeDec0)
+
                   -- Read Y mode from partition 0
-                  let (yMode, modeDec1) = boolReadTree kfYModeTree kfYModeProbs modeDec0
+                  let (yMode, modeDec1) = boolReadTree kfYModeTree kfYModeProbs modeDecS
+
+                  -- MB row uses DCT partition (row mod N)
+                  let !partIdx = mbY `mod` numDctPartitions
+                      !coeffDec = coeffDecs V.! partIdx
 
                   -- Process macroblock, threading both decoders and NZ state
                   -- RFC 6386 §11.5: Y mode → (if B_PRED: sub-block modes) → UV mode
-                  (modeDecAfterMB, coeffDecAfterMB, lY0', lY1', lY2', lY3', lU0', lU1', lV0', lV1', lDC', lBM0', lBM1', lBM2', lBM3') <-
+                  (modeDecAfterMB, coeffDecAfterMB, lY0', lY1', lY2', lY3', lU0', lU1', lV0', lV1', lDC', lBM0', lBM1', lBM2', lBM3', hasCoeffs) <-
                     if yMode == 4
                       then do
                         -- Read above B modes for context
@@ -101,12 +116,13 @@ decodeVP8 bs = do
                         aBM3 <- VSM.read aboveBModes (mbX * 4 + 3)
 
                         -- B_PRED: read sub-block modes from partition 0 BEFORE UV mode
-                        (modeDec2, coeffDec', bpLY0, bpLY1, bpLY2, bpLY3, bpModes) <-
+                        (modeDec2, coeffDec', bpLY0, bpLY1, bpLY2, bpLY3, bpAnyNz, bpModes) <-
                           reconstructBPred
                             yBuf
                             mbY
                             mbX
                             mbWidth
+                            skip
                             modeDec1
                             coeffDec
                             coeffProbs
@@ -128,8 +144,7 @@ decodeVP8 bs = do
                         -- Read UV mode AFTER sub-block modes (RFC 6386 §11.5)
                         let (uvMode, modeDec3) = boolReadTree kfUVModeTree kfUVModeProbs modeDec2
 
-                        -- B_PRED has no Y2 block, DC NZ = 0
-                        VSM.write aboveNzDC mbX 0
+                        -- B_PRED has no Y2 block: the Y2/DC NZ context passes through unchanged
 
                         -- Update above B modes with bottom row
                         bm12 <- VSM.read bpModes 12
@@ -142,34 +157,45 @@ decodeVP8 bs = do
                         VSM.write aboveBModes (mbX * 4 + 3) bm15
 
                         -- Reconstruct U and V chroma blocks
-                        (coeffDecU, cLU0, cLU1) <-
-                          reconstructChroma
-                            uBuf
-                            mbY
-                            mbX
-                            mbWidth
-                            uvMode
-                            coeffDec'
-                            coeffProbs
-                            dequantFact
-                            2
-                            aboveNzU
-                            lU0
-                            lU1
-                        (coeffDecV, cLV0, cLV1) <-
-                          reconstructChroma
-                            vBuf
-                            mbY
-                            mbX
-                            mbWidth
-                            uvMode
-                            coeffDecU
-                            coeffProbs
-                            dequantFact
-                            2
-                            aboveNzV
-                            lV0
-                            lV1
+                        (coeffDecV, cLU0, cLU1, cLV0, cLV1, cAnyNz) <-
+                          if skip
+                            then do
+                              -- Skipped MB: chroma is pure prediction, contexts reset to 0
+                              predict8x8 uvMode uBuf (mbWidth * 8) (mbX * 8) (mbY * 8)
+                              predict8x8 uvMode vBuf (mbWidth * 8) (mbX * 8) (mbY * 8)
+                              forM_ [0 .. 1] $ \i -> VSM.write aboveNzU (mbX * 2 + i) 0
+                              forM_ [0 .. 1] $ \i -> VSM.write aboveNzV (mbX * 2 + i) 0
+                              return (coeffDec', 0, 0, 0, 0, False)
+                            else do
+                              (coeffDecU, cLU0, cLU1, uAnyNz) <-
+                                reconstructChroma
+                                  uBuf
+                                  mbY
+                                  mbX
+                                  mbWidth
+                                  uvMode
+                                  coeffDec'
+                                  coeffProbs
+                                  dequantFact
+                                  2
+                                  aboveNzU
+                                  lU0
+                                  lU1
+                              (coeffDecV, cLV0, cLV1, vAnyNz) <-
+                                reconstructChroma
+                                  vBuf
+                                  mbY
+                                  mbX
+                                  mbWidth
+                                  uvMode
+                                  coeffDecU
+                                  coeffProbs
+                                  dequantFact
+                                  2
+                                  aboveNzV
+                                  lV0
+                                  lV1
+                              return (coeffDecV, cLU0, cLU1, cLV0, cLV1, uAnyNz || vAnyNz)
                         -- Right column B modes for next MB's left context
                         bm3 <- VSM.read bpModes 3
                         bm7 <- VSM.read bpModes 7
@@ -179,17 +205,15 @@ decodeVP8 bs = do
                             !newLBM1 = fromIntegral bm7
                             !newLBM2 = fromIntegral bm11
                             !newLBM3 = fromIntegral bm15'
-                        return (modeDec3, coeffDecV, bpLY0, bpLY1, bpLY2, bpLY3, cLU0, cLU1, cLV0, cLV1, 0, newLBM0, newLBM1, newLBM2, newLBM3)
+                        return (modeDec3, coeffDecV, bpLY0, bpLY1, bpLY2, bpLY3, cLU0, cLU1, cLV0, cLV1, lDC, newLBM0, newLBM1, newLBM2, newLBM3, bpAnyNz || cAnyNz)
                       else do
-                        -- Non-B_PRED: read UV mode then skip flag
+                        -- Non-B_PRED: read UV mode (skip flag was read before the Y mode)
                         let (uvMode, modeDec2) = boolReadTree kfUVModeTree kfUVModeProbs modeDec1
-                            (skip, modeDec3) =
-                              if vp8SkipEnabled header
-                                then boolRead (vp8ProbSkipFalse header) modeDec2
-                                else (False, modeDec2)
+                            !yBM = yModeToBMode yMode
 
-                        -- Non-B_PRED: above B modes default to 0
-                        forM_ [0 .. 3] $ \i -> VSM.write aboveBModes (mbX * 4 + i) 0
+                        -- Non-B_PRED MB contributes its Y mode mapped to a B mode
+                        -- as context for adjacent B_PRED MBs
+                        forM_ [0 .. 3] $ \i -> VSM.write aboveBModes (mbX * 4 + i) (fromIntegral yBM)
 
                         if skip
                           then do
@@ -202,7 +226,7 @@ decodeVP8 bs = do
                             forM_ [0 .. 1] $ \i -> VSM.write aboveNzU (mbX * 2 + i) 0
                             forM_ [0 .. 1] $ \i -> VSM.write aboveNzV (mbX * 2 + i) 0
                             VSM.write aboveNzDC mbX 0
-                            return (modeDec3, coeffDec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+                            return (modeDec2, coeffDec, 0, 0, 0, 0, 0, 0, 0, 0, 0, yBM, yBM, yBM, yBM, False)
                           else do
                             -- Decode Y2 block with NZ context
                             aNzDC <- VSM.read aboveNzDC mbX
@@ -217,7 +241,7 @@ decodeVP8 bs = do
                             let !newLDC = if y2nz then 1 else 0
 
                             -- Decode and reconstruct 16 Y blocks with NZ context
-                            (coeffDec2, rLY0, rLY1, rLY2, rLY3) <-
+                            (coeffDec2, rLY0, rLY1, rLY2, rLY3, yAnyNz) <-
                               reconstructMB16x16
                                 yBuf
                                 mbY
@@ -235,7 +259,7 @@ decodeVP8 bs = do
                                 lY3
 
                             -- Reconstruct U and V blocks with NZ context
-                            (coeffDec3, rLU0, rLU1) <-
+                            (coeffDec3, rLU0, rLU1, uAnyNz) <-
                               reconstructChroma
                                 uBuf
                                 mbY
@@ -249,7 +273,7 @@ decodeVP8 bs = do
                                 aboveNzU
                                 lU0
                                 lU1
-                            (coeffDec4, rLV0, rLV1) <-
+                            (coeffDec4, rLV0, rLV1, vAnyNz) <-
                               reconstructChroma
                                 vBuf
                                 mbY
@@ -263,14 +287,42 @@ decodeVP8 bs = do
                                 aboveNzV
                                 lV0
                                 lV1
-                            return (modeDec3, coeffDec4, rLY0, rLY1, rLY2, rLY3, rLU0, rLU1, rLV0, rLV1, newLDC, 0, 0, 0, 0)
+                            return (modeDec2, coeffDec4, rLY0, rLY1, rLY2, rLY3, rLU0, rLU1, rLV0, rLV1, newLDC, yBM, yBM, yBM, yBM, y2nz || yAnyNz || uAnyNz || vAnyNz)
+
+                  -- Record per-MB loop filter info (RFC 6386 §15.2):
+                  -- level from segment strength + (keyframe) intra/mode deltas;
+                  -- interior edges filtered only if the MB has nonzero
+                  -- coefficients or uses B_PRED (libwebp: f_inner_ = is_i4x4 || !skip)
+                  let !isBPred = yMode == 4
+                      !mbIdx = mbY * mbWidth + mbX
+                  VUM.write mbFilterLevels mbIdx (computeMBFilterLevel header segId isBPred)
+                  VUM.write mbFilterInner mbIdx (isBPred || hasCoeffs)
 
                   -- Continue to next macroblock with updated decoders and NZ state
-                  decodeMacroblocks mbY (mbX + 1) modeDecAfterMB coeffDecAfterMB lY0' lY1' lY2' lY3' lU0' lU1' lV0' lV1' lDC' lBM0' lBM1' lBM2' lBM3'
+                  let !coeffDecs' = coeffDecs V.// [(partIdx, coeffDecAfterMB)]
+                  decodeMacroblocks mbY (mbX + 1) modeDecAfterMB coeffDecs' lY0' lY1' lY2' lY3' lU0' lU1' lV0' lV1' lDC' lBM0' lBM1' lBM2' lBM3'
 
-        (_finalModeDec, _finalCoeffDec) <- decodeMacroblocks 0 0 modeDecoder dctDecoder 0 0 0 0 0 0 0 0 0 0 0 0 0
+        (_finalModeDec, _finalCoeffDecs) <- decodeMacroblocks 0 0 modeDecoder dctDecoders 0 0 0 0 0 0 0 0 0 0 0 0 0
 
-        -- Loop filter was already applied per-row above (both simple and normal)
+        -- Whole-frame loop filter pass over the fully reconstructed frame.
+        -- A frame-level filter level of 0 disables filtering entirely
+        -- (libwebp: filter_type_ = (hdr->level_ == 0) ? 0 : ...).
+        when (filterLevel > 0) $ do
+          levels <- VU.freeze mbFilterLevels
+          inners <- VU.freeze mbFilterInner
+          applyLoopFilterFrame
+            filterType
+            (vp8Sharpness header)
+            levels
+            inners
+            yBuf
+            (mbWidth * 16)
+            uBuf
+            (mbWidth * 8)
+            vBuf
+            (mbWidth * 8)
+            mbHeight
+            mbWidth
 
         -- Convert YUV to RGB
         yData <- VS.freeze yBuf
@@ -291,10 +343,11 @@ decodeVP8 bs = do
                 !uVal = fromIntegral (uData `VS.unsafeIndex` uIdx) :: Int
                 !vVal = fromIntegral (vData `VS.unsafeIndex` vIdx) :: Int
 
-                -- YUV to RGB conversion (BT.601) - use shiftR 8 instead of div 256
-                !r = clamp (yVal + ((360 * (vVal - 128)) `shiftR` 8))
-                !g = clamp (yVal - ((88 * (uVal - 128) + 184 * (vVal - 128)) `shiftR` 8))
-                !b = clamp (yVal + ((455 * (uVal - 128)) `shiftR` 8))
+                -- YUV to RGB conversion (BT.601 studio swing, libwebp/libvpx)
+                !c = 298 * (yVal - 16)
+                !r = clamp ((c + 409 * (vVal - 128) + 128) `shiftR` 8)
+                !g = clamp ((c - 100 * (uVal - 128) - 208 * (vVal - 128) + 128) `shiftR` 8)
+                !b = clamp ((c + 516 * (uVal - 128) + 128) `shiftR` 8)
 
                 rgbIdx = (y * width + x) * 3
 
@@ -309,12 +362,14 @@ decodeVP8 bs = do
 -- | Reconstruct B_PRED macroblock (16 individual 4x4 blocks) with NZ context tracking
 -- Sub-block modes are read from modeDecoder (partition 0) using kfBmodeProbs[above][left]
 -- Coefficients are read from coeffDecoder (DCT partition)
--- Returns: (modeDec, coeffDec, leftNzY0..3, modeGrid) where modeGrid has 16 decoded modes
+-- When skipCoeff is set, no coefficient data is read (residual is zero)
+-- Returns: (modeDec, coeffDec, leftNzY0..3, anyNz, modeGrid) where modeGrid has 16 decoded modes
 reconstructBPred ::
   VSM.MVector s Word8 ->
   Int ->
   Int ->
   Int ->
+  Bool -> -- mb_skip_coeff: no coefficient data for this MB
   BoolDecoder -> -- Mode decoder (partition 0) - for sub-block modes
   BoolDecoder -> -- Coefficient decoder (DCT partition)
   VU.Vector Word8 ->
@@ -332,8 +387,8 @@ reconstructBPred ::
   Int ->
   Int ->
   Int -> -- leftBModes (from left MB's right column)
-  ST s (BoolDecoder, BoolDecoder, Int, Int, Int, Int, VSM.MVector s Word8)
-reconstructBPred yBuf mbY mbX mbStride modeDecoder coeffDecoder coeffProbs dequantFact aboveNzY leftNzY0 leftNzY1 leftNzY2 leftNzY3 aBM0 aBM1 aBM2 aBM3 lBM0 lBM1 lBM2 lBM3 = do
+  ST s (BoolDecoder, BoolDecoder, Int, Int, Int, Int, Bool, VSM.MVector s Word8)
+reconstructBPred yBuf mbY mbX mbStride skipCoeff modeDecoder coeffDecoder coeffProbs dequantFact aboveNzY leftNzY0 leftNzY1 leftNzY2 leftNzY3 aBM0 aBM1 aBM2 aBM3 lBM0 lBM1 lBM2 lBM3 = do
   let mbYBase = mbY * 16
       mbXBase = mbX * 16
 
@@ -384,58 +439,61 @@ reconstructBPred yBuf mbY mbX mbStride modeDecoder coeffDecoder coeffProbs dequa
         -- Apply 4x4 prediction
         predict4x4 bMode yBuf (mbStride * 16) blockX blockY
 
-        -- Compute NZ context
-        aboveNz <-
-          if row == 0
-            then return $ fromIntegral $ case col of
-              0 -> aNzCol0
-              1 -> aNzCol1
-              2 -> aNzCol2
-              _ -> aNzCol3
-            else fromIntegral <$> VSM.read nzGrid ((row - 1) * 4 + col)
-        leftNz <-
-          if col == 0
-            then return $ case row of
-              0 -> leftNzY0
-              1 -> leftNzY1
-              2 -> leftNzY2
-              _ -> leftNzY3
-            else fromIntegral <$> VSM.read nzGrid (row * 4 + col - 1)
-        let !ctx = min 2 (aboveNz + leftNz)
+        if skipCoeff
+          then return (modeDec', coeffDec, False) -- No coefficient data: residual is zero
+          else do
+            -- Compute NZ context
+            aboveNz <-
+              if row == 0
+                then return $ fromIntegral $ case col of
+                  0 -> aNzCol0
+                  1 -> aNzCol1
+                  2 -> aNzCol2
+                  _ -> aNzCol3
+                else fromIntegral <$> VSM.read nzGrid ((row - 1) * 4 + col)
+            leftNz <-
+              if col == 0
+                then return $ case row of
+                  0 -> leftNzY0
+                  1 -> leftNzY1
+                  2 -> leftNzY2
+                  _ -> leftNzY3
+                else fromIntegral <$> VSM.read nzGrid (row * 4 + col - 1)
+            let !ctx = min 2 (aboveNz + leftNz)
 
-        -- Decode coefficients from DCT partition with NZ context
-        -- blockType=3 for i4-AC (B_PRED Y blocks with DC)
-        (coeffs, hasNonzero, coeffDec') <- decodeCoefficients coeffDec coeffProbs 3 ctx 0
+            -- Decode coefficients from DCT partition with NZ context
+            -- blockType=3 for i4-AC (B_PRED Y blocks with DC)
+            (coeffs, hasNonzero, coeffDec') <- decodeCoefficients coeffDec coeffProbs 3 ctx 0
 
-        -- Track NZ
-        VSM.write nzGrid blockIdx (if hasNonzero then 1 else 0)
+            -- Track NZ
+            VSM.write nzGrid blockIdx (if hasNonzero then 1 else 0)
 
-        -- Dequantize
-        dequantizeBlock dequantFact 3 coeffs -- Type 3: Y block with DC
+            -- Dequantize
+            dequantizeBlock dequantFact 3 coeffs -- Type 3: Y block with DC
 
-        -- Apply IDCT
-        idct4x4 coeffs
+            -- Apply IDCT
+            idct4x4 coeffs
 
-        -- Add to prediction and clamp
-        forM_ [0 :: Int .. 3] $ \dy ->
-          forM_ [0 :: Int .. 3] $ \dx -> do
-            let yIdx = (blockY + dy) * mbStride * 16 + (blockX + dx)
-            pred <- VSM.read yBuf yIdx
-            residual <- VSM.read coeffs (dy * 4 + dx)
-            let reconstructed = fromIntegral pred + fromIntegral residual
-                clamped = fromIntegral $ min 255 $ max 0 reconstructed
-            VSM.write yBuf yIdx clamped
+            -- Add to prediction and clamp
+            forM_ [0 :: Int .. 3] $ \dy ->
+              forM_ [0 :: Int .. 3] $ \dx -> do
+                let yIdx = (blockY + dy) * mbStride * 16 + (blockX + dx)
+                pred <- VSM.read yBuf yIdx
+                residual <- VSM.read coeffs (dy * 4 + dx)
+                let reconstructed = fromIntegral pred + fromIntegral residual
+                    clamped = fromIntegral $ min 255 $ max 0 reconstructed
+                VSM.write yBuf yIdx clamped
 
-        return (modeDec', coeffDec')
+            return (modeDec', coeffDec', hasNonzero)
 
   -- Decode all 16 4x4 blocks
-  let loopBBlocks blockIdx modeDec coeffDec
-        | blockIdx >= 16 = return (modeDec, coeffDec)
+  let loopBBlocks blockIdx modeDec coeffDec !anyNz
+        | blockIdx >= 16 = return (modeDec, coeffDec, anyNz)
         | otherwise = do
-            (modeDec', coeffDec') <- decodeBBlock blockIdx modeDec coeffDec
-            loopBBlocks (blockIdx + 1) modeDec' coeffDec'
+            (modeDec', coeffDec', nz) <- decodeBBlock blockIdx modeDec coeffDec
+            loopBBlocks (blockIdx + 1) modeDec' coeffDec' (anyNz || nz)
 
-  (finalModeDec, finalCoeffDec) <- loopBBlocks 0 modeDecoder coeffDecoder
+  (finalModeDec, finalCoeffDec, anyNz) <- loopBBlocks 0 modeDecoder coeffDecoder False
 
   -- Update aboveNzY with bottom row NZ (blocks 12, 13, 14, 15)
   nz12 <- VSM.read nzGrid 12
@@ -453,7 +511,7 @@ reconstructBPred yBuf mbY mbX mbStride modeDecoder coeffDecoder coeffProbs dequa
   newLeftY2 <- fromIntegral <$> VSM.read nzGrid 11
   newLeftY3 <- fromIntegral <$> VSM.read nzGrid 15
 
-  return (finalModeDec, finalCoeffDec, newLeftY0, newLeftY1, newLeftY2, newLeftY3, modeGrid)
+  return (finalModeDec, finalCoeffDec, newLeftY0, newLeftY1, newLeftY2, newLeftY3, anyNz, modeGrid)
 
 -- | Reconstruct 16x16 macroblock from coefficients (DCT partition) with NZ context tracking
 reconstructMB16x16 ::
@@ -471,7 +529,7 @@ reconstructMB16x16 ::
   Int ->
   Int ->
   Int -> -- leftNzY[0..3]
-  ST s (BoolDecoder, Int, Int, Int, Int)
+  ST s (BoolDecoder, Int, Int, Int, Int, Bool)
 reconstructMB16x16 yBuf mbY mbX mbStride yMode y2Coeffs decoder coeffProbs dequantFact aboveNzY leftNzY0 leftNzY1 leftNzY2 leftNzY3 = do
   let mbYBase = mbY * 16
       mbXBase = mbX * 16
@@ -539,16 +597,16 @@ reconstructMB16x16 yBuf mbY mbX mbStride yMode y2Coeffs decoder coeffProbs dequa
                 clamped = fromIntegral $ min 255 $ max 0 reconstructed
             VSM.write yBuf yIdx clamped
 
-        return dec'
+        return (dec', hasNonzero)
 
   -- Decode all 16 Y blocks sequentially
-  let loopYBlocks blockIdx dec
-        | blockIdx >= 16 = return dec
+  let loopYBlocks blockIdx dec !anyNz
+        | blockIdx >= 16 = return (dec, anyNz)
         | otherwise = do
-            dec' <- decodeYBlock blockIdx dec
-            loopYBlocks (blockIdx + 1) dec'
+            (dec', nz) <- decodeYBlock blockIdx dec
+            loopYBlocks (blockIdx + 1) dec' (anyNz || nz)
 
-  finalDec <- loopYBlocks 0 decoder
+  (finalDec, anyNz) <- loopYBlocks 0 decoder False
 
   -- Update aboveNzY with bottom row NZ (blocks 12, 13, 14, 15)
   nz12 <- VSM.read nzGrid 12
@@ -566,7 +624,7 @@ reconstructMB16x16 yBuf mbY mbX mbStride yMode y2Coeffs decoder coeffProbs dequa
   newLeftY2 <- fromIntegral <$> VSM.read nzGrid 11
   newLeftY3 <- fromIntegral <$> VSM.read nzGrid 15
 
-  return (finalDec, newLeftY0, newLeftY1, newLeftY2, newLeftY3)
+  return (finalDec, newLeftY0, newLeftY1, newLeftY2, newLeftY3, anyNz)
 
 -- | Reconstruct chroma blocks (U or V) from DCT partition with NZ context tracking
 -- coeffBlockType should be 2 for both U and V per libwebp convention
@@ -584,7 +642,7 @@ reconstructChroma ::
   VSM.MVector s Word8 -> -- aboveNz (mbCols*2)
   Int ->
   Int -> -- leftNz row 0, row 1
-  ST s (BoolDecoder, Int, Int)
+  ST s (BoolDecoder, Int, Int, Bool)
 reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact coeffBlockType aboveNz leftNz0 leftNz1 = do
   let mbUVY = mbY * 8
       mbUVX = mbX * 8
@@ -637,16 +695,16 @@ reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact c
                 clamped = fromIntegral $ min 255 $ max 0 reconstructed
             VSM.write uvBuf uvIdx clamped
 
-        return dec'
+        return (dec', hasNonzero)
 
   -- Decode all 4 UV blocks
-  let loopUVBlocks blockIdx dec
-        | blockIdx >= 4 = return dec
+  let loopUVBlocks blockIdx dec !anyNz
+        | blockIdx >= 4 = return (dec, anyNz)
         | otherwise = do
-            dec' <- decodeUVBlock blockIdx dec
-            loopUVBlocks (blockIdx + 1) dec'
+            (dec', nz) <- decodeUVBlock blockIdx dec
+            loopUVBlocks (blockIdx + 1) dec' (anyNz || nz)
 
-  finalDec <- loopUVBlocks 0 decoder
+  (finalDec, anyNz) <- loopUVBlocks 0 decoder False
 
   -- Update aboveNz with bottom row NZ (blocks 2 and 3)
   nz2 <- VSM.read nzGrid 2
@@ -658,7 +716,32 @@ reconstructChroma uvBuf mbY mbX mbStride uvMode decoder coeffProbs dequantFact c
   newLeft0 <- fromIntegral <$> VSM.read nzGrid 1
   newLeft1 <- fromIntegral <$> VSM.read nzGrid 3
 
-  return (finalDec, newLeft0, newLeft1)
+  return (finalDec, newLeft0, newLeft1, anyNz)
+
+-- | Per-MB loop filter level (RFC 6386 §15.2, keyframe):
+-- start from the frame filter level; if segmentation provides filter
+-- strengths, use them (absolute, or as a delta to the frame level),
+-- clamped to [0, 63]; if loop filter deltas are enabled, every keyframe
+-- MB is INTRA so add the INTRA ref-frame delta (index 0), plus the
+-- B_PRED mode delta (index 0) for B_PRED MBs, clamped to [0, 63].
+computeMBFilterLevel :: VP8FrameHeader -> Int -> Bool -> Int
+computeMBFilterLevel header segId isBPred = withDeltas
+  where
+    frameLevel = vp8FilterLevel header
+    segLevel = case vp8Segments header of
+      Just si
+        | segmentEnabled si ->
+            let v = segmentFilterStrength si VU.! segId
+             in clamp63 $ if segmentAbsoluteMode si then v else frameLevel + v
+      _ -> frameLevel
+    withDeltas = case vp8FilterDeltas header of
+      Just fd ->
+        clamp63 $
+          segLevel
+            + (fdRefLfDelta fd VU.! 0) -- INTRA_FRAME ref delta
+            + (if isBPred then fdModeLfDelta fd VU.! 0 else 0) -- B_PRED mode delta
+      Nothing -> segLevel
+    clamp63 = max 0 . min 63
 
 -- | Clamp value to 0-255 range
 clamp :: Int -> Int
@@ -666,6 +749,15 @@ clamp x
   | x < 0 = 0
   | x > 255 = 255
   | otherwise = x
+
+-- | Map a non-B_PRED keyframe Y mode to the B mode it implies as
+-- above/left context for adjacent B_PRED macroblocks (RFC 6386 §11.5)
+{-# INLINE yModeToBMode #-}
+yModeToBMode :: Int -> Int
+yModeToBMode 1 = 2 -- V_PRED → B_VE_PRED
+yModeToBMode 2 = 3 -- H_PRED → B_HE_PRED
+yModeToBMode 3 = 1 -- TM_PRED → B_TM_PRED
+yModeToBMode _ = 0 -- DC_PRED → B_DC_PRED
 
 -- Keyframe Y mode tree (from RFC 6386)
 -- Tree structure: indices are pairs (left, right). Negative = leaf returning -value, 0 = leaf returning 0

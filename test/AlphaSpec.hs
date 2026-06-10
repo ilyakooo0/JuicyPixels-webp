@@ -59,9 +59,10 @@ spec = describe "Alpha Channel" $ do
         Right alpha -> do
           VS.length alpha `shouldBe` 4
           let values = VS.toList alpha
-          -- First row: 100, 150 (no prediction)
-          -- Second row: 110 (100+10), 170 (150+20)
-          values `shouldBe` [100, 150, 110, 170]
+          -- First row predicts from the left (only (0,0) is unpredicted):
+          -- 100, 250 (100+150). Second row predicts from above:
+          -- 110 (100+10), 14 ((250+20) mod 256)
+          values `shouldBe` [100, 250, 110, 14]
         Left err -> expectationFailure $ "Decode failed: " ++ err
 
   describe "Gradient Filtering" $ do

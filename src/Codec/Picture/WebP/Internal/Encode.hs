@@ -14,12 +14,7 @@ where
 import Codec.Picture.Types
 import Codec.Picture.WebP.Internal.AlphaEncode
 import qualified Codec.Picture.WebP.Internal.VP8.Encode as VP8.Encode
-import Codec.Picture.WebP.Internal.VP8L.EncodeAny
 import Codec.Picture.WebP.Internal.VP8L.EncodeComplete
-import Codec.Picture.WebP.Internal.VP8L.EncodeIdentity
-import Codec.Picture.WebP.Internal.VP8L.EncodeSimple
-import Codec.Picture.WebP.Internal.VP8L.EncodeUncompressed
-import Codec.Picture.WebP.Internal.VP8L.EncodeWorking
 import Data.Binary.Put
 import Data.Bits
 import qualified Data.ByteString as B
@@ -31,24 +26,6 @@ import Data.Word
 encodeWebPLossless :: Image PixelRGBA8 -> B.ByteString
 encodeWebPLossless img =
   let vp8lData = encodeVP8LComplete img -- Complete encoder with proper Huffman coding
-      vp8lChunk = makeVP8LChunk vp8lData
-      totalSize = B.length vp8lChunk
-      container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
-   in container
-
--- | Encode with uncompressed mode (for debugging)
-encodeWebPLosslessUncompressed :: Image PixelRGBA8 -> B.ByteString
-encodeWebPLosslessUncompressed img =
-  let vp8lData = encodeVP8LUncompressed img
-      vp8lChunk = makeVP8LChunk vp8lData
-      totalSize = B.length vp8lChunk
-      container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
-   in container
-
--- | Encode with complete Huffman coding (for debugging)
-encodeWebPLosslessComplete :: Image PixelRGBA8 -> B.ByteString
-encodeWebPLosslessComplete img =
-  let vp8lData = encodeVP8LComplete img
       vp8lChunk = makeVP8LChunk vp8lData
       totalSize = B.length vp8lChunk
       container = makeRIFFContainer (fromIntegral totalSize) vp8lChunk
@@ -92,6 +69,7 @@ makeVP8Chunk vp8Data =
    in fourCC <> chunkSize <> vp8Data <> padding
 
 -- | Create VP8X chunk (extended format header)
+-- Canvas dimensions are clamped to the valid range [1, 2^24]
 makeVP8XChunk ::
   Int ->
   Int -> -- Width, height
@@ -117,8 +95,9 @@ makeVP8XChunk width height hasAlpha hasAnim =
       reserved = B.pack [0, 0, 0]
 
       -- Canvas dimensions (24 bits each, minus 1)
-      width24 = fromIntegral (width - 1) :: Word32
-      height24 = fromIntegral (height - 1) :: Word32
+      clampDim d = min (bit 24) (max 1 d)
+      width24 = fromIntegral (clampDim width - 1) :: Word32
+      height24 = fromIntegral (clampDim height - 1) :: Word32
 
       widthBytes = BL.toStrict $ runPut $ do
         putWord8 (fromIntegral $ width24 .&. 0xFF)

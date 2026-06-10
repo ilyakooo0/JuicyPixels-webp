@@ -29,7 +29,9 @@ clip255 !x
 -- Returns (Y buffer, U buffer, V buffer)
 -- Y plane is full resolution (width × height)
 -- U and V planes are subsampled (width/2 × height/2)
--- Uses BT.601 conversion with 4:2:0 chroma subsampling via 2×2 box filter
+-- Uses studio-swing BT.601 conversion (Y in [16,235], U/V in [16,240])
+-- with 4:2:0 chroma subsampling via 2×2 box filter, matching libwebp's
+-- VP8RGBToY/U/V integer formulas (src/dsp/yuv.h, YUV_FIX = 16).
 rgbToYCbCr ::
   Image PixelRGB8 ->
   ST s (VSM.MVector s Word8, VSM.MVector s Word8, VSM.MVector s Word8)
@@ -49,13 +51,14 @@ rgbToYCbCr img = do
   forM_ [0 .. h - 1] $ \y ->
     forM_ [0 .. w - 1] $ \x -> do
       let PixelRGB8 r g b = pixelAt img x y
-          -- BT.601 fixed-point (scaled by 256):
-          -- Y = (77*R + 150*G + 29*B + 128) >> 8
+          -- Studio-swing BT.601 fixed-point (libwebp VP8RGBToY, YUV_FIX = 16):
+          -- Y = (16839*R + 33059*G + 6420*B + 32768 + (16 << 16)) >> 16
           !r' = fromIntegral r :: Int
           !g' = fromIntegral g :: Int
           !b' = fromIntegral b :: Int
       VSM.write yBuf (y * paddedW + x) $!
-        clip255 $ (77 * r' + 150 * g' + 29 * b' + 128) `shiftR` 8
+        clip255 $
+          (16839 * r' + 33059 * g' + 6420 * b' + 32768 + (16 `shiftL` 16)) `shiftR` 16
 
   -- Pass 2: Chroma with 2×2 box filter subsampling
   -- Each chroma sample averages Cb/Cr over a 2×2 pixel block.
@@ -68,24 +71,27 @@ rgbToYCbCr img = do
           !y0 = cy `shiftL` 1
           !x1 = min (x0 + 1) (w - 1)
           !y1 = min (y0 + 1) (h - 1)
-          -- Compute unbiased chroma per pixel (before +128 offset)
-          -- Cb_raw = (-43*R - 85*G + 128*B + 128) >> 8
-          -- Cr_raw = (128*R - 107*G - 21*B + 128) >> 8
-          getCbCr !px !py =
+          -- Sum R/G/B over the 2×2 block, then convert in one step at
+          -- YUV_FIX + 2 = 18 bits, exactly like libwebp's
+          -- VP8RGBToU/V(SUM4(...), YUV_HALF << 2):
+          -- U = (-9719*Rs - 19081*Gs + 28800*Bs + (32768<<2) + (128 << 18)) >> 18
+          -- V = (28800*Rs - 24116*Gs -  4684*Bs + (32768<<2) + (128 << 18)) >> 18
+          getRGB !px !py =
             let PixelRGB8 r g b = pixelAt img px py
-                !r' = fromIntegral r :: Int
-                !g' = fromIntegral g :: Int
-                !b' = fromIntegral b :: Int
-                !cb = (-43 * r' - 85 * g' + 128 * b' + 128) `shiftR` 8
-                !cr = (128 * r' - 107 * g' - 21 * b' + 128) `shiftR` 8
-             in (cb, cr)
-          !(cb00, cr00) = getCbCr x0 y0
-          !(cb10, cr10) = getCbCr x1 y0
-          !(cb01, cr01) = getCbCr x0 y1
-          !(cb11, cr11) = getCbCr x1 y1
-          -- Average with rounding bias (+2 for round-half-up on >>2), then add offset
-          !avgCb = clip255 $ ((cb00 + cb10 + cb01 + cb11 + 2) `shiftR` 2) + 128
-          !avgCr = clip255 $ ((cr00 + cr10 + cr01 + cr11 + 2) `shiftR` 2) + 128
+             in (fromIntegral r :: Int, fromIntegral g :: Int, fromIntegral b :: Int)
+          !(r00, g00, b00) = getRGB x0 y0
+          !(r10, g10, b10) = getRGB x1 y0
+          !(r01, g01, b01) = getRGB x0 y1
+          !(r11, g11, b11) = getRGB x1 y1
+          !rs = r00 + r10 + r01 + r11
+          !gs = g00 + g10 + g01 + g11
+          !bs = b00 + b10 + b01 + b11
+          !avgCb =
+            clip255 $
+              ((-9719) * rs - 19081 * gs + 28800 * bs + (32768 `shiftL` 2) + (128 `shiftL` 18)) `shiftR` 18
+          !avgCr =
+            clip255 $
+              (28800 * rs - 24116 * gs - 4684 * bs + (32768 `shiftL` 2) + (128 `shiftL` 18)) `shiftR` 18
       VSM.write uBuf (cy * chromaW + cx) avgCb
       VSM.write vBuf (cy * chromaW + cx) avgCr
 
@@ -131,6 +137,9 @@ linearToGamma !lin = fromIntegral (linearToGammaTab `VU.unsafeIndex` max 0 (min 
 
 -- | BT.601 weighted grayscale. Preserves input scale (works at any bit depth).
 -- (77 + 150 + 29 = 256, so (77R + 150G + 29B + 128) >> 8 ≈ 0.30R + 0.59G + 0.11B)
+-- NOTE: this is only the INTERNAL W decomposition of the Sharp YUV optimizer
+-- (W + per-channel residuals), not the output luma. The studio-swing YUV
+-- conversion is applied in Phase 3 when emitting the final Y/U/V planes.
 {-# INLINE rgbToGray #-}
 rgbToGray :: Int -> Int -> Int -> Int
 rgbToGray !r !g !b = (77 * r + 150 * g + 29 * b + 128) `shiftR` 8
@@ -155,7 +164,8 @@ clip10 !x
 -- after bilinear upsampling, using sRGB gamma-aware computations.
 -- Produces significantly better color fidelity at sharp edges compared
 -- to simple box-filter downsampling.
-rgbToYCbCrSharp :: forall s.
+rgbToYCbCrSharp ::
+  forall s.
   Image PixelRGB8 ->
   ST s (VSM.MVector s Word8, VSM.MVector s Word8, VSM.MVector s Word8)
 rgbToYCbCrSharp img = do
@@ -350,7 +360,9 @@ rgbToYCbCrSharp img = do
   -- Phase 3: Convert optimized (bestY, bestUV) to output Y/U/V
   -- -----------------------------------------------------------------------
 
-  -- Y: upsample UV + bestY → reconstruct 10-bit RGB → BT.601 luma → 8-bit
+  -- Y: upsample UV + bestY → reconstruct 10-bit RGB → studio-swing BT.601
+  -- luma → 8-bit. Uses libwebp's VP8RGBToY coefficients at 10-bit input
+  -- scale (shift 18 = YUV_FIX + 2, rounding and offset scaled by 4).
   forM_ [0 .. h - 1] $ \py ->
     forM_ [0 .. w - 1] $ \px -> do
       !uvR <- interpChan bestUVr px py
@@ -360,11 +372,14 @@ rgbToYCbCrSharp img = do
       let !reconR = clip10 (by + uvR)
           !reconG = clip10 (by + uvG)
           !reconB = clip10 (by + uvB)
-          -- (77R + 150G + 29B + 512) >> 10 is the 10-bit-scale BT.601 → 8-bit Y
-          !y8 = clip255 $ (77 * reconR + 150 * reconG + 29 * reconB + 512) `shiftR` 10
+          !y8 =
+            clip255 $
+              (16839 * reconR + 33059 * reconG + 6420 * reconB + (32768 `shiftL` 2) + (16 `shiftL` 18)) `shiftR` 18
       VSM.write yBuf (py * paddedW + px) y8
 
-  -- U, V: compute directly from UV residuals (W cancels in chroma formulas)
+  -- U, V: compute directly from 10-bit UV residuals using libwebp's
+  -- VP8RGBToU/V coefficients (each row sums to zero, so the gray
+  -- component W cancels and residuals R-W/G-W/B-W can be used directly).
   let !outChromaRows = (h + 1) `shiftR` 1
       !outChromaCols = (w + 1) `shiftR` 1
   forM_ [0 .. outChromaRows - 1] $ \cy ->
@@ -372,8 +387,12 @@ rgbToYCbCrSharp img = do
       !uvr <- fromIntegral <$> VSM.unsafeRead bestUVr (cy * uvW + cx)
       !uvg <- fromIntegral <$> VSM.unsafeRead bestUVg (cy * uvW + cx)
       !uvb <- fromIntegral <$> VSM.unsafeRead bestUVb (cy * uvW + cx)
-      let !u8 = clip255 $ ((-43 * uvr - 85 * uvg + 128 * uvb + 512) `shiftR` 10) + 128
-          !v8 = clip255 $ ((128 * uvr - 107 * uvg - 21 * uvb + 512) `shiftR` 10) + 128
+      let !u8 =
+            clip255 $
+              ((-9719) * uvr - 19081 * uvg + 28800 * uvb + (32768 `shiftL` 2) + (128 `shiftL` 18)) `shiftR` 18
+          !v8 =
+            clip255 $
+              (28800 * uvr - 24116 * uvg - 4684 * uvb + (32768 `shiftL` 2) + (128 `shiftL` 18)) `shiftR` 18
       VSM.write uBuf (cy * chromaW + cx) u8
       VSM.write vBuf (cy * chromaW + cx) v8
 

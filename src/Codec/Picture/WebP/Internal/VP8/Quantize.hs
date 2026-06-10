@@ -70,9 +70,12 @@ quantizeBlock factors blockType coeffs = do
 --   Y2 (I16): DC=96,  AC=108
 --   UV:       DC=110, AC=115
 biasY1DC, biasY1AC, biasY2DC, biasY2AC, biasUVDC, biasUVAC :: Int
-biasY1DC = 96;  biasY1AC = 110
-biasY2DC = 96;  biasY2AC = 108
-biasUVDC = 110; biasUVAC = 115
+biasY1DC = 96
+biasY1AC = 110
+biasY2DC = 96
+biasY2AC = 108
+biasUVDC = 110
+biasUVAC = 115
 
 -- | Quantize Y block (AC only, position 0 is DC from Y2, don't quantize it here)
 {-# INLINE quantYAC #-}
@@ -202,18 +205,32 @@ applySharpen factors blockType coeffs
 -- ---------------------------------------------------------------------------
 
 -- | Frequency-dependent distortion weights for trellis quantization.
--- Indexed by raster position (0-15) in a 4x4 block. Weights decrease with
--- Manhattan distance from DC, so low-frequency errors (visible as blocking
--- or color shifts) are penalized more heavily than high-frequency errors
--- (less visible noise). From libwebp kWeightTrellis, scaled by 16.
--- Average weight ≈ 251 (close to the original uniform weight of 256).
+-- Indexed by raster position (0-15) in a 4x4 block, exactly like libwebp's
+-- kWeightTrellis (which is indexed by j = kZigzag[n]). Weights decrease with
+-- frequency, so low-frequency errors (visible as blocking or color shifts)
+-- are penalized more heavily than high-frequency errors (less visible noise).
+-- Values are libwebp's kWeightTrellis verbatim; the [192,256] SSIM scale
+-- multiplied in at score time plays the role of libwebp's RD_DISTO_MULT=256,
+-- so the overall distortion scale matches libwebp's calibration.
 kWeightTrellis :: VU.Vector Int
 kWeightTrellis =
   VU.fromList
-    [ 480, 432, 304, 176,
-      432, 304, 176, 176,
-      304, 176, 176, 176,
-      176, 176, 176, 176
+    [ 30,
+      27,
+      19,
+      11,
+      27,
+      24,
+      17,
+      10,
+      19,
+      17,
+      12,
+      8,
+      11,
+      10,
+      8,
+      6
     ]
 
 -- ---------------------------------------------------------------------------
@@ -295,19 +312,26 @@ ssimTrellisScale !var256 =
 
 -- | Trellis-optimized quantization for a 4x4 block.
 -- Uses Viterbi dynamic programming to find the quantized coefficient levels
--- that minimize (lambda * rate + RD_DISTO_MULT * distortion), accounting for
--- the VP8 coefficient entropy context that flows between positions.
+-- that minimize (lambda * rate + ssimScale * weight * distortion), accounting
+-- for the VP8 coefficient entropy context that flows between positions.
 --
--- At each scan position, considers two candidates: floor(|c|/Q) and
--- floor(|c|/Q)+1. The forward pass finds optimal predecessor chains;
--- backtracking writes the best signed levels to the coefficients buffer.
+-- At each scan position, considers three candidates around the truncated
+-- level l0 = floor(|c|/Q): l0, l0+1 (round-up) and l0-1 (aggressive
+-- down-rounding; dead when l0 = 0). The forward pass finds optimal
+-- predecessor chains; backtracking writes the best signed levels to the
+-- coefficients buffer.
 --
--- The trellis lambda is computed internally from the quantizer step and block
--- type, following libwebp's calibration:
---   I4 Y:   7 * Q^2 / 3  (preserve detail in I4 blocks)
---   I16 Y:  13 * Q^2 / 3  (I16 tolerates more zeroing)
---   UV:     15 * Q^2 / 3  (chroma tolerates most zeroing)
--- Distortion is scaled by RD_DISTO_MULT = 256 to match libwebp's convention.
+-- The trellis lambda is computed internally from the average quantizer step
+-- and block type, following libwebp's calibration (SetSegmentParams):
+--   I16 Y (AC and Y2):  Q^2 / 4
+--   UV:                 2 * Q^2
+--   I4 Y:               7 * Q^2 / 8
+-- and is further modulated by the per-MB activity scale (8.8 fixed point).
+--
+-- Distortion uses libwebp's frequency weights (kWeightTrellis) times the
+-- caller-provided SSIM scale, which replaces libwebp's fixed
+-- RD_DISTO_MULT = 256: it is 256 for flat blocks and drops toward 192 as the
+-- residual variance grows (content-adaptive masking in textured regions).
 --
 -- Returns True if any coefficient is nonzero after optimization.
 {-# INLINE trellisQuantizeBlock #-}
@@ -324,30 +348,50 @@ trellisQuantizeBlock ::
   ST s Bool
 trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startPos !ssimScale !activityScale = do
   let -- Quantization steps per position
-      !qDC = fromIntegral (case blockType of
-        1 -> dqY2DC factors; 2 -> dqUVDC factors; 3 -> dqYDC factors; _ -> dqYDC factors) :: Int
-      !qAC = fromIntegral (case blockType of
-        0 -> dqYAC factors; 1 -> dqY2AC factors; 2 -> dqUVAC factors; _ -> dqYAC factors) :: Int
+      !qDC =
+        fromIntegral
+          ( case blockType of
+              1 -> dqY2DC factors
+              2 -> dqUVDC factors
+              3 -> dqYDC factors
+              _ -> dqYDC factors
+          ) ::
+          Int
+      !qAC =
+        fromIntegral
+          ( case blockType of
+              0 -> dqYAC factors
+              1 -> dqY2AC factors
+              2 -> dqUVAC factors
+              _ -> dqYAC factors
+          ) ::
+          Int
       -- Average quantizer step per block type (libwebp's ExpandMatrix).
       -- I16 (types 0,1): Y2 matrix. UV (type 2): UV matrix. I4 (type 3): Y1 matrix.
-      !avgQ = let !sumQ = case blockType of
-                    0 -> fromIntegral (dqY2DC factors) + 15 * fromIntegral (dqY2AC factors)
-                    1 -> fromIntegral (dqY2DC factors) + 15 * fromIntegral (dqY2AC factors)
-                    2 -> fromIntegral (dqUVDC factors) + 15 * fromIntegral (dqUVAC factors)
-                    _ -> fromIntegral (dqYDC factors) + 15 * fromIntegral (dqYAC factors)
-               in (sumQ + 8) `div` 16 :: Int64
+      !avgQ =
+        let !sumQ = case blockType of
+              0 -> fromIntegral (dqY2DC factors) + 15 * fromIntegral (dqY2AC factors)
+              1 -> fromIntegral (dqY2DC factors) + 15 * fromIntegral (dqY2AC factors)
+              2 -> fromIntegral (dqUVDC factors) + 15 * fromIntegral (dqUVAC factors)
+              _ -> fromIntegral (dqYDC factors) + 15 * fromIntegral (dqYAC factors)
+         in (sumQ + 8) `div` 16 :: Int64
       -- Block-type-specific trellis lambda (from libwebp's SetSegmentParams).
       -- Controls rate-vs-distortion tradeoff in coefficient level selection.
-      !tlamBase = max 1 (case blockType of
-        0 -> avgQ * avgQ `div` 4       -- I16 Y-AC: Q²/4
-        1 -> avgQ * avgQ `div` 4       -- I16 Y2:   Q²/4
-        2 -> 2 * avgQ * avgQ           -- UV:       2*Q²
-        _ -> 7 * avgQ * avgQ `div` 8)  -- I4 Y:     7*Q²/8
-      -- Activity masking: scale lambda by per-MB spatial activity. Flat MBs
-      -- get lower lambda (favor keeping coefficients — errors are visible),
-      -- textured MBs get higher lambda (favor dropping coefficients — errors
-      -- are masked by the texture). Matches the RDO lambda modulation done
-      -- in Encode.encodeMacroblocks.
+      !tlamBase =
+        max
+          1
+          ( case blockType of
+              0 -> avgQ * avgQ `div` 4 -- I16 Y-AC: Q²/4
+              1 -> avgQ * avgQ `div` 4 -- I16 Y2:   Q²/4
+              2 -> 2 * avgQ * avgQ -- UV:       2*Q²
+              _ -> 7 * avgQ * avgQ `div` 8 -- I4 Y:     7*Q²/8
+              -- Activity masking: scale lambda by per-MB spatial activity. Flat MBs
+              -- get lower lambda (favor keeping coefficients — errors are visible),
+              -- textured MBs get higher lambda (favor dropping coefficients — errors
+              -- are masked by the texture). Matches the RDO lambda modulation done
+              -- in Encode.encodeMacroblocks.
+          )
+
       !tlam = max 1 ((tlamBase * fromIntegral activityScale) `div` 256)
       -- SSIM distortion scale (replaces fixed RD_DISTO_MULT = 256)
       !ssI64 = fromIntegral ssimScale :: Int64
@@ -398,9 +442,10 @@ trellisQuantizeBlock !factors !blockType !coeffs !coeffProbs !initialCtx !startP
       -- Initial predecessor: virtual node before startPos.
       -- When initialCtx=0, the not-EOB cost at startPos is omitted by trellisLevelCost,
       -- so we must add it to the starting score. For initialCtx>0 it's already included.
-      let !initScore = if initialCtx == 0
-            then tlam * fromIntegral (branchCost (coeffProbs VU.! startPI) True)
-            else 0 :: Int64
+      let !initScore =
+            if initialCtx == 0
+              then tlam * fromIntegral (branchCost (coeffProbs VU.! startPI) True)
+              else 0 :: Int64
 
       -- Phase 3: Forward Viterbi pass
       -- State: (score, context) for each of 3 candidates at previous position.

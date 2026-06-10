@@ -181,7 +181,7 @@ makeTruncatedVP8L =
 
 makeInvalidVP8LSignature :: B.ByteString
 makeInvalidVP8LSignature =
-  let header = B.pack [82, 73, 70, 70, 20, 0, 0, 0, 87, 69, 66, 80]
+  let header = B.pack [82, 73, 70, 70, 22, 0, 0, 0, 87, 69, 66, 80]
       fourCC = B.pack [86, 80, 56, 76]
       size = word32ToBytes 10
       invalidData = B.pack $ 0xFF : replicate 9 0x00 -- Invalid signature
@@ -189,7 +189,7 @@ makeInvalidVP8LSignature =
 
 makeVP8LWithInvalidDimensions :: B.ByteString
 makeVP8LWithInvalidDimensions =
-  let header = B.pack [82, 73, 70, 70, 20, 0, 0, 0, 87, 69, 66, 80]
+  let header = B.pack [82, 73, 70, 70, 22, 0, 0, 0, 87, 69, 66, 80]
       fourCC = B.pack [86, 80, 56, 76]
       size = word32ToBytes 10
       -- Valid signature but dimensions that would cause overflow

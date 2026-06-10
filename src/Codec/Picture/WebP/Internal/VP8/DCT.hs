@@ -92,9 +92,11 @@ fdctColumn residuals col = do
   -- DC and AC2 divided by 16 (row was *8, so net /2 for DC)
   let o0 = (a0 + a1 + 7) `shiftR` 4
       o2 = (a0 - a1 + 7) `shiftR` 4
-      -- AC1 and AC3 with rotated basis and bias, divided by 65536
+      -- AC1 and AC3 with rotated basis and bias, divided by 65536.
+      -- Per libwebp's FTransform_C, only out[4..7] carries the (a3 != 0)
+      -- correction; out[12..15] has no such term.
       o1 = ((a2 * fdctC1 + a3 * fdctC2 + 12000) `shiftR` 16) + (if a3 /= 0 then 1 else 0)
-      o3 = ((a3 * fdctC1 - a2 * fdctC2 + 51000) `shiftR` 16) - (if a2 /= 0 then 1 else 0)
+      o3 = (a3 * fdctC1 - a2 * fdctC2 + 51000) `shiftR` 16
 
   VSM.write residuals (0 * 4 + col) (fromIntegral o0)
   VSM.write residuals (1 * 4 + col) (fromIntegral o1)
@@ -104,12 +106,15 @@ fdctColumn residuals col = do
 -- | Forward Walsh-Hadamard Transform for Y2 DC block
 -- Input: 16 DC values from the 16 Y blocks (in 4x4 arrangement)
 -- Output: Transformed Y2 coefficients
--- Based on libwebp's FTransformWHT: columns first (scale by 1/2), then rows (no scale)
--- This is the transpose of the inverse (which does rows then columns)
+-- Based on libwebp's FTransformWHT_C: full precision through both passes,
+-- with a single >>1 scaling at the end of the second pass. (libwebp does
+-- rows then columns; pass order is irrelevant here because the arithmetic
+-- is exact until the final shift. Inputs are 12-bit, so the unshifted
+-- first-pass values are 14-bit and fit in Int16.)
 {-# INLINE fwht4x4 #-}
 fwht4x4 :: VSM.MVector s Int16 -> ST s ()
 fwht4x4 dcs = do
-  -- Forward WHT: columns first (with 1/2 scale), then rows
+  -- Forward WHT: columns first (no scale), then rows (with final 1/2 scale)
   fwhtColumn dcs 0
   fwhtColumn dcs 1
   fwhtColumn dcs 2
@@ -120,8 +125,8 @@ fwht4x4 dcs = do
   fwhtRow dcs 2
   fwhtRow dcs 3
 
--- | Forward WHT column transformation (with 1/2 scaling)
--- First pass - matches libwebp's FTransformWHT column loop
+-- | Forward WHT column transformation (no scaling)
+-- First pass - matches libwebp's FTransformWHT_C first loop (full precision)
 {-# INLINE fwhtColumn #-}
 fwhtColumn :: VSM.MVector s Int16 -> Int -> ST s ()
 fwhtColumn dcs col = do
@@ -136,19 +141,20 @@ fwhtColumn dcs col = do
       c = i1 - i2
       d = i0 - i3
 
-      -- Divide by 2 (scale factor for forward transform)
-      o0 = (a + b) `shiftR` 1
-      o1 = (c + d) `shiftR` 1
-      o2 = (a - b) `shiftR` 1
-      o3 = (d - c) `shiftR` 1
+      -- No scaling in the first pass (full precision; shift happens once
+      -- at the end of the second pass, as in libwebp)
+      o0 = a + b
+      o1 = c + d
+      o2 = a - b
+      o3 = d - c
 
   VSM.write dcs (0 * 4 + col) (fromIntegral o0)
   VSM.write dcs (1 * 4 + col) (fromIntegral o1)
   VSM.write dcs (2 * 4 + col) (fromIntegral o2)
   VSM.write dcs (3 * 4 + col) (fromIntegral o3)
 
--- | Forward WHT row transformation (no scaling)
--- Second pass - matches libwebp's FTransformWHT row loop
+-- | Forward WHT row transformation (with final 1/2 scaling)
+-- Second pass - matches libwebp's FTransformWHT_C second loop
 {-# INLINE fwhtRow #-}
 fwhtRow :: VSM.MVector s Int16 -> Int -> ST s ()
 fwhtRow dcs row = do
@@ -163,11 +169,11 @@ fwhtRow dcs row = do
       c = i1 - i2
       d = i0 - i3
 
-      -- No scaling in row pass
-      o0 = a + b
-      o1 = c + d
-      o2 = a - b
-      o3 = d - c
+      -- Single 1/2 scaling at the end (libwebp: out[i] = b >> 1)
+      o0 = (a + b) `shiftR` 1
+      o1 = (c + d) `shiftR` 1
+      o2 = (a - b) `shiftR` 1
+      o3 = (d - c) `shiftR` 1
 
   VSM.write dcs (row * 4 + 0) (fromIntegral o0)
   VSM.write dcs (row * 4 + 1) (fromIntegral o1)

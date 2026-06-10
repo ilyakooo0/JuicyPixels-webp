@@ -48,11 +48,13 @@ writeBit bit (BitWriter builder buffer count) =
 -- Optimized to batch bits into the buffer when possible
 {-# INLINE writeBits #-}
 writeBits :: Int -> Word64 -> BitWriter -> BitWriter
-writeBits !n !value (BitWriter builder buffer count)
+writeBits !n !rawValue (BitWriter builder buffer count)
   | n <= 0 = BitWriter builder buffer count
   | otherwise =
-      -- Calculate how many bits we can fit in current buffer before needing to flush
-      let !remaining = 64 - count -- bits remaining in buffer
+      -- Mask to n bits so stray high bits cannot corrupt the stream
+      let !value = rawValue .&. ((1 `shiftL` n) - 1)
+          -- Calculate how many bits we can fit in current buffer before needing to flush
+          !remaining = 64 - count -- bits remaining in buffer
        in if n <= remaining
             then
               -- Fast path: all bits fit without flushing
